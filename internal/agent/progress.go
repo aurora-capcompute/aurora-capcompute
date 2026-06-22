@@ -7,36 +7,47 @@ import (
 	"fmt"
 )
 
-type progressRouter struct {
-	next    dispatcher.Dispatcher[RunContext]
-	runtime *Runtime
+type progressDispatcher struct {
+	next     dispatcher.Dispatcher[RunContext]
+	publish  func(threadID string, event Event)
+	threadID string
+	runID    string
 }
 
 type progressArgs struct {
 	Message string `json:"message"`
 }
 
-func (r *progressRouter) Dispatch(ctx context.Context, key RunContext, call dispatcher.Call) (dispatcher.Outcome, error) {
+func newProgressDispatcher(next dispatcher.Dispatcher[RunContext], publish func(string, Event), threadID, runID string) *progressDispatcher {
+	return &progressDispatcher{next: next, publish: publish, threadID: threadID, runID: runID}
+}
+
+func (d *progressDispatcher) Dispatch(ctx context.Context, key RunContext, call dispatcher.Call) (dispatcher.Outcome, error) {
 	if call.Name == "aurora.log" {
-		return r.log(key, call)
+		var args progressArgs
+		if err := json.Unmarshal(call.Args, &args); err != nil {
+			return dispatcher.Failed(fmt.Sprintf("decode aurora.log: %v", err)), nil
+		}
+		d.publish(d.threadID, Event{
+			Type: "progress",
+			Data: ProgressEvent{RunID: d.runID, Message: args.Message},
+		})
+		return dispatcher.Result(json.RawMessage(`{}`)), nil
 	}
-	return r.next.Dispatch(ctx, key, call)
+	return d.next.Dispatch(ctx, key, call)
 }
 
-func (r *progressRouter) log(key RunContext, call dispatcher.Call) (dispatcher.Outcome, error) {
-	var args progressArgs
-	if err := json.Unmarshal(call.Args, &args); err != nil {
-		return dispatcher.Failed(fmt.Sprintf("decode aurora.log: %v", err)), nil
-	}
-	r.runtime.publish(key.ThreadID, Event{
-		Type: "progress",
-		Data: ProgressEvent{RunID: key.RunID, Message: args.Message},
-	})
-	return dispatcher.Result(json.RawMessage(`{}`)), nil
+func (d *progressDispatcher) Capabilities() []dispatcher.Capability {
+	return dispatcher.Capabilities(d.next)
 }
 
-func (r *progressRouter) Capabilities() []dispatcher.Capability {
-	return dispatcher.Capabilities(r.next)
+func hasCapability(manifest Manifest, name string) bool {
+	for _, cap := range manifest.Capabilities {
+		if cap.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 type ProgressEvent struct {

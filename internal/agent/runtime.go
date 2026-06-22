@@ -305,7 +305,10 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 			if err != nil {
 				return nil, err
 			}
-			var d dispatcher.Dispatcher[RunKey] = &progressRouter{next: base, runtime: runtime}
+			var d dispatcher.Dispatcher[RunKey] = base
+			if hasCapability(manifest, "aurora.log") {
+				d = newProgressDispatcher(d, runtime.publish, key.ThreadID, key.RunID)
+			}
 			if len(manifest.Children) > 0 {
 				d = newDelegationRouter(d, manifest.Children, runtime, depth)
 			}
