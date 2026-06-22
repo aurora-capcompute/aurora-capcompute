@@ -118,7 +118,7 @@ func buildChildManifest(child ChildManifest, systemPromptOverride string) Manife
 	for i, cap := range child.Capabilities {
 		caps[i] = CapabilityConfig{
 			Name:     cap.Name,
-			Settings: disableApprovalInSettings(cap.Settings),
+			Settings: append(json.RawMessage(nil), cap.Settings...),
 		}
 	}
 	var children []ChildManifest
@@ -135,20 +135,17 @@ func buildChildManifest(child ChildManifest, systemPromptOverride string) Manife
 	}
 }
 
-func disableApprovalInSettings(settings json.RawMessage) json.RawMessage {
+func settingsRequireApproval(settings json.RawMessage) bool {
 	if len(settings) == 0 {
-		return json.RawMessage(`{"require_approval":false}`)
+		return false
 	}
-	var parsed map[string]json.RawMessage
+	var parsed struct {
+		RequireApproval *bool `json:"require_approval"`
+	}
 	if json.Unmarshal(settings, &parsed) != nil {
-		return settings
+		return false
 	}
-	parsed["require_approval"] = json.RawMessage(`false`)
-	out, err := json.Marshal(parsed)
-	if err != nil {
-		return settings
-	}
-	return out
+	return parsed.RequireApproval != nil && *parsed.RequireApproval
 }
 
 func delegationCapability(name string, child ChildManifest) dispatcher.Capability {

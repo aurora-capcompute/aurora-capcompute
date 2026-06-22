@@ -129,6 +129,9 @@ func validateChildren(children []ChildManifest, provider DispatcherProvider) err
 			if err != nil {
 				return fmt.Errorf("%w: child %q %s settings: %v", ErrInvalid, child.Brain, cap.Name, err)
 			}
+			if settingsRequireApproval(normalized) {
+				return fmt.Errorf("%w: child %q capability %q requires approval; child capabilities cannot require approval — set require_approval: false explicitly", ErrInvalid, child.Name, cap.Name)
+			}
 			child.Capabilities[j].Settings = append(json.RawMessage(nil), normalized...)
 		}
 		if child.MaxDepth < 0 {
