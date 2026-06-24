@@ -968,13 +968,10 @@ func (r *Runtime) finish(runID string, status RunStatus, answer string, err erro
 	r.finishLocked(run, status, answer, err)
 	_ = r.stateStore.SaveRun(context.Background(), r.storedRunLocked(run))
 	if thread := r.threads[run.threadID]; thread != nil {
+		// Conversation history is no longer persisted separately; it is derived
+		// from the thread's completed runs (each run stores its message + answer)
+		// and rebuilt on recovery.
 		_ = r.stateStore.SaveThread(context.Background(), r.storedThreadLocked(thread))
-		if status == RunCompleted {
-			_ = r.stateStore.AppendMessages(context.Background(), r.tenantID, thread.id, []HistoryMessage{
-				{Role: "user", Content: run.message},
-				{Role: "assistant", Content: answer},
-			})
-		}
 	}
 	snapshot := r.runSnapshotLocked(run)
 	threadID := run.threadID
@@ -1166,19 +1163,9 @@ func (r *Runtime) restore(ctx context.Context) error {
 		}
 		r.threads[thread.id] = thread
 	}
-	sort.Slice(state.Messages, func(i, j int) bool {
-		if state.Messages[i].ThreadID == state.Messages[j].ThreadID {
-			return state.Messages[i].Position < state.Messages[j].Position
-		}
-		return state.Messages[i].ThreadID < state.Messages[j].ThreadID
-	})
-	for _, stored := range state.Messages {
-		if thread := r.threads[stored.ThreadID]; thread != nil {
-			thread.history = append(thread.history, HistoryMessage{
-				Role: stored.Role, Content: stored.Content,
-			})
-		}
-	}
+	// Conversation history is derived from completed runs (each stores its
+	// message + answer), accumulated below in run order, rather than loaded from a
+	// separate message store.
 	sort.Slice(state.Runs, func(i, j int) bool {
 		return state.Runs[i].CreatedAt.Before(state.Runs[j].CreatedAt)
 	})
@@ -1234,6 +1221,12 @@ func (r *Runtime) restore(ctx context.Context) error {
 		if thread := r.threads[run.threadID]; thread != nil {
 			run.history = append([]HistoryMessage(nil), thread.history...)
 			thread.runIDs = append(thread.runIDs, run.id)
+			if run.status == RunCompleted {
+				thread.history = append(thread.history,
+					HistoryMessage{Role: "user", Content: run.message},
+					HistoryMessage{Role: "assistant", Content: run.answer},
+				)
+			}
 		}
 		if status != stored.Status {
 			if err := r.stateStore.SaveRun(ctx, r.storedRunLocked(run)); err != nil {
