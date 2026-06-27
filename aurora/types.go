@@ -4,7 +4,7 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/eventlog"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/task"
-	"github.com/aurora-capcompute/aurora-dispatchers/resolution"
+	"github.com/aurora-capcompute/capcompute/resolution"
 )
 
 // DTOs

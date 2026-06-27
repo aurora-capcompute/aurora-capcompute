@@ -21,7 +21,7 @@ import (
 	"fmt"
 	"time"
 
-	resolutionpkg "github.com/aurora-capcompute/aurora-dispatchers/resolution"
+	resolutionpkg "github.com/aurora-capcompute/capcompute/resolution"
 )
 
 type Scope struct {
