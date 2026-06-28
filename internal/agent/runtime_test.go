@@ -97,8 +97,7 @@ func (s *runtimeStore) seed(t StoredThread, runs ...StoredRun) {
 }
 
 // minRev2Index returns the lowest journal position that has a revision-2 entry,
-// or -1 if none. This verifies that a hard retry shared a prefix with revision 1
-// (i.e. the fork index > 0) without relying on an explicit fork event.
+// or -1 if none.
 func (s *runtimeStore) minRev2Index(runID string) int {
 	streams, _ := s.log.Streams(context.Background(), "local")
 	min := -1
@@ -731,7 +730,7 @@ func (d *failThenSucceedDispatcher) Dispatch(_ context.Context, _ RunContext, ca
 	}
 }
 
-func TestRuntimeHardRetryForksFromFailurePoint(t *testing.T) {
+func TestRuntimeHardRetryForksFromBeginning(t *testing.T) {
 	if _, err := exec.LookPath("tinygo"); err != nil {
 		t.Skip("tinygo not found")
 	}
@@ -776,8 +775,7 @@ func TestRuntimeHardRetryForksFromFailurePoint(t *testing.T) {
 		t.Fatal("expected a failure error")
 	}
 
-	// Hard retry must fork from the failure point over a shared copy-on-write
-	// prefix, not re-run from scratch.
+	// Hard retry always forks from the beginning (agent.input step, no shared prefix).
 	if _, err := runtime.Retry(run.ID, RetryRestart, nil); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
@@ -798,11 +796,14 @@ func TestRuntimeHardRetryForksFromFailurePoint(t *testing.T) {
 	if gr.CurrentRevision != 2 {
 		t.Fatalf("current revision = %d, want 2", gr.CurrentRevision)
 	}
+	// Hard restart forks from position 0: revision 2 must start at index 0.
 	forkIdx := store.minRev2Index(gr.RunID)
-	if forkIdx <= 0 {
-		t.Fatalf("fork index = %d, want > 0 (hard retry must share the pre-failure prefix)", forkIdx)
+	if forkIdx != 0 {
+		t.Fatalf("fork index = %d, want 0 (hard retry always restarts from the beginning)", forkIdx)
 	}
-	rev1Count, rev2Count := 0, 0
+	// Both revisions should have entries (old run is preserved in the log; new run
+	// re-ran everything from scratch).
+	var rev1Count, rev2Count int
 	for _, e := range gr.Entries {
 		switch e.Revision {
 		case 1:
@@ -811,7 +812,10 @@ func TestRuntimeHardRetryForksFromFailurePoint(t *testing.T) {
 			rev2Count++
 		}
 	}
-	if rev1Count == 0 || rev2Count == 0 {
-		t.Fatalf("expected entries from both revisions, got rev1=%d rev2=%d", rev1Count, rev2Count)
+	if rev1Count == 0 {
+		t.Fatal("expected revision-1 entries in graph (first run preserved in log)")
+	}
+	if rev2Count == 0 {
+		t.Fatal("expected revision-2 entries in graph (hard retry re-ran from the beginning)")
 	}
 }
