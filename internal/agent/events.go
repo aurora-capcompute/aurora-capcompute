@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -54,11 +55,27 @@ func taskExecutedEvent(now time.Time, processID string, rev uint64, taskID strin
 }
 
 func encodeEvent(kind, proc string, rev uint64, now time.Time, payload any) (eventlog.Event, error) {
-	data, err := json.Marshal(payload)
+	data, err := marshalVerbatim(payload)
 	if err != nil {
 		return eventlog.Event{}, fmt.Errorf("encode %s event: %w", kind, err)
 	}
 	return eventlog.Event{Kind: kind, Time: now.UTC(), Proc: proc, Rev: rev, Data: data}, nil
+}
+
+// marshalVerbatim encodes without HTML escaping, so json.RawMessage payloads
+// (journaled syscall args and results, task syscalls) round-trip through the
+// event log byte-identically. json.Marshal would rewrite <, >, and & to
+// \u003c-style escapes inside raw messages; a restored journal would then
+// hold different bytes than the guest re-issues, and replay would refuse its
+// own history as a divergence.
+func marshalVerbatim(payload any) (json.RawMessage, error) {
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(payload); err != nil {
+		return nil, err
+	}
+	return json.RawMessage(bytes.TrimRight(buf.Bytes(), "\n")), nil
 }
 
 // Projection is the durable state folded from a session's event stream: the same

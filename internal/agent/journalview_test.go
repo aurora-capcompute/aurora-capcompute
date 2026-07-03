@@ -70,6 +70,47 @@ func TestLogJournalLinearRoundTrip(t *testing.T) {
 	}
 }
 
+// Syscall args and results must round-trip through the event log
+// byte-identically — including <, >, and &, which encoding/json would rewrite
+// to <-style escapes inside raw messages. A restored journal holding
+// different bytes than the guest re-issues would refuse its own history as a
+// replay divergence.
+func TestLogJournalRoundTripsHTMLCharactersVerbatim(t *testing.T) {
+	log := newMemLog()
+	scope := eventlog.Scope{TenantID: "t", SessionID: "th"}
+	now := func() time.Time { return time.Unix(0, 0).UTC() }
+	j := newLogJournal(log, scope, "run1", 1, newProcessHistory(), 0, now, nil)
+
+	args := []byte(`{"prompt":"reply with <exact tool name> & schema"}`)
+	syscall := sys.Syscall{Abi: sys.ABIVersion, Name: "openai.chat", Args: append([]byte(nil), args...)}
+	result := sys.Result([]byte(`{"text":"<done> & gone"}`))
+	appendPair(t, j, syscall, result)
+
+	events, _ := log.Read(context.Background(), scope, 0)
+	journals, _, err := foldJournals(events, log, scope, now, nil)
+	if err != nil {
+		t.Fatalf("fold journals: %v", err)
+	}
+	rebuilt := journals["run1"][1]
+	intent, err := rebuilt.Load(0)
+	if err != nil || intent.Syscall == nil {
+		t.Fatalf("load intent: %+v, %v", intent, err)
+	}
+	if string(intent.Syscall.Args) != string(args) {
+		t.Fatalf("restored args = %s, want %s", intent.Syscall.Args, args)
+	}
+	completion, err := rebuilt.Load(1)
+	if err != nil || completion.Result == nil {
+		t.Fatalf("load completion: %+v, %v", completion, err)
+	}
+	if string(completion.Result.Result()) != `{"text":"<done> & gone"}` {
+		t.Fatalf("restored result = %s", completion.Result.Result())
+	}
+	if err := journaled.Verify(rebuilt); err != nil {
+		t.Fatalf("verify rebuilt: %v", err)
+	}
+}
+
 func TestLogJournalForkSharesPrefixThenDiverges(t *testing.T) {
 	log := newMemLog()
 	scope := eventlog.Scope{TenantID: "t", SessionID: "th"}
