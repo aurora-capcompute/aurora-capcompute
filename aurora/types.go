@@ -15,20 +15,20 @@ import (
 type Manifest = agent.Manifest
 type Tool = agent.Tool
 type AgentSettings = agent.AgentSettings
-type ThreadSummary = agent.ThreadSummary
-type ThreadSnapshot = agent.ThreadSnapshot
+type SessionSummary = agent.SessionSummary
+type SessionSnapshot = agent.SessionSnapshot
 type HistoryMessage = agent.HistoryMessage
 type RunSnapshot = agent.RunSnapshot
 type TaskSnapshot = agent.TaskSnapshot
 type JournalEntry = agent.JournalEntry
 type JournalOutcome = agent.JournalOutcome
 type RunGraphNode = agent.RunGraphNode
-type ThreadGraph = agent.ThreadGraph
-type ThreadGraphRun = agent.ThreadGraphRun
+type SessionGraph = agent.SessionGraph
+type SessionGraphRun = agent.SessionGraphRun
 type Event = agent.Event
 type JournalEvent = agent.JournalEvent
 type ProgressEvent = agent.ProgressEvent
-type BrainArtifact = agent.BrainArtifact
+type ProgramArtifact = agent.ProgramArtifact
 
 // Status types
 
@@ -56,13 +56,13 @@ const (
 // Construction
 
 type Config = agent.Config
-type BrainSource = agent.BrainSource
-type BrainProvider = agent.BrainProvider
+type ProgramSource = agent.ProgramSource
+type ProgramProvider = agent.ProgramProvider
 type DispatcherProvider = agent.DispatcherProvider
 
 // Event log: the single append-only source of truth. Applications provide an
 // EventLog implementation (and a Leases implementation for cross-instance
-// coordination); the runtime folds the log into thread/run/task projections.
+// coordination); the runtime folds the log into session/run/task projections.
 // This module ships the interfaces only — concrete stores (in-memory, SQLite)
 // are assembly ingredients that live in their own modules.
 
@@ -115,7 +115,7 @@ var (
 
 const (
 	DefaultTenantID    = agent.DefaultTenantID
-	DefaultBrainID     = agent.DefaultBrainID
+	DefaultProgramID   = agent.DefaultProgramID
 	ManifestVersion    = agent.ManifestVersion
 	AgentToolType      = agent.AgentToolType
 	OnFailureReport    = agent.OnFailureReport

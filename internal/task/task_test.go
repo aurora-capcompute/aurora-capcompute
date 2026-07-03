@@ -161,7 +161,7 @@ func TestDispatcherPersistsAndResumesYieldedTask(t *testing.T) {
 	store := newTaskStore()
 	journal := &journal{}
 	next := &approvalDispatcher{}
-	scope := task.Scope{TenantID: "tenant", ThreadID: "thread", RunID: "run", Revision: 1}
+	scope := task.Scope{TenantID: "tenant", SessionID: "session", RunID: "run", Revision: 1}
 	secret := []byte("test-secret")
 	header := journaled.Header{ABI: sys.ABIVersion, Program: "prog", Run: "run"}
 	build := func() sys.Dispatcher[run] {
@@ -234,7 +234,7 @@ func TestDispatcherDeniedTask(t *testing.T) {
 	store := newTaskStore()
 	journal := &journal{}
 	next := &approvalDispatcher{}
-	scope := task.Scope{TenantID: "tenant", ThreadID: "thread", RunID: "run", Revision: 1}
+	scope := task.Scope{TenantID: "tenant", SessionID: "session", RunID: "run", Revision: 1}
 	secret := []byte("test-secret")
 	header := journaled.Header{ABI: sys.ABIVersion, Program: "prog", Run: "run"}
 	build := func() sys.Dispatcher[run] {

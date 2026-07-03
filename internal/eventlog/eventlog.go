@@ -1,9 +1,9 @@
 // Package eventlog is a generic append-only log: the single source of truth a
 // runtime folds into projections. It is domain-agnostic — events carry an opaque
 // payload owned by the layer above — so the same primitive backs lifecycle,
-// task, and capability-journal events for one thread stream.
+// task, and capability-journal events for one session stream.
 //
-// A stream is one thread's ordered history, identified by Scope. The store
+// A stream is one session's ordered history, identified by Scope. The store
 // assigns each appended event a contiguous sequence and serializes appends per
 // stream; cross-instance coordination is handled separately by leases, so the
 // log itself needs no optimistic-concurrency guard. State is reconstructed by
@@ -17,16 +17,16 @@ import (
 	"time"
 )
 
-// Scope identifies one append-only stream — one thread's history.
+// Scope identifies one append-only stream — one session's history.
 type Scope struct {
-	TenantID string
-	ThreadID string
+	TenantID  string
+	SessionID string
 }
 
 // Event is one immutable record in a stream. Seq is assigned by the log on
 // append (1-based, contiguous per stream). Kind and Data are owned by the domain
 // layer; Run and Rev locate the event within a run's revision when applicable
-// (zero for thread-level events).
+// (zero for session-level events).
 type Event struct {
 	Seq  uint64          `json:"seq"`
 	Kind string          `json:"kind"`
@@ -46,6 +46,6 @@ type Log interface {
 	// reads from the beginning.
 	Read(ctx context.Context, scope Scope, after uint64) ([]Event, error)
 	// Streams lists the scopes that have at least one event for a tenant, so a
-	// runtime can enumerate threads to fold on restore.
+	// runtime can enumerate sessions to fold on restore.
 	Streams(ctx context.Context, tenantID string) ([]Scope, error)
 }

@@ -329,7 +329,7 @@ func (j *logJournal) syscallNameLocked(rec journaled.Record) string {
 // offset (one past that begin's completion record, so the marker itself is
 // replayed from history and its whole body re-executes live) and true when
 // such an open begin exists. The outermost still-open begin is the unit the
-// brain was inside when it failed; forking there re-runs the whole declared
+// program was inside when it failed; forking there re-runs the whole declared
 // unit. With no open begin it returns false and the caller keeps the default
 // (replay everything, including recorded soft failures).
 func (j *logJournal) outermostOpenBegin() (int, bool) {
@@ -424,7 +424,7 @@ func encodeOutcome(result sys.SyscallResult) JournalOutcome {
 	}
 }
 
-// foldJournals rebuilds every revision's journal for a thread stream from its
+// foldJournals rebuilds every revision's journal for a session stream from its
 // syscall.recorded and journal.header events. Revisions are linked to a shared
 // runHistory so forked journals can serve the shared prefix without
 // parent-pointer chains. It returns both the journals and the per-run

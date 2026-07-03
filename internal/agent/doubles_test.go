@@ -74,7 +74,7 @@ func (m *memLog) Streams(_ context.Context, tenantID string) ([]eventlog.Scope, 
 			out = append(out, scope)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ThreadID < out[j].ThreadID })
+	sort.Slice(out, func(i, j int) bool { return out[i].SessionID < out[j].SessionID })
 	return out, nil
 }
 

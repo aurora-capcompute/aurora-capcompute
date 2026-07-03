@@ -11,11 +11,11 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/internal/eventlog"
 )
 
-// ThreadGraphRun is a run within a thread graph: its metadata and the flat
+// SessionGraphRun is a run within a session graph: its metadata and the flat
 // journal of every syscall entry ever written, across all revisions. The fork
 // structure is derivable from duplicate positions with different revision
 // numbers.
-type ThreadGraphRun struct {
+type SessionGraphRun struct {
 	RunID           string         `json:"run_id"`
 	Message         string         `json:"message"`
 	ParentRunID     string         `json:"parent_run_id,omitempty"`
@@ -28,26 +28,26 @@ type ThreadGraphRun struct {
 	Entries         []JournalEntry `json:"entries"`
 }
 
-// ThreadGraph projects a whole thread for exploration: its runs in order, each
+// SessionGraph projects a whole session for exploration: its runs in order, each
 // with its complete flat entry history across all revisions.
-type ThreadGraph struct {
-	ThreadID string           `json:"thread_id"`
-	Title    string           `json:"title"`
-	Runs     []ThreadGraphRun `json:"runs"`
+type SessionGraph struct {
+	SessionID string            `json:"session_id"`
+	Title     string            `json:"title"`
+	Runs      []SessionGraphRun `json:"runs"`
 }
 
-// ThreadGraph builds the execution graph of a thread by reading each run's
+// SessionGraph builds the execution graph of a session by reading each run's
 // syscall.recorded events directly from the log, pairing intents with their
 // completions per revision. The flat entry list carries per-entry revision
 // numbers so the caller can reconstruct the fork graph.
-func (r *Runtime) ThreadGraph(threadID string) (ThreadGraph, error) {
+func (r *Runtime) SessionGraph(sessionID string) (SessionGraph, error) {
 	r.mu.Lock()
-	thread := r.threads[threadID]
-	if thread == nil {
+	session := r.sessions[sessionID]
+	if session == nil {
 		r.mu.Unlock()
-		return ThreadGraph{}, fmt.Errorf("%w: thread %s", ErrNotFound, threadID)
+		return SessionGraph{}, fmt.Errorf("%w: session %s", ErrNotFound, sessionID)
 	}
-	graph := ThreadGraph{ThreadID: thread.id, Title: thread.title}
+	graph := SessionGraph{SessionID: session.id, Title: session.title}
 	type runMeta struct {
 		id, message, parentRunID string
 		status                   RunStatus
@@ -56,8 +56,8 @@ func (r *Runtime) ThreadGraph(threadID string) (ThreadGraph, error) {
 		currentRevision          uint64
 		childRunIDs              []string
 	}
-	metas := make([]runMeta, 0, len(thread.runIDs))
-	for _, runID := range thread.runIDs {
+	metas := make([]runMeta, 0, len(session.runIDs))
+	for _, runID := range session.runIDs {
 		run := r.runs[runID]
 		if run == nil {
 			continue
@@ -73,9 +73,9 @@ func (r *Runtime) ThreadGraph(threadID string) (ThreadGraph, error) {
 	r.mu.Unlock()
 
 	ctx := context.Background()
-	events, err := r.log.Read(ctx, eventlog.Scope{TenantID: tenantID, ThreadID: threadID}, 0)
+	events, err := r.log.Read(ctx, eventlog.Scope{TenantID: tenantID, SessionID: sessionID}, 0)
 	if err != nil {
-		return ThreadGraph{}, err
+		return SessionGraph{}, err
 	}
 
 	// Pair each revision's intent records with their completions. Records
@@ -94,7 +94,7 @@ func (r *Runtime) ThreadGraph(threadID string) (ThreadGraph, error) {
 		}
 		var sd syscallRecordData
 		if err := json.Unmarshal(ev.Data, &sd); err != nil {
-			return ThreadGraph{}, fmt.Errorf("decode syscall.recorded: %w", err)
+			return SessionGraph{}, fmt.Errorf("decode syscall.recorded: %w", err)
 		}
 		if allEntries[ev.Run] == nil {
 			allEntries[ev.Run] = make(map[entryKey]JournalEntry)
@@ -134,7 +134,7 @@ func (r *Runtime) ThreadGraph(threadID string) (ThreadGraph, error) {
 			}
 			return entries[i].Revision < entries[j].Revision
 		})
-		graph.Runs = append(graph.Runs, ThreadGraphRun{
+		graph.Runs = append(graph.Runs, SessionGraphRun{
 			RunID:           meta.id,
 			Message:         meta.message,
 			ParentRunID:     meta.parentRunID,
@@ -153,16 +153,16 @@ func (r *Runtime) ThreadGraph(threadID string) (ThreadGraph, error) {
 // RunGraphNode is a node in the projected call graph: a run together with the
 // delegated child runs it spawned, in spawn order.
 type RunGraphNode struct {
-	RunID    string         `json:"run_id"`
-	Name     string         `json:"name,omitempty"`
-	ThreadID string         `json:"thread_id"`
-	ParentID string         `json:"parent_id,omitempty"`
-	Status   RunStatus      `json:"status"`
-	Attempt  int            `json:"attempt"`
-	Revision uint64         `json:"revision"`
-	Answer   string         `json:"answer,omitempty"`
-	Error    string         `json:"error,omitempty"`
-	Children []RunGraphNode `json:"children,omitempty"`
+	RunID     string         `json:"run_id"`
+	Name      string         `json:"name,omitempty"`
+	SessionID string         `json:"session_id"`
+	ParentID  string         `json:"parent_id,omitempty"`
+	Status    RunStatus      `json:"status"`
+	Attempt   int            `json:"attempt"`
+	Revision  uint64         `json:"revision"`
+	Answer    string         `json:"answer,omitempty"`
+	Error     string         `json:"error,omitempty"`
+	Children  []RunGraphNode `json:"children,omitempty"`
 }
 
 // CallGraph projects a run and its delegated child runs (recursively) into a
@@ -183,30 +183,30 @@ func (r *Runtime) callGraphLocked(runID string, visited map[string]bool) RunGrap
 	}
 	visited[runID] = true
 	node := RunGraphNode{
-		RunID:    run.id,
-		Name:     run.manifest.Name,
-		ThreadID: run.threadID,
-		ParentID: run.parentRunID,
-		Status:   run.status,
-		Attempt:  run.attempt,
-		Revision: run.revision,
-		Answer:   run.answer,
-		Error:    run.err,
+		RunID:     run.id,
+		Name:      run.manifest.Name,
+		SessionID: run.sessionID,
+		ParentID:  run.parentRunID,
+		Status:    run.status,
+		Attempt:   run.attempt,
+		Revision:  run.revision,
+		Answer:    run.answer,
+		Error:     run.err,
 	}
-	// Build a brain→name index from the parent's agent tools as a backfill: a
+	// Build a program→name index from the parent's agent tools as a backfill: a
 	// child run with an empty Name can infer it from the parent's `core.agent`
-	// tool whose brain (settings.code) matches.
-	childNameByBrain := make(map[string]string)
+	// tool whose program (settings.code) matches.
+	childNameByProgram := make(map[string]string)
 	for _, tool := range run.manifest.agentTools() {
-		if s, err := decodeAgentSettings(tool); err == nil && s.Code != "" && tool.Name != "" {
-			childNameByBrain[s.Code] = tool.Name
+		if s, err := decodeAgentSettings(tool); err == nil && s.Program != "" && tool.Name != "" {
+			childNameByProgram[s.Program] = tool.Name
 		}
 	}
 	for _, childID := range run.childRunIDs {
 		childNode := r.callGraphLocked(childID, visited)
 		if childNode.Name == "" {
 			if cr := r.runs[childID]; cr != nil {
-				childNode.Name = childNameByBrain[cr.manifest.Brain]
+				childNode.Name = childNameByProgram[cr.manifest.Program]
 			}
 		}
 		node.Children = append(node.Children, childNode)

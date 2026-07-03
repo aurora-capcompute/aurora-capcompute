@@ -90,12 +90,12 @@ func (s *runtimeStore) Release(_ context.Context, tenant, kind, resource, holder
 }
 
 // seed appends run.state events so the runtime folds them on restore.
-// Thread state is derived from the runs; no separate thread event is needed.
+// Session state is derived from the runs; no separate session event is needed.
 func (s *runtimeStore) seed(runs ...StoredRun) {
 	now := time.Now().UTC()
 	for _, r := range runs {
 		ev, _ := runStateEvent(now, r)
-		_, _ = s.log.Append(context.Background(), eventlog.Scope{TenantID: r.TenantID, ThreadID: r.ThreadID}, ev)
+		_, _ = s.log.Append(context.Background(), eventlog.Scope{TenantID: r.TenantID, SessionID: r.SessionID}, ev)
 	}
 }
 
@@ -124,9 +124,9 @@ func (s *runtimeStore) minRev2Index(runID string) int {
 func TestNewRuntimeRequiresImplementationDependencies(t *testing.T) {
 	store := newRuntimeStore()
 	dispatchers := &runtimeDispatchers{}
-	brains := staticBrains{defaultID: "brain@1", sources: []BrainSource{{ID: "brain@1", Wasm: []byte("wasm")}}}
+	programs := staticPrograms{defaultID: "program@1", sources: []ProgramSource{{ID: "program@1", Wasm: []byte("wasm")}}}
 	base := Config{
-		Brains: brains, Dispatchers: dispatchers, Log: store.log,
+		Programs: programs, Dispatchers: dispatchers, Log: store.log,
 		Leases: store, ProcessTable: newMemProcessTable(), TaskSecret: []byte("secret"),
 	}
 	tests := []struct {
@@ -168,9 +168,9 @@ func TestRuntimePassesManifestToDispatcherProvider(t *testing.T) {
 	dispatchers := &runtimeDispatchers{}
 	store := newRuntimeStore()
 	runtime, err := NewRuntime(context.Background(), Config{
-		Brains: staticBrains{
-			defaultID: "brain@1",
-			sources:   []BrainSource{{ID: "brain@1", Wasm: buildBrain(t)}},
+		Programs: staticPrograms{
+			defaultID: "program@1",
+			sources:   []ProgramSource{{ID: "program@1", Wasm: buildProgram(t)}},
 		},
 		Dispatchers:  dispatchers,
 		Log:          store.log,
@@ -189,11 +189,11 @@ func TestRuntimePassesManifestToDispatcherProvider(t *testing.T) {
 			t.Errorf("close runtime: %v", err)
 		}
 	})
-	thread, err := runtime.CreateThread(nil)
+	session, err := runtime.CreateSession(nil)
 	if err != nil {
-		t.Fatalf("create thread: %v", err)
+		t.Fatalf("create session: %v", err)
 	}
-	run, err := runtime.CreateRun(thread.ID, "finish", Manifest{
+	run, err := runtime.CreateRun(session.ID, "finish", Manifest{
 		Version: ManifestVersion,
 		Tools: []Tool{{
 			Name: "custom.call", Type: "core.custom", Settings: json.RawMessage(`{"value":2}`),
@@ -203,7 +203,7 @@ func TestRuntimePassesManifestToDispatcherProvider(t *testing.T) {
 		t.Fatalf("create run: %v", err)
 	}
 	waitForStatus(t, runtime, run.ID, RunCompleted)
-	// The brain brackets its one turn in a sys.begin/sys.commit savepoint, so
+	// The program brackets its one turn in a sys.begin/sys.commit savepoint, so
 	// the journal narrative is input → begin → chat → commit → finish.
 	names := journalNames(t, runtime, run.ID)
 	want := []string{callAgentInput, sys.SyscallBegin, "openai.chat", sys.SyscallCommit, callAgentFinish}
@@ -224,15 +224,15 @@ func TestRuntimePassesManifestToDispatcherProvider(t *testing.T) {
 	}
 }
 
-// TestRuntimeSetBrainsLifecycle boots with no brain (so brain runs fail), then
-// hot-registers a brain via SetBrains and drives a run through it, then removes
-// it — covering the control plane's live Brain CRD add/remove path.
-func TestRuntimeSetBrainsLifecycle(t *testing.T) {
-	wasm := buildBrain(t)
+// TestRuntimeSetProgramsLifecycle boots with no program (so program runs fail), then
+// hot-registers a program via SetPrograms and drives a run through it, then removes
+// it — covering the control plane's live Program CRD add/remove path.
+func TestRuntimeSetProgramsLifecycle(t *testing.T) {
+	wasm := buildProgram(t)
 	dispatchers := &runtimeDispatchers{}
 	store := newRuntimeStore()
 	runtime, err := NewRuntime(context.Background(), Config{
-		Brains:       nil, // boot with zero brains
+		Programs:     nil, // boot with zero programs
 		Dispatchers:  dispatchers,
 		Log:          store.log,
 		Leases:       store,
@@ -251,31 +251,31 @@ func TestRuntimeSetBrainsLifecycle(t *testing.T) {
 		}
 	})
 
-	if len(runtime.Brains()) != 0 {
-		t.Fatalf("expected no brains at boot, got %v", runtime.Brains())
+	if len(runtime.Programs()) != 0 {
+		t.Fatalf("expected no programs at boot, got %v", runtime.Programs())
 	}
-	emptyTh, err := runtime.CreateThread(nil)
+	emptyTh, err := runtime.CreateSession(nil)
 	if err != nil {
-		t.Fatalf("create thread (no brains): %v", err)
+		t.Fatalf("create session (no programs): %v", err)
 	}
 	if _, err := runtime.CreateRun(emptyTh.ID, "task", Manifest{Version: ManifestVersion}); err == nil {
-		t.Fatal("creating a run with no registered brain should fail")
+		t.Fatal("creating a run with no registered program should fail")
 	}
 
-	// Hot-register the brain.
-	if err := runtime.SetBrains(context.Background(), []BrainSource{{ID: "brain@1", Wasm: wasm}}); err != nil {
-		t.Fatalf("set brains: %v", err)
+	// Hot-register the program.
+	if err := runtime.SetPrograms(context.Background(), []ProgramSource{{ID: "program@1", Wasm: wasm}}); err != nil {
+		t.Fatalf("set programs: %v", err)
 	}
-	if got := runtime.Brains(); len(got) != 1 || got[0].ID != "brain@1" {
-		t.Fatalf("brains after register = %v", got)
+	if got := runtime.Programs(); len(got) != 1 || got[0].ID != "program@1" {
+		t.Fatalf("programs after register = %v", got)
 	}
 
-	// A run now dispatches through the freshly registered brain.
-	thread, err := runtime.CreateThread(nil)
+	// A run now dispatches through the freshly registered program.
+	session, err := runtime.CreateSession(nil)
 	if err != nil {
-		t.Fatalf("create thread: %v", err)
+		t.Fatalf("create session: %v", err)
 	}
-	run, err := runtime.CreateRun(thread.ID, "finish", Manifest{
+	run, err := runtime.CreateRun(session.ID, "finish", Manifest{
 		Version: ManifestVersion,
 		Tools:   []Tool{{Name: "custom.call", Type: "core.custom", Settings: json.RawMessage(`{"value":1}`)}},
 	})
@@ -285,26 +285,26 @@ func TestRuntimeSetBrainsLifecycle(t *testing.T) {
 	waitForStatus(t, runtime, run.ID, RunCompleted)
 
 	// Re-applying the same set is a no-op; removing it leaves an empty registry.
-	if err := runtime.SetBrains(context.Background(), []BrainSource{{ID: "brain@1", Wasm: wasm}}); err != nil {
+	if err := runtime.SetPrograms(context.Background(), []ProgramSource{{ID: "program@1", Wasm: wasm}}); err != nil {
 		t.Fatalf("re-apply: %v", err)
 	}
-	if len(runtime.Brains()) != 1 {
-		t.Fatalf("re-apply changed registry: %v", runtime.Brains())
+	if len(runtime.Programs()) != 1 {
+		t.Fatalf("re-apply changed registry: %v", runtime.Programs())
 	}
-	if err := runtime.SetBrains(context.Background(), nil); err != nil {
-		t.Fatalf("clear brains: %v", err)
+	if err := runtime.SetPrograms(context.Background(), nil); err != nil {
+		t.Fatalf("clear programs: %v", err)
 	}
-	if len(runtime.Brains()) != 0 {
-		t.Fatalf("expected empty registry after removal, got %v", runtime.Brains())
+	if len(runtime.Programs()) != 0 {
+		t.Fatalf("expected empty registry after removal, got %v", runtime.Programs())
 	}
 }
 
-func TestNewRuntimeRejectsInvalidBrainWasm(t *testing.T) {
+func TestNewRuntimeRejectsInvalidProgramWasm(t *testing.T) {
 	store := newRuntimeStore()
 	_, err := NewRuntime(context.Background(), Config{
-		Brains: staticBrains{
-			defaultID: "brain@1",
-			sources:   []BrainSource{{ID: "brain@1", Wasm: []byte("not wasm")}},
+		Programs: staticPrograms{
+			defaultID: "program@1",
+			sources:   []ProgramSource{{ID: "program@1", Wasm: []byte("not wasm")}},
 		},
 		Dispatchers:  &runtimeDispatchers{},
 		Log:          store.log,
@@ -313,7 +313,7 @@ func TestNewRuntimeRejectsInvalidBrainWasm(t *testing.T) {
 		TaskSecret:   []byte("stable-secret"),
 	})
 	if err == nil {
-		t.Fatal("expected brain compile error")
+		t.Fatal("expected program compile error")
 	}
 }
 
@@ -345,20 +345,20 @@ func sequentialIDs() func(string) (string, error) {
 }
 
 var (
-	brainOnce  sync.Once
-	brainWasm  []byte
-	brainError error
+	programOnce  sync.Once
+	programWasm  []byte
+	programError error
 )
 
-// buildBrain compiles the Rust agent brain from the sibling aurora-brains
+// buildProgram compiles the Rust agent program from the sibling aurora-brains
 // workspace to wasm32-wasip1 — the same artifact a real assembly deploys.
 // Tests that need a guest skip when the Rust toolchain is unavailable.
-func buildBrain(t *testing.T) []byte {
+func buildProgram(t *testing.T) []byte {
 	t.Helper()
 	if _, err := exec.LookPath("cargo"); err != nil {
 		t.Skip("cargo not found")
 	}
-	brainOnce.Do(func() {
+	programOnce.Do(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, "cargo", "build",
@@ -368,24 +368,24 @@ func buildBrain(t *testing.T) []byte {
 		)
 		cmd.Dir = "../../../aurora-brains"
 		if out, err := cmd.CombinedOutput(); err != nil {
-			brainError = fmt.Errorf("build brain: %v\n%s", err, out)
+			programError = fmt.Errorf("build program: %v\n%s", err, out)
 			return
 		}
 		wasmPath := filepath.Join(cmd.Dir, "target", "wasm32-wasip1", "release", "agent_brain.wasm")
 		raw, err := os.ReadFile(wasmPath)
 		if err != nil {
-			brainError = fmt.Errorf("read brain: %v", err)
+			programError = fmt.Errorf("read program: %v", err)
 			return
 		}
-		brainWasm = raw
+		programWasm = raw
 	})
-	if brainError != nil {
-		t.Skipf("agent brain unavailable: %v", brainError)
+	if programError != nil {
+		t.Skipf("agent program unavailable: %v", programError)
 	}
-	return brainWasm
+	return programWasm
 }
 
-// cascadeDispatchers drives a parent brain to delegate to a "child" once and
+// cascadeDispatchers drives a parent program to delegate to a "child" once and
 // then finish. The openai.chat fake decides what to emit by inspecting the
 // conversation: the child's own turn (whose user message is the delegated task)
 // finishes immediately; the parent's first turn delegates; its second turn (which
@@ -428,7 +428,7 @@ func (cascadeDispatcher) Dispatch(_ context.Context, _ RunContext, syscall sys.S
 	firstUser, laterUser := firstAndLaterUser(req.Messages)
 	switch {
 	case strings.Contains(firstUser, "do subtask"):
-		// This is the child brain (its run input is the delegation message).
+		// This is the child program (its run input is the delegation message).
 		return chatActions(`{"actions":[{"action":"final","content":{"answer":"child-done"}}]}`), nil
 	case laterUser:
 		// The parent already delegated and is now observing the child's result.
@@ -440,7 +440,7 @@ func (cascadeDispatcher) Dispatch(_ context.Context, _ RunContext, syscall sys.S
 
 // firstAndLaterUser returns the first user message (the run's input) and whether
 // any subsequent user message exists (a tool observation the guest appends as a
-// user-role message). Mock brains distinguish child from parent by their input
+// user-role message). Mock programs distinguish child from parent by their input
 // rather than by scanning every user message, whose content includes the echoed
 // delegation args.
 func firstAndLaterUser(messages []struct {
@@ -494,9 +494,9 @@ func runField(t *testing.T, r *Runtime, id string) (parentRunID string, attempt 
 func TestRuntimeCascadeResumeReusesChildRun(t *testing.T) {
 	store := newRuntimeStore()
 	runtime, err := NewRuntime(context.Background(), Config{
-		Brains: staticBrains{
-			defaultID: "brain@1",
-			sources:   []BrainSource{{ID: "brain@1", Wasm: buildBrain(t)}},
+		Programs: staticPrograms{
+			defaultID: "program@1",
+			sources:   []ProgramSource{{ID: "program@1", Wasm: buildProgram(t)}},
 		},
 		Dispatchers:  cascadeDispatchers{},
 		Log:          store.log,
@@ -516,14 +516,14 @@ func TestRuntimeCascadeResumeReusesChildRun(t *testing.T) {
 		}
 	})
 
-	thread, err := runtime.CreateThread(nil)
+	session, err := runtime.CreateSession(nil)
 	if err != nil {
-		t.Fatalf("create thread: %v", err)
+		t.Fatalf("create session: %v", err)
 	}
-	run, err := runtime.CreateRun(thread.ID, "parent task", Manifest{
+	run, err := runtime.CreateRun(session.ID, "parent task", Manifest{
 		Version: ManifestVersion,
-		Brain:   "brain@1",
-		Tools:   []Tool{{Name: "child", Type: AgentToolType, Settings: json.RawMessage(`{"code":"brain@1"}`)}},
+		Program: "program@1",
+		Tools:   []Tool{{Name: "child", Type: AgentToolType, Settings: json.RawMessage(`{"program":"program@1"}`)}},
 	})
 	if err != nil {
 		t.Fatalf("create run: %v", err)
@@ -628,9 +628,9 @@ func (approvalToolDispatcher) Dispatch(_ context.Context, _ RunContext, syscall 
 func TestRuntimeApprovalCycle(t *testing.T) {
 	store := newRuntimeStore()
 	runtime, err := NewRuntime(context.Background(), Config{
-		Brains: staticBrains{
-			defaultID: "brain@1",
-			sources:   []BrainSource{{ID: "brain@1", Wasm: buildBrain(t)}},
+		Programs: staticPrograms{
+			defaultID: "program@1",
+			sources:   []ProgramSource{{ID: "program@1", Wasm: buildProgram(t)}},
 		},
 		Dispatchers:  approvalDispatchers{},
 		Log:          store.log,
@@ -650,13 +650,13 @@ func TestRuntimeApprovalCycle(t *testing.T) {
 		}
 	})
 
-	thread, err := runtime.CreateThread(nil)
+	session, err := runtime.CreateSession(nil)
 	if err != nil {
-		t.Fatalf("create thread: %v", err)
+		t.Fatalf("create session: %v", err)
 	}
-	run, err := runtime.CreateRun(thread.ID, "do the guarded thing", Manifest{
+	run, err := runtime.CreateRun(session.ID, "do the guarded thing", Manifest{
 		Version: ManifestVersion,
-		Brain:   "brain@1",
+		Program: "program@1",
 		Tools:   []Tool{{Name: "tool.y", Type: "core.custom"}},
 	})
 	if err != nil {
@@ -694,7 +694,7 @@ func TestRuntimeApprovalCycle(t *testing.T) {
 	}
 }
 
-// failingChildDispatchers makes a parent delegate once to a child whose brain
+// failingChildDispatchers makes a parent delegate once to a child whose program
 // then requests an unavailable capability, failing the child run.
 type failingChildDispatchers struct{}
 
@@ -728,7 +728,7 @@ func (failingChildDispatcher) Dispatch(_ context.Context, _ RunContext, syscall 
 	_ = json.Unmarshal(syscall.Args, &req)
 	for _, m := range req.Messages {
 		if m.Role == "user" && strings.Contains(m.Content, "do subtask") {
-			// The child requests a capability it was not granted; the brain
+			// The child requests a capability it was not granted; the program
 			// rejects it and the child run fails.
 			return chatActions(`{"actions":[{"action":"missing.tool","content":{}}]}`), nil
 		}
@@ -739,9 +739,9 @@ func (failingChildDispatcher) Dispatch(_ context.Context, _ RunContext, syscall 
 func TestRuntimeChildFailurePropagatesToParent(t *testing.T) {
 	store := newRuntimeStore()
 	runtime, err := NewRuntime(context.Background(), Config{
-		Brains: staticBrains{
-			defaultID: "brain@1",
-			sources:   []BrainSource{{ID: "brain@1", Wasm: buildBrain(t)}},
+		Programs: staticPrograms{
+			defaultID: "program@1",
+			sources:   []ProgramSource{{ID: "program@1", Wasm: buildProgram(t)}},
 		},
 		Dispatchers:  failingChildDispatchers{},
 		Log:          store.log,
@@ -761,16 +761,16 @@ func TestRuntimeChildFailurePropagatesToParent(t *testing.T) {
 		}
 	})
 
-	thread, err := runtime.CreateThread(nil)
+	session, err := runtime.CreateSession(nil)
 	if err != nil {
-		t.Fatalf("create thread: %v", err)
+		t.Fatalf("create session: %v", err)
 	}
-	run, err := runtime.CreateRun(thread.ID, "parent task", Manifest{
+	run, err := runtime.CreateRun(session.ID, "parent task", Manifest{
 		Version: ManifestVersion,
-		Brain:   "brain@1",
+		Program: "program@1",
 		Tools: []Tool{{
 			Name: "child", Type: AgentToolType,
-			Settings: json.RawMessage(`{"code":"brain@1","on_failure":"propagate"}`),
+			Settings: json.RawMessage(`{"program":"program@1","on_failure":"propagate"}`),
 		}},
 	})
 	if err != nil {
@@ -784,7 +784,7 @@ func TestRuntimeChildFailurePropagatesToParent(t *testing.T) {
 		t.Fatalf("parent error = %q, want it to mention the failed child", failed.Error)
 	}
 	// The failure came from a real delegated child run, not from the parent
-	// brain merely failing to see the delegation tool.
+	// program merely failing to see the delegation tool.
 	childID := onlyChildRun(t, runtime, run.ID)
 	child, err := runtime.GetRun(childID)
 	if err != nil {
@@ -851,7 +851,7 @@ func (d *failThenSucceedDispatcher) Dispatch(_ context.Context, _ RunContext, sy
 		n := d.parent.turn2
 		d.parent.mu.Unlock()
 		if n == 1 {
-			// First attempt: request a capability that was not granted; the brain
+			// First attempt: request a capability that was not granted; the program
 			// rejects it and the run fails after several recorded steps.
 			return chatActions(`{"actions":[{"action":"missing.tool","content":{}}]}`), nil
 		}
@@ -960,9 +960,9 @@ func (d *cascadeResumeDispatcherImpl) Dispatch(_ context.Context, _ RunContext, 
 func TestRuntimeCascadeResumeUsesResumeModeForFailedChild(t *testing.T) {
 	store := newRuntimeStore()
 	runtime, err := NewRuntime(context.Background(), Config{
-		Brains: staticBrains{
-			defaultID: "brain@1",
-			sources:   []BrainSource{{ID: "brain@1", Wasm: buildBrain(t)}},
+		Programs: staticPrograms{
+			defaultID: "program@1",
+			sources:   []ProgramSource{{ID: "program@1", Wasm: buildProgram(t)}},
 		},
 		Dispatchers:  &cascadeResumeDispatchers{},
 		Log:          store.log,
@@ -982,17 +982,17 @@ func TestRuntimeCascadeResumeUsesResumeModeForFailedChild(t *testing.T) {
 		}
 	})
 
-	thread, err := runtime.CreateThread(nil)
+	session, err := runtime.CreateSession(nil)
 	if err != nil {
-		t.Fatalf("create thread: %v", err)
+		t.Fatalf("create session: %v", err)
 	}
-	run, err := runtime.CreateRun(thread.ID, "parent task", Manifest{
+	run, err := runtime.CreateRun(session.ID, "parent task", Manifest{
 		Version: ManifestVersion,
-		Brain:   "brain@1",
+		Program: "program@1",
 		Tools: []Tool{{
 			Name:     "child",
 			Type:     AgentToolType,
-			Settings: json.RawMessage(`{"code":"brain@1","on_failure":"propagate"}`),
+			Settings: json.RawMessage(`{"program":"program@1","on_failure":"propagate"}`),
 			Tools:    []Tool{{Name: "tool.x", Type: "core.custom"}},
 		}},
 	})
@@ -1028,9 +1028,9 @@ func TestRuntimeCascadeResumeUsesResumeModeForFailedChild(t *testing.T) {
 func TestRuntimeHardRetryForksFromBeginning(t *testing.T) {
 	store := newRuntimeStore()
 	runtime, err := NewRuntime(context.Background(), Config{
-		Brains: staticBrains{
-			defaultID: "brain@1",
-			sources:   []BrainSource{{ID: "brain@1", Wasm: buildBrain(t)}},
+		Programs: staticPrograms{
+			defaultID: "program@1",
+			sources:   []ProgramSource{{ID: "program@1", Wasm: buildProgram(t)}},
 		},
 		Dispatchers:  &failThenSucceedDispatchers{},
 		Log:          store.log,
@@ -1050,13 +1050,13 @@ func TestRuntimeHardRetryForksFromBeginning(t *testing.T) {
 		}
 	})
 
-	thread, err := runtime.CreateThread(nil)
+	session, err := runtime.CreateSession(nil)
 	if err != nil {
-		t.Fatalf("create thread: %v", err)
+		t.Fatalf("create session: %v", err)
 	}
-	run, err := runtime.CreateRun(thread.ID, "task", Manifest{
+	run, err := runtime.CreateRun(session.ID, "task", Manifest{
 		Version: ManifestVersion,
-		Brain:   "brain@1",
+		Program: "program@1",
 		Tools:   []Tool{{Name: "tool.x", Type: "core.custom"}},
 	})
 	if err != nil {
@@ -1075,11 +1075,11 @@ func TestRuntimeHardRetryForksFromBeginning(t *testing.T) {
 	if recovered.Answer != "recovered" {
 		t.Fatalf("answer = %q, want recovered", recovered.Answer)
 	}
-	// The thread graph exposes a flat entry list where each entry carries its
+	// The session graph exposes a flat entry list where each entry carries its
 	// revision. Revision 2 must start at record 0 (hard restart, no shared prefix).
-	graph, err := runtime.ThreadGraph(thread.ID)
+	graph, err := runtime.SessionGraph(session.ID)
 	if err != nil {
-		t.Fatalf("thread graph: %v", err)
+		t.Fatalf("session graph: %v", err)
 	}
 	if len(graph.Runs) != 1 {
 		t.Fatalf("graph runs = %d, want 1", len(graph.Runs))

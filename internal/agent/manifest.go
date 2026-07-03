@@ -15,28 +15,28 @@ const ManifestVersion = 2
 // leaf I/O dispatcher; it is run by the runtime as a child agent (see agent.go).
 const AgentToolType = "core.agent"
 
-// Manifest is one agent node (root or child). Brain/SystemPrompt configure this
+// Manifest is one agent node (root or child). Program/SystemPrompt configure this
 // node; Tools is its unified composition — leaf I/O tools plus `core.agent`
 // sub-agents, all sharing one shape.
 type Manifest struct {
 	Version int    `json:"version"`
 	Name    string `json:"name,omitempty"`
-	Brain   string `json:"brain,omitempty"`
+	Program string `json:"program,omitempty"`
 	// BindingRef is an opaque application correlation reference (e.g. the
 	// name of the control-plane binding that produced this manifest). The
 	// runtime never interprets it; it only propagates it to delegated child
-	// manifests, like Tags on threads.
+	// manifests, like Tags on sessions.
 	BindingRef   string `json:"binding_ref,omitempty"`
 	SystemPrompt string `json:"system_prompt,omitempty"`
 	// OnFailure selects how a failure of this node (when it is a delegated child)
-	// is handled: OnFailureReport (default) surfaces it to the parent brain as a
+	// is handled: OnFailureReport (default) surfaces it to the parent program as a
 	// recoverable failed observation; OnFailurePropagate fails the parent outright.
 	OnFailure string `json:"on_failure,omitempty"`
 	Tools     []Tool `json:"tools"`
 }
 
 // Tool is one entry in an agent's composition. `Type` selects the dispatcher
-// implementation; `Name` is the local handle the brain routes to. For a
+// implementation; `Name` is the local handle the program routes to. For a
 // `core.agent` tool, Settings decodes to AgentSettings and Tools holds the
 // sub-agent's own composition.
 type Tool struct {
@@ -49,7 +49,7 @@ type Tool struct {
 
 // AgentSettings is the Settings shape of a `core.agent` tool.
 type AgentSettings struct {
-	Code         string `json:"code,omitempty"`
+	Program      string `json:"program,omitempty"`
 	BindingRef   string `json:"binding_ref,omitempty"`
 	SystemPrompt string `json:"system_prompt,omitempty"`
 	OnFailure    string `json:"on_failure,omitempty"`
@@ -94,7 +94,7 @@ func decodeAgentSettings(tool Tool) (AgentSettings, error) {
 			return AgentSettings{}, err
 		}
 	}
-	settings.Code = strings.TrimSpace(settings.Code)
+	settings.Program = strings.TrimSpace(settings.Program)
 	settings.BindingRef = strings.TrimSpace(settings.BindingRef)
 	settings.SystemPrompt = strings.TrimSpace(settings.SystemPrompt)
 	return settings, nil
@@ -113,7 +113,7 @@ func ValidateManifest(manifest Manifest, provider DispatcherProvider) (Manifest,
 		return Manifest{}, fmt.Errorf("%w: manifest version must be %d", ErrInvalid, ManifestVersion)
 	}
 	manifest.SystemPrompt = strings.TrimSpace(manifest.SystemPrompt)
-	manifest.Brain = strings.TrimSpace(manifest.Brain)
+	manifest.Program = strings.TrimSpace(manifest.Program)
 	if err := validateTools(manifest.Tools, provider); err != nil {
 		return Manifest{}, err
 	}
@@ -136,11 +136,11 @@ func validateTools(tools []Tool, provider DispatcherProvider) error {
 			if err != nil {
 				return fmt.Errorf("%w: agent tool %d settings: %v", ErrInvalid, i, err)
 			}
-			if settings.Code == "" {
-				return fmt.Errorf("%w: agent tool %q requires settings.code (brain)", ErrInvalid, tool.Name)
+			if settings.Program == "" {
+				return fmt.Errorf("%w: agent tool %q requires settings.program", ErrInvalid, tool.Name)
 			}
 			if tool.Name == "" {
-				tool.Name = settings.Code
+				tool.Name = settings.Program
 			}
 			switch settings.OnFailure {
 			case "", OnFailureReport, OnFailurePropagate:

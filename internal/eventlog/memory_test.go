@@ -64,7 +64,7 @@ func (m *memoryLog) Streams(_ context.Context, tenantID string) ([]Scope, error)
 			out = append(out, scope)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ThreadID < out[j].ThreadID })
+	sort.Slice(out, func(i, j int) bool { return out[i].SessionID < out[j].SessionID })
 	return out, nil
 }
 
@@ -73,7 +73,7 @@ var _ Log = (*memoryLog)(nil)
 func TestAppendAssignsContiguousSeq(t *testing.T) {
 	log := newMemoryLog()
 	ctx := context.Background()
-	scope := Scope{TenantID: "t", ThreadID: "th"}
+	scope := Scope{TenantID: "t", SessionID: "th"}
 
 	head, err := log.Append(ctx, scope,
 		Event{Kind: "run.created"},
@@ -102,7 +102,7 @@ func TestAppendAssignsContiguousSeq(t *testing.T) {
 func TestReadAfterIsExclusive(t *testing.T) {
 	log := newMemoryLog()
 	ctx := context.Background()
-	scope := Scope{TenantID: "t", ThreadID: "th"}
+	scope := Scope{TenantID: "t", SessionID: "th"}
 	_, _ = log.Append(ctx, scope, Event{Kind: "a"}, Event{Kind: "b"}, Event{Kind: "c"})
 
 	tail, err := log.Read(ctx, scope, 1)
@@ -120,7 +120,7 @@ func TestReadAfterIsExclusive(t *testing.T) {
 func TestStoredEventsAreIsolatedFromCallerMutation(t *testing.T) {
 	log := newMemoryLog()
 	ctx := context.Background()
-	scope := Scope{TenantID: "t", ThreadID: "th"}
+	scope := Scope{TenantID: "t", SessionID: "th"}
 	data := json.RawMessage(`{"x":1}`)
 	if _, err := log.Append(ctx, scope, Event{Kind: "a", Data: data}); err != nil {
 		t.Fatal(err)
@@ -149,7 +149,7 @@ func TestStreamsListsTenantThreads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(streams) != 2 || streams[0].ThreadID != "a" || streams[1].ThreadID != "b" {
+	if len(streams) != 2 || streams[0].SessionID != "a" || streams[1].SessionID != "b" {
 		t.Fatalf("streams = %+v, want sorted [a b] for t1", streams)
 	}
 }

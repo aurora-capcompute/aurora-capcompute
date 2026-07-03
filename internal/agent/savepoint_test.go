@@ -15,7 +15,7 @@ import (
 func buildJournal(t *testing.T, steps ...step) *logJournal {
 	t.Helper()
 	log := newMemLog()
-	scope := eventlog.Scope{TenantID: "t", ThreadID: "th"}
+	scope := eventlog.Scope{TenantID: "t", SessionID: "th"}
 	now := func() time.Time { return time.Unix(0, 0).UTC() }
 	j := newLogJournal(log, scope, "run1", 1, newRunHistory(), 0, now, nil)
 	for _, s := range steps {

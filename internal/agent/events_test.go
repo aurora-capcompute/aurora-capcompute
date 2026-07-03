@@ -17,20 +17,20 @@ func mustAppend(t *testing.T, log *memLog, scope eventlog.Scope, events ...event
 	}
 }
 
-func TestFoldReconstructsLatestRunAndThreadState(t *testing.T) {
+func TestFoldReconstructsLatestRunAndSessionState(t *testing.T) {
 	log := newMemLog()
-	scope := eventlog.Scope{TenantID: "t", ThreadID: "th1"}
+	scope := eventlog.Scope{TenantID: "t", SessionID: "th1"}
 	now := time.Unix(0, 0).UTC()
 
-	// Run goes running → completed; thread state is derived from runs.
+	// Run goes running → completed; session state is derived from runs.
 	r1, _ := runStateEvent(now, StoredRun{
-		TenantID: "t", ID: "run1", ThreadID: "th1", Revision: 1,
+		TenantID: "t", ID: "run1", SessionID: "th1", Revision: 1,
 		Message: "hello", Status: RunRunning,
 		CreatedAt: now, UpdatedAt: now,
 		Tags: map[string]string{"binding_ref": "ops"},
 	})
 	r2, _ := runStateEvent(now.Add(time.Second), StoredRun{
-		TenantID: "t", ID: "run1", ThreadID: "th1", Revision: 1,
+		TenantID: "t", ID: "run1", SessionID: "th1", Revision: 1,
 		Message: "hello", Status: RunCompleted, Answer: "done",
 		CreatedAt: now, UpdatedAt: now.Add(time.Second),
 		Tags: map[string]string{"binding_ref": "ops"},
@@ -42,13 +42,13 @@ func TestFoldReconstructsLatestRunAndThreadState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fold: %v", err)
 	}
-	// Completed run is terminal: no active run on the thread.
-	if proj.Thread.ActiveRunID != "" {
-		t.Fatalf("thread active run = %q, want cleared (completed run is not active)", proj.Thread.ActiveRunID)
+	// Completed run is terminal: no active run on the session.
+	if proj.Session.ActiveRunID != "" {
+		t.Fatalf("session active run = %q, want cleared (completed run is not active)", proj.Session.ActiveRunID)
 	}
-	// Thread identity and tags are derived from the run.
-	if proj.Thread.ID != "th1" || proj.Thread.Tags["binding_ref"] != "ops" {
-		t.Fatalf("thread = %+v, want id=th1 binding_ref=ops", proj.Thread)
+	// Session identity and tags are derived from the run.
+	if proj.Session.ID != "th1" || proj.Session.Tags["binding_ref"] != "ops" {
+		t.Fatalf("session = %+v, want id=th1 binding_ref=ops", proj.Session)
 	}
 	run := proj.Runs["run1"]
 	if run.Status != RunCompleted || run.Answer != "done" {
@@ -58,10 +58,10 @@ func TestFoldReconstructsLatestRunAndThreadState(t *testing.T) {
 
 func TestFoldTaskLifecycle(t *testing.T) {
 	log := newMemLog()
-	scope := eventlog.Scope{TenantID: "t", ThreadID: "th1"}
+	scope := eventlog.Scope{TenantID: "t", SessionID: "th1"}
 	now := time.Unix(0, 0).UTC()
 	rec := task.Record{
-		Scope:     task.Scope{TenantID: "t", ThreadID: "th1", RunID: "run1", Revision: 1},
+		Scope:     task.Scope{TenantID: "t", SessionID: "th1", RunID: "run1", Revision: 1},
 		ID:        "task1",
 		State:     task.StatePending,
 		TokenHash: []byte{1, 2, 3},

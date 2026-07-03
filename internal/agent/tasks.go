@@ -39,7 +39,7 @@ func (s *eventTaskStore) seed(records []task.Record) {
 }
 
 func (s *eventTaskStore) scope(record task.Record) eventlog.Scope {
-	return eventlog.Scope{TenantID: record.Scope.TenantID, ThreadID: record.Scope.ThreadID}
+	return eventlog.Scope{TenantID: record.Scope.TenantID, SessionID: record.Scope.SessionID}
 }
 
 func (s *eventTaskStore) Find(_ context.Context, scope task.Scope, position int, callHash string) (task.Record, bool, error) {

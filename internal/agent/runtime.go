@@ -1,13 +1,13 @@
-// Package agent is the runtime: it owns thread and run lifecycle, the
-// scheduler-driven quanta that resume Wasm brains on the capcompute kernel,
+// Package agent is the runtime: it owns session and run lifecycle, the
+// scheduler-driven quanta that resume Wasm programs on the capcompute kernel,
 // durable approval tasks, retries, event subscriptions, and the read
 // projections (snapshots, journal, call graph) the public API exposes. All
-// durable state is a fold of one append-only event stream per thread — the
+// durable state is a fold of one append-only event stream per session — the
 // runtime keeps no mutable row store, and restore rebuilds in-memory state by
 // replaying each stream from the beginning.
 //
-// It does not own capability implementations, brain bytes, or any concrete
-// store: dispatchers, brains, the event log, leases, and the kernel's process
+// It does not own capability implementations, program bytes, or any concrete
+// store: dispatchers, programs, the event log, leases, and the kernel's process
 // table are all injected. The aurora package re-exports this package's types
 // as the module's public surface.
 package agent
@@ -54,19 +54,19 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 	if len(config.TaskSecret) == 0 {
 		return nil, fmt.Errorf("%w: task secret is required", ErrInvalid)
 	}
-	brains, err := loadBrains(ctx, config.Brains)
+	programs, err := loadPrograms(ctx, config.Programs)
 	if err != nil {
 		return nil, err
 	}
 	runtime := &Runtime{
 		kernels:      make(map[string]*capcompute.Kernel[string, RunContext]),
-		brains:       brains,
+		programs:     programs,
 		processTable: config.ProcessTable,
 		taints:       capcompute.NewTaints[string](),
 		log:          config.Log,
 		leases:       config.Leases,
 		tenantID:     strings.TrimSpace(config.TenantID),
-		threads:      make(map[string]*threadState),
+		sessions:     make(map[string]*sessionState),
 		runs:         make(map[string]*runState),
 		subscribers:  make(map[string]map[uint64]chan Event),
 		idSource:     config.IDSource,
@@ -119,14 +119,14 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		TaskTTL:    runtime.taskTTL,
 		TaskScope: func(cred RunContext) task.Scope {
 			return task.Scope{
-				TenantID: cred.TenantID,
-				ThreadID: cred.ThreadID,
-				RunID:    cred.RunID,
-				Revision: cred.Revision,
+				TenantID:  cred.TenantID,
+				SessionID: cred.SessionID,
+				RunID:     cred.RunID,
+				Revision:  cred.Revision,
 			}
 		},
 		OnTaskCreated: func(record task.Record) {
-			runtime.publish(record.Scope.ThreadID, Event{
+			runtime.publish(record.Scope.SessionID, Event{
 				Type: "task.created",
 				Data: runtime.taskSnapshot(record),
 			})
@@ -155,12 +155,12 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		return nil, err
 	}
 
-	for _, artifact := range brains.List() {
-		source, err := brains.Source(artifact.ID)
+	for _, artifact := range programs.List() {
+		source, err := programs.Source(artifact.ID)
 		if err != nil {
 			return nil, err
 		}
-		kernel, err := runtime.compileBrain(ctx, artifact.ID, source.Wasm, artifact.Digest)
+		kernel, err := runtime.compileProgram(ctx, artifact.ID, source.Wasm, artifact.Digest)
 		if err != nil {
 			for _, opened := range runtime.kernels {
 				_ = opened.Shutdown(context.Background())
@@ -189,7 +189,7 @@ func (r *Runtime) runDrivers(resolveCtx context.Context, cred RunContext) (sys.D
 	if err != nil {
 		return nil, err
 	}
-	return newProgressDispatcher(base, r.publish, cred.ThreadID, cred.RunID), nil
+	return newProgressDispatcher(base, r.publish, cred.SessionID, cred.RunID), nil
 }
 
 // wrapProtocol stacks the runtime's protocol layers above the task layer:
@@ -238,22 +238,22 @@ func (r *Runtime) journalFor(_ context.Context, cred RunContext) (journaled.Jour
 }
 
 // headerFor is the journal writer identity for one run revision: the syscall
-// ABI, the brain digest as the program, and the run id. The tape refuses to
+// ABI, the program digest as the program, and the run id. The tape refuses to
 // replay a journal whose recorded header differs — the versioned-replay law.
 func (r *Runtime) headerFor(cred RunContext) journaled.Header {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	program := ""
 	if run := r.runs[cred.RunID]; run != nil {
-		program = run.brainDigest
+		program = run.programDigest
 	}
 	return journaled.Header{ABI: sys.ABIVersion, Program: program, Run: cred.RunID}
 }
 
-// compileBrain compiles a brain's wasm into a kernel. It is pure with respect
+// compileProgram compiles a program's wasm into a kernel. It is pure with respect
 // to runtime state, so it can be called outside the runtime mutex while
-// preparing a SetBrains swap.
-func (r *Runtime) compileBrain(ctx context.Context, id string, wasm []byte, digest string) (*capcompute.Kernel[string, RunContext], error) {
+// preparing a SetPrograms swap.
+func (r *Runtime) compileProgram(ctx context.Context, id string, wasm []byte, digest string) (*capcompute.Kernel[string, RunContext], error) {
 	kernel, err := capcompute.NewKernel(ctx, capcompute.Config[string, RunContext]{
 		Image: extism.Manifest{
 			Wasm: []extism.Wasm{extism.WasmData{Data: wasm, Hash: digest, Name: id}},
@@ -262,21 +262,21 @@ func (r *Runtime) compileBrain(ctx context.Context, id string, wasm []byte, dige
 		ProcessTable: r.processTable,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("compile brain %q: %w", id, err)
+		return nil, fmt.Errorf("compile program %q: %w", id, err)
 	}
 	return kernel, nil
 }
 
-// SetBrains declaratively reconciles the registered brains to the given set:
-// brains absent from the set are removed, new or content-changed brains are
-// (re)compiled, and unchanged brains are left running. It is safe to call at any
-// time; the control plane uses it to hot-load brains from Brain CRDs without a
+// SetPrograms declaratively reconciles the registered programs to the given set:
+// programs absent from the set are removed, new or content-changed programs are
+// (re)compiled, and unchanged programs are left running. It is safe to call at any
+// time; the control plane uses it to hot-load programs from Program CRDs without a
 // restart. Compilation happens outside the runtime mutex so dispatch is only
-// briefly paused for the swap. If any brain fails to compile, no change is
-// applied. Removing a brain that an in-flight run is using is best-effort: that
+// briefly paused for the swap. If any program fails to compile, no change is
+// applied. Removing a program that an in-flight run is using is best-effort: that
 // run fails on its next step.
-func (r *Runtime) SetBrains(ctx context.Context, sources []BrainSource) error {
-	current := r.brains.digests()
+func (r *Runtime) SetPrograms(ctx context.Context, sources []ProgramSource) error {
+	current := r.programs.digests()
 	desired := make(map[string]struct{}, len(sources))
 
 	// Compile additions/replacements outside the lock; fail atomically.
@@ -290,10 +290,10 @@ func (r *Runtime) SetBrains(ctx context.Context, sources []BrainSource) error {
 	for _, src := range sources {
 		id := strings.TrimSpace(src.ID)
 		if id == "" || len(src.Wasm) == 0 {
-			return fmt.Errorf("%w: brain id and wasm bytes are required", ErrInvalid)
+			return fmt.Errorf("%w: program id and wasm bytes are required", ErrInvalid)
 		}
 		if _, dup := desired[id]; dup {
-			return fmt.Errorf("%w: duplicate brain %q", ErrInvalid, id)
+			return fmt.Errorf("%w: duplicate program %q", ErrInvalid, id)
 		}
 		desired[id] = struct{}{}
 		wasm := append([]byte(nil), src.Wasm...)
@@ -301,7 +301,7 @@ func (r *Runtime) SetBrains(ctx context.Context, sources []BrainSource) error {
 		if cur, ok := current[id]; ok && cur == digest {
 			continue // unchanged
 		}
-		kernel, err := r.compileBrain(ctx, id, wasm, digest)
+		kernel, err := r.compileProgram(ctx, id, wasm, digest)
 		if err != nil {
 			for _, c := range fresh {
 				_ = c.kernel.Shutdown(context.Background())
@@ -328,7 +328,7 @@ func (r *Runtime) SetBrains(ctx context.Context, sources []BrainSource) error {
 			retired = append(retired, old)
 		}
 		r.kernels[c.id] = c.kernel
-		r.brains.put(c.id, c.wasm, c.digest)
+		r.programs.put(c.id, c.wasm, c.digest)
 	}
 	for id := range current {
 		if _, keep := desired[id]; keep {
@@ -338,7 +338,7 @@ func (r *Runtime) SetBrains(ctx context.Context, sources []BrainSource) error {
 			retired = append(retired, old)
 		}
 		delete(r.kernels, id)
-		r.brains.remove(id)
+		r.programs.remove(id)
 	}
 	r.mu.Unlock()
 
@@ -348,59 +348,59 @@ func (r *Runtime) SetBrains(ctx context.Context, sources []BrainSource) error {
 	return nil
 }
 
-func (r *Runtime) CreateThread(tags map[string]string) (ThreadSnapshot, error) {
-	id, err := r.idSource("thr_")
+func (r *Runtime) CreateSession(tags map[string]string) (SessionSnapshot, error) {
+	id, err := r.idSource("ses_")
 	if err != nil {
-		return ThreadSnapshot{}, err
+		return SessionSnapshot{}, err
 	}
 	now := r.now().UTC()
-	thread := &threadState{id: id, title: "New thread", createdAt: now, updatedAt: now, tags: cloneTags(tags)}
+	session := &sessionState{id: id, title: "New session", createdAt: now, updatedAt: now, tags: cloneTags(tags)}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
-		return ThreadSnapshot{}, fmt.Errorf("%w: runtime is closed", ErrConflict)
+		return SessionSnapshot{}, fmt.Errorf("%w: runtime is closed", ErrConflict)
 	}
-	r.threads[id] = thread
-	return r.threadSnapshotLocked(thread), nil
+	r.sessions[id] = session
+	return r.sessionSnapshotLocked(session), nil
 }
 
-func (r *Runtime) ListThreads() []ThreadSummary {
+func (r *Runtime) ListSessions() []SessionSummary {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]ThreadSummary, 0, len(r.threads))
-	for _, thread := range r.threads {
-		out = append(out, r.threadSummaryLocked(thread))
+	out := make([]SessionSummary, 0, len(r.sessions))
+	for _, session := range r.sessions {
+		out = append(out, r.sessionSummaryLocked(session))
 	}
 	return out
 }
 
-func (r *Runtime) Brains() []BrainArtifact {
-	return r.brains.List()
+func (r *Runtime) Programs() []ProgramArtifact {
+	return r.programs.List()
 }
 
-func (r *Runtime) GetThread(threadID string) (ThreadSnapshot, error) {
+func (r *Runtime) GetSession(sessionID string) (SessionSnapshot, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	thread := r.threads[threadID]
-	if thread == nil {
-		return ThreadSnapshot{}, fmt.Errorf("%w: thread %s", ErrNotFound, threadID)
+	session := r.sessions[sessionID]
+	if session == nil {
+		return SessionSnapshot{}, fmt.Errorf("%w: session %s", ErrNotFound, sessionID)
 	}
-	return r.threadSnapshotLocked(thread), nil
+	return r.sessionSnapshotLocked(session), nil
 }
 
-func (r *Runtime) CreateRun(threadID string, message string, manifest Manifest) (RunSnapshot, error) {
+func (r *Runtime) CreateRun(sessionID string, message string, manifest Manifest) (RunSnapshot, error) {
 	if message == "" {
 		return RunSnapshot{}, fmt.Errorf("%w: message is required", ErrInvalid)
 	}
-	if strings.TrimSpace(manifest.Brain) == "" {
-		manifest.Brain = r.brains.DefaultID()
+	if strings.TrimSpace(manifest.Program) == "" {
+		manifest.Program = r.programs.DefaultID()
 	}
 	manifest, err := ValidateManifest(manifest, r.dispatchers)
 	if err != nil {
 		return RunSnapshot{}, err
 	}
-	brain, err := r.brains.Resolve(manifest.Brain)
+	program, err := r.programs.Resolve(manifest.Program)
 	if err != nil {
 		return RunSnapshot{}, err
 	}
@@ -415,47 +415,47 @@ func (r *Runtime) CreateRun(threadID string, message string, manifest Manifest) 
 		r.mu.Unlock()
 		return RunSnapshot{}, fmt.Errorf("%w: runtime is closed", ErrConflict)
 	}
-	thread := r.threads[threadID]
-	if thread == nil {
+	session := r.sessions[sessionID]
+	if session == nil {
 		r.mu.Unlock()
-		return RunSnapshot{}, fmt.Errorf("%w: thread %s", ErrNotFound, threadID)
+		return RunSnapshot{}, fmt.Errorf("%w: session %s", ErrNotFound, sessionID)
 	}
-	if thread.activeRunID != "" {
+	if session.activeRunID != "" {
 		r.mu.Unlock()
-		return RunSnapshot{}, fmt.Errorf("%w: thread already has active run %s", ErrConflict, thread.activeRunID)
+		return RunSnapshot{}, fmt.Errorf("%w: session already has active run %s", ErrConflict, session.activeRunID)
 	}
 	run := &runState{
-		id:          runID,
-		threadID:    threadID,
-		message:     message,
-		history:     append([]HistoryMessage(nil), thread.history...),
-		status:      RunQueued,
-		attempt:     1,
-		createdAt:   now,
-		updatedAt:   now,
-		manifest:    manifest,
-		revision:    1,
-		brainDigest: brain.Digest,
+		id:            runID,
+		sessionID:     sessionID,
+		message:       message,
+		history:       append([]HistoryMessage(nil), session.history...),
+		status:        RunQueued,
+		attempt:       1,
+		createdAt:     now,
+		updatedAt:     now,
+		manifest:      manifest,
+		revision:      1,
+		programDigest: program.Digest,
 	}
 	run.journal = r.newJournal(run, newRunHistory(), 0)
 	r.runs[runID] = run
-	thread.runIDs = append(thread.runIDs, runID)
-	if len(thread.runIDs) == 1 {
-		thread.title = threadTitle(message)
+	session.runIDs = append(session.runIDs, runID)
+	if len(session.runIDs) == 1 {
+		session.title = sessionTitle(message)
 	}
-	thread.activeRunID = runID
-	thread.updatedAt = now
+	session.activeRunID = runID
+	session.updatedAt = now
 	if err := r.appendRun(run); err != nil {
 		delete(r.runs, runID)
-		thread.runIDs = thread.runIDs[:len(thread.runIDs)-1]
-		thread.activeRunID = ""
+		session.runIDs = session.runIDs[:len(session.runIDs)-1]
+		session.activeRunID = ""
 		r.mu.Unlock()
 		return RunSnapshot{}, err
 	}
 	snapshot := r.runSnapshotLocked(run)
 	r.mu.Unlock()
 
-	r.publish(threadID, Event{Type: "run.updated", Data: snapshot})
+	r.publish(sessionID, Event{Type: "run.updated", Data: snapshot})
 	r.wg.Add(1)
 	go r.execute(runID)
 	return snapshot, nil
@@ -565,7 +565,7 @@ func (r *Runtime) ResolveTask(taskID, token string, resolution task.Resolution) 
 	if err != nil {
 		return TaskSnapshot{}, err
 	}
-	r.publish(record.Scope.ThreadID, Event{Type: "task.updated", Data: r.taskSnapshot(record)})
+	r.publish(record.Scope.SessionID, Event{Type: "task.updated", Data: r.taskSnapshot(record)})
 
 	r.mu.Lock()
 	run := r.runs[record.Scope.RunID]
@@ -611,7 +611,7 @@ func (r *Runtime) Stop(runID string) (RunSnapshot, error) {
 	snapshot := r.runSnapshotLocked(run)
 	_ = r.appendRun(run)
 	r.mu.Unlock()
-	r.publish(run.threadID, Event{Type: "run.updated", Data: snapshot})
+	r.publish(run.sessionID, Event{Type: "run.updated", Data: snapshot})
 	return snapshot, nil
 }
 
@@ -640,32 +640,32 @@ func (r *Runtime) Retry(runID string, mode RetryMode) (RunSnapshot, error) {
 		r.mu.Unlock()
 		return RunSnapshot{}, fmt.Errorf("%w: run %s cannot retry from %s", ErrConflict, runID, run.status)
 	}
-	thread := r.threads[run.threadID]
+	session := r.sessions[run.sessionID]
 	if run.parentRunID == "" {
 		// Root runs may only be retried if no later user-initiated run has arrived.
-		// Child runs that were added to the same thread by delegation do not count.
+		// Child runs that were added to the same session by delegation do not count.
 		lastRootID := ""
-		for i := len(thread.runIDs) - 1; i >= 0; i-- {
-			if r.runs[thread.runIDs[i]] != nil && r.runs[thread.runIDs[i]].parentRunID == "" {
-				lastRootID = thread.runIDs[i]
+		for i := len(session.runIDs) - 1; i >= 0; i-- {
+			if r.runs[session.runIDs[i]] != nil && r.runs[session.runIDs[i]].parentRunID == "" {
+				lastRootID = session.runIDs[i]
 				break
 			}
 		}
 		if lastRootID == "" || lastRootID != run.id {
 			r.mu.Unlock()
-			return RunSnapshot{}, fmt.Errorf("%w: only the latest thread run can be retried", ErrConflict)
+			return RunSnapshot{}, fmt.Errorf("%w: only the latest session run can be retried", ErrConflict)
 		}
 	}
 	// Allow cascade retry of a child while its parent holds activeRunID.
-	if thread.activeRunID != "" && thread.activeRunID != run.id &&
-		(run.parentRunID == "" || thread.activeRunID != run.parentRunID) {
+	if session.activeRunID != "" && session.activeRunID != run.id &&
+		(run.parentRunID == "" || session.activeRunID != run.parentRunID) {
 		r.mu.Unlock()
-		return RunSnapshot{}, fmt.Errorf("%w: thread already has active run %s", ErrConflict, thread.activeRunID)
+		return RunSnapshot{}, fmt.Errorf("%w: session already has active run %s", ErrConflict, session.activeRunID)
 	}
 
 	if mode == RetryRestart {
 		// Hard restart: always fork from the beginning (the agent.input step),
-		// giving the brain a completely fresh revision with no shared prefix.
+		// giving the program a completely fresh revision with no shared prefix.
 		r.forkJournalLocked(run, 0, RetryRestart)
 	} else if run.status == RunYielded || run.status == RunWaitingTask {
 		// Resume from a park: no fork. The journal's open intent at the tail is
@@ -682,8 +682,8 @@ func (r *Runtime) Retry(runID string, mode RetryMode) (RunSnapshot, error) {
 		}
 	} else {
 		// Failed/stopped/interrupted resume: fork at the end of the journal and
-		// let the brain continue, replaying every recorded outcome including
-		// soft failures. A failed run only forks earlier when the brain
+		// let the program continue, replaying every recorded outcome including
+		// soft failures. A failed run only forks earlier when the program
 		// explicitly left a savepoint open: we fork right after the outermost
 		// still-open sys.begin so its whole body re-executes live under the
 		// bumped revision.
@@ -704,8 +704,8 @@ func (r *Runtime) Retry(runID string, mode RetryMode) (RunSnapshot, error) {
 	run.startedAt = nil
 	run.completedAt = nil
 	run.updatedAt = r.now().UTC()
-	thread.activeRunID = run.id
-	thread.updatedAt = run.updatedAt
+	session.activeRunID = run.id
+	session.updatedAt = run.updatedAt
 	if err := r.appendRun(run); err != nil {
 		r.mu.Unlock()
 		return RunSnapshot{}, err
@@ -713,7 +713,7 @@ func (r *Runtime) Retry(runID string, mode RetryMode) (RunSnapshot, error) {
 	snapshot := r.runSnapshotLocked(run)
 	r.mu.Unlock()
 
-	r.publish(run.threadID, Event{Type: "run.updated", Data: snapshot})
+	r.publish(run.sessionID, Event{Type: "run.updated", Data: snapshot})
 	r.wg.Add(1)
 	go r.execute(runID)
 	return snapshot, nil
@@ -755,28 +755,28 @@ func childrenBefore(spawnOffsets []int, offset int) int {
 	return n
 }
 
-func (r *Runtime) Subscribe(threadID string) (Event, <-chan Event, func(), error) {
+func (r *Runtime) Subscribe(sessionID string) (Event, <-chan Event, func(), error) {
 	r.mu.Lock()
-	thread := r.threads[threadID]
-	if thread == nil {
+	session := r.sessions[sessionID]
+	if session == nil {
 		r.mu.Unlock()
-		return Event{}, nil, nil, fmt.Errorf("%w: thread %s", ErrNotFound, threadID)
+		return Event{}, nil, nil, fmt.Errorf("%w: session %s", ErrNotFound, sessionID)
 	}
 	r.nextSubID++
 	id := r.nextSubID
 	ch := make(chan Event, r.eventSize)
-	if r.subscribers[threadID] == nil {
-		r.subscribers[threadID] = make(map[uint64]chan Event)
+	if r.subscribers[sessionID] == nil {
+		r.subscribers[sessionID] = make(map[uint64]chan Event)
 	}
-	r.subscribers[threadID][id] = ch
-	snapshot := Event{Type: "snapshot", Data: r.threadSnapshotLocked(thread)}
+	r.subscribers[sessionID][id] = ch
+	snapshot := Event{Type: "snapshot", Data: r.sessionSnapshotLocked(session)}
 	r.mu.Unlock()
 
 	var once sync.Once
 	unsubscribe := func() {
 		once.Do(func() {
 			r.mu.Lock()
-			delete(r.subscribers[threadID], id)
+			delete(r.subscribers[sessionID], id)
 			r.mu.Unlock()
 		})
 	}

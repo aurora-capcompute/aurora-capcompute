@@ -1,6 +1,6 @@
 package agent
 
-// Read projections: the *Locked helpers that fold in-memory thread and run state
+// Read projections: the *Locked helpers that fold in-memory session and run state
 // into the immutable snapshots the public API returns, plus the small pure
 // helpers (titles, visible capabilities, defensive copies) they lean on.
 
@@ -15,22 +15,22 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/internal/task"
 )
 
-func (r *Runtime) threadSummaryLocked(thread *threadState) ThreadSummary {
-	return ThreadSummary{
-		ID:          thread.id,
-		Title:       thread.title,
-		CreatedAt:   thread.createdAt,
-		UpdatedAt:   thread.updatedAt,
-		RunCount:    len(thread.runIDs),
-		ActiveRunID: thread.activeRunID,
-		Tags:        cloneTags(thread.tags),
+func (r *Runtime) sessionSummaryLocked(session *sessionState) SessionSummary {
+	return SessionSummary{
+		ID:          session.id,
+		Title:       session.title,
+		CreatedAt:   session.createdAt,
+		UpdatedAt:   session.updatedAt,
+		RunCount:    len(session.runIDs),
+		ActiveRunID: session.activeRunID,
+		Tags:        cloneTags(session.tags),
 	}
 }
 
-func threadTitle(message string) string {
+func sessionTitle(message string) string {
 	fields := strings.Fields(message)
 	if len(fields) == 0 {
-		return "New thread"
+		return "New session"
 	}
 	title := strings.Join(fields, " ")
 	runes := []rune(title)
@@ -40,17 +40,17 @@ func threadTitle(message string) string {
 	return string(runes[:60]) + "…"
 }
 
-func (r *Runtime) threadSnapshotLocked(thread *threadState) ThreadSnapshot {
-	runs := make([]RunSnapshot, 0, len(thread.runIDs))
-	for _, runID := range thread.runIDs {
+func (r *Runtime) sessionSnapshotLocked(session *sessionState) SessionSnapshot {
+	runs := make([]RunSnapshot, 0, len(session.runIDs))
+	for _, runID := range session.runIDs {
 		if run := r.runs[runID]; run != nil {
 			runs = append(runs, r.runSnapshotLocked(run))
 		}
 	}
-	return ThreadSnapshot{
-		ThreadSummary: r.threadSummaryLocked(thread),
-		History:       append([]HistoryMessage(nil), thread.history...),
-		Runs:          runs,
+	return SessionSnapshot{
+		SessionSummary: r.sessionSummaryLocked(session),
+		History:        append([]HistoryMessage(nil), session.history...),
+		Runs:           runs,
 	}
 }
 
@@ -61,7 +61,7 @@ func (r *Runtime) runSnapshotLocked(run *runState) RunSnapshot {
 	}
 	return RunSnapshot{
 		ID:            run.id,
-		ThreadID:      run.threadID,
+		SessionID:     run.sessionID,
 		Message:       run.message,
 		Status:        run.status,
 		Attempt:       run.attempt,
@@ -74,7 +74,7 @@ func (r *Runtime) runSnapshotLocked(run *runState) RunSnapshot {
 		StartedAt:     copyTime(run.startedAt),
 		CompletedAt:   copyTime(run.completedAt),
 		Manifest:      cloneManifest(run.manifest),
-		BrainDigest:   run.brainDigest,
+		ProgramDigest: run.programDigest,
 	}
 }
 
@@ -113,7 +113,7 @@ func copyTime(value *time.Time) *time.Time {
 }
 
 // visibleCapabilities drops capabilities marked Hidden (e.g. the LLM cognition
-// tool and the runtime's protocol calls) from the brain's discoverable menu.
+// tool and the runtime's protocol calls) from the program's discoverable menu.
 // Hidden is set at build time on each published capability, so it works even
 // when a tool's published operation names differ from its local name.
 func visibleCapabilities(caps []sys.Capability) []sys.Capability {
@@ -134,22 +134,22 @@ func (r *Runtime) runContext(run *runState) RunContext {
 
 func (r *Runtime) runContextLocked(run *runState) RunContext {
 	return RunContext{
-		TenantID: r.tenantID,
-		ThreadID: run.threadID,
-		RunID:    run.id,
-		Revision: run.revision,
+		TenantID:  r.tenantID,
+		SessionID: run.sessionID,
+		RunID:     run.id,
+		Revision:  run.revision,
 	}
 }
 
 func (r *Runtime) storedRunLocked(run *runState) StoredRun {
 	var tags map[string]string
-	if thread := r.threads[run.threadID]; thread != nil {
-		tags = cloneTags(thread.tags)
+	if session := r.sessions[run.sessionID]; session != nil {
+		tags = cloneTags(session.tags)
 	}
 	return StoredRun{
 		TenantID:          r.tenantID,
 		ID:                run.id,
-		ThreadID:          run.threadID,
+		SessionID:         run.sessionID,
 		Revision:          run.revision,
 		Message:           run.message,
 		Status:            run.status,
@@ -161,7 +161,7 @@ func (r *Runtime) storedRunLocked(run *runState) StoredRun {
 		Answer:            run.answer,
 		Error:             run.err,
 		Manifest:          cloneManifest(run.manifest),
-		BrainDigest:       run.brainDigest,
+		ProgramDigest:     run.programDigest,
 		Tags:              tags,
 		ParentRunID:       run.parentRunID,
 		ChildRunIDs:       append([]string(nil), run.childRunIDs...),

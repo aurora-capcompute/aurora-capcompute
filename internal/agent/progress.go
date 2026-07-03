@@ -9,22 +9,22 @@ import (
 )
 
 // progressDispatcher serves the aurora.log syscall: a side-effect-free progress
-// report published to live thread subscribers. It sits below the replay layer
+// report published to live session subscribers. It sits below the replay layer
 // (reports are journaled like any syscall) and publishes its capability —
 // hidden — so the Validator's grant set covers it.
 type progressDispatcher struct {
-	next     sys.Dispatcher[RunContext]
-	publish  func(threadID string, event Event)
-	threadID string
-	runID    string
+	next      sys.Dispatcher[RunContext]
+	publish   func(sessionID string, event Event)
+	sessionID string
+	runID     string
 }
 
 type progressArgs struct {
 	Message string `json:"message"`
 }
 
-func newProgressDispatcher(next sys.Dispatcher[RunContext], publish func(string, Event), threadID, runID string) *progressDispatcher {
-	return &progressDispatcher{next: next, publish: publish, threadID: threadID, runID: runID}
+func newProgressDispatcher(next sys.Dispatcher[RunContext], publish func(string, Event), sessionID, runID string) *progressDispatcher {
+	return &progressDispatcher{next: next, publish: publish, sessionID: sessionID, runID: runID}
 }
 
 func (d *progressDispatcher) Dispatch(ctx context.Context, cred RunContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
@@ -33,7 +33,7 @@ func (d *progressDispatcher) Dispatch(ctx context.Context, cred RunContext, sysc
 		if err := json.Unmarshal(syscall.Args, &args); err != nil {
 			return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode aurora.log: %v", err)), nil
 		}
-		d.publish(d.threadID, Event{
+		d.publish(d.sessionID, Event{
 			Type: "progress",
 			Data: ProgressEvent{RunID: d.runID, Message: args.Message},
 		})

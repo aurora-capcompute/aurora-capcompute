@@ -35,7 +35,7 @@ func loadEntries(t *testing.T, j *logJournal) []string {
 
 func TestLogJournalLinearRoundTrip(t *testing.T) {
 	log := newMemLog()
-	scope := eventlog.Scope{TenantID: "t", ThreadID: "th"}
+	scope := eventlog.Scope{TenantID: "t", SessionID: "th"}
 	now := func() time.Time { return time.Unix(0, 0).UTC() }
 	j := newLogJournal(log, scope, "run1", 1, newRunHistory(), 0, now, nil)
 
@@ -72,7 +72,7 @@ func TestLogJournalLinearRoundTrip(t *testing.T) {
 
 func TestLogJournalForkSharesPrefixThenDiverges(t *testing.T) {
 	log := newMemLog()
-	scope := eventlog.Scope{TenantID: "t", ThreadID: "th"}
+	scope := eventlog.Scope{TenantID: "t", SessionID: "th"}
 	now := func() time.Time { return time.Unix(0, 0).UTC() }
 	history := newRunHistory()
 
@@ -124,7 +124,7 @@ func TestLogJournalForkSharesPrefixThenDiverges(t *testing.T) {
 // helpers must be indistinguishable: both hash-chained, both verifiable.
 func TestLogJournalBacksTheKernelTape(t *testing.T) {
 	log := newMemLog()
-	scope := eventlog.Scope{TenantID: "t", ThreadID: "th"}
+	scope := eventlog.Scope{TenantID: "t", SessionID: "th"}
 	now := func() time.Time { return time.Unix(0, 0).UTC() }
 	j := newLogJournal(log, scope, "run1", 1, newRunHistory(), 0, now, nil)
 
@@ -166,7 +166,7 @@ func TestLogJournalBacksTheKernelTape(t *testing.T) {
 // an in-flight entry and does not break folding.
 func TestLogJournalOpenIntentEntry(t *testing.T) {
 	log := newMemLog()
-	scope := eventlog.Scope{TenantID: "t", ThreadID: "th"}
+	scope := eventlog.Scope{TenantID: "t", SessionID: "th"}
 	now := func() time.Time { return time.Unix(0, 0).UTC() }
 	j := newLogJournal(log, scope, "run1", 1, newRunHistory(), 0, now, nil)
 

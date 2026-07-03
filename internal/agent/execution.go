@@ -1,6 +1,6 @@
 package agent
 
-// Run execution: the quantum that drives a brain to a terminal state, the
+// Run execution: the quantum that drives a program to a terminal state, the
 // finishing path, and the event appends plus subscriber publishing that surface
 // each state change to the durable log and live watchers.
 //
@@ -25,7 +25,7 @@ import (
 // activateProcess reconstructs the process for one run revision: it assembles
 // the run's dispatcher chain (monitor stack, replay tape over the journal,
 // task layer, delegation routes, drivers), instantiates the guest from the
-// brain's kernel, and saves it to the process table so the syscall host path
+// program's kernel, and saves it to the process table so the syscall host path
 // can find its dispatcher. Activation is exactly journal-replay wiring — the
 // journal, not the instance, is the durable process.
 func (r *Runtime) activateProcess(ctx context.Context, pid string) (*capcompute.Process[RunContext], error) {
@@ -38,18 +38,18 @@ func (r *Runtime) activateProcess(ctx context.Context, pid string) (*capcompute.
 		}
 	}
 	var cred RunContext
-	var brainID string
+	var programID string
 	if run != nil {
 		cred = r.runContextLocked(run)
-		brainID = run.manifest.Brain
+		programID = run.manifest.Program
 	}
-	kernel := r.kernels[brainID]
+	kernel := r.kernels[programID]
 	r.mu.Unlock()
 	if run == nil {
 		return nil, fmt.Errorf("%w: no run for process %s", ErrNotFound, pid)
 	}
 	if kernel == nil {
-		return nil, fmt.Errorf("brain %q is unavailable", brainID)
+		return nil, fmt.Errorf("program %q is unavailable", programID)
 	}
 
 	chain, err := r.factory.NewDispatcher(ctx, cred)
@@ -74,17 +74,17 @@ func (r *Runtime) activateProcess(ctx context.Context, pid string) (*capcompute.
 }
 
 // resumeProcess is the scheduler's Resume seam: one quantum on the kernel
-// owning the process's brain.
+// owning the process's program.
 func (r *Runtime) resumeProcess(ctx context.Context, process *capcompute.Process[RunContext]) (<-chan capcompute.ResumeResult[RunContext], error) {
 	r.mu.Lock()
-	var brainID string
+	var programID string
 	if run := r.runs[process.Cred.RunID]; run != nil {
-		brainID = run.manifest.Brain
+		programID = run.manifest.Program
 	}
-	kernel := r.kernels[brainID]
+	kernel := r.kernels[programID]
 	r.mu.Unlock()
 	if kernel == nil {
-		return nil, fmt.Errorf("brain %q is unavailable", brainID)
+		return nil, fmt.Errorf("program %q is unavailable", programID)
 	}
 	handle, err := kernel.Resume(ctx, process)
 	if err != nil {
@@ -106,9 +106,9 @@ func (r *Runtime) execute(runID string) {
 	if run.stopRequested {
 		r.finishLocked(run, RunStopped, "", context.Canceled)
 		snapshot := r.runSnapshotLocked(run)
-		threadID := run.threadID
+		sessionID := run.sessionID
 		r.mu.Unlock()
-		r.publish(threadID, Event{Type: "run.updated", Data: snapshot})
+		r.publish(sessionID, Event{Type: "run.updated", Data: snapshot})
 		return
 	}
 	leaseResource := fmt.Sprintf("%s/%d", run.id, run.revision)
@@ -124,9 +124,9 @@ func (r *Runtime) execute(runID string) {
 		r.finishLocked(run, RunInterrupted, "", err)
 		_ = r.appendRun(run)
 		snapshot := r.runSnapshotLocked(run)
-		threadID := run.threadID
+		sessionID := run.sessionID
 		r.mu.Unlock()
-		r.publish(threadID, Event{Type: "run.updated", Data: snapshot})
+		r.publish(sessionID, Event{Type: "run.updated", Data: snapshot})
 		return
 	}
 	defer r.leases.Release(
@@ -165,10 +165,10 @@ func (r *Runtime) execute(runID string) {
 	run.updatedAt = now
 	stopRequested := run.stopRequested
 	snapshot := r.runSnapshotLocked(run)
-	threadID := run.threadID
+	sessionID := run.sessionID
 	_ = r.appendRun(run)
 	r.mu.Unlock()
-	r.publish(threadID, Event{Type: "run.updated", Data: snapshot})
+	r.publish(sessionID, Event{Type: "run.updated", Data: snapshot})
 	if stopRequested {
 		stop()
 	}
@@ -240,7 +240,7 @@ func (r *Runtime) driveDirect(pid string) (<-chan capcompute.ResumeResult[RunCon
 
 // failureStatus maps a pre-quantum error to the run status it should finish
 // with: a scheduling conflict is an interruption (the run can be re-driven),
-// everything else — an incompatible journal, a missing brain — is a failure.
+// everything else — an incompatible journal, a missing program — is a failure.
 func (r *Runtime) failureStatus(err error) RunStatus {
 	if errors.Is(err, sched.ErrAlreadyScheduled) || errors.Is(err, sched.ErrClosed) {
 		return RunInterrupted
@@ -276,10 +276,10 @@ func (r *Runtime) finish(runID string, status RunStatus, answer string, err erro
 	r.finishLocked(run, status, answer, err)
 	_ = r.appendRun(run)
 	snapshot := r.runSnapshotLocked(run)
-	threadID := run.threadID
+	sessionID := run.sessionID
 	parentRunID := run.parentRunID
 	r.mu.Unlock()
-	r.publish(threadID, Event{Type: "run.updated", Data: snapshot})
+	r.publish(sessionID, Event{Type: "run.updated", Data: snapshot})
 
 	// When a delegated child reaches a terminal state, re-drive its parent if the
 	// parent is suspended waiting on it (HITL approval flow). resumeParentIfWaiting
@@ -311,24 +311,24 @@ func (r *Runtime) finishLocked(run *runState, status RunStatus, answer string, e
 		// (resume must re-enforce flow policy over the same history).
 		r.taints.ForgetRun(runPID(run.id, run.revision))
 	}
-	thread := r.threads[run.threadID]
-	if thread != nil {
-		if status != RunYielded && status != RunWaitingTask && thread.activeRunID == run.id {
-			// When a child run finishes in the parent's thread, return activeRunID to
-			// the parent so the parent goroutine can resume on the same thread.
+	session := r.sessions[run.sessionID]
+	if session != nil {
+		if status != RunYielded && status != RunWaitingTask && session.activeRunID == run.id {
+			// When a child run finishes in the parent's session, return activeRunID to
+			// the parent so the parent goroutine can resume on the same session.
 			if run.parentRunID != "" {
-				if parent := r.runs[run.parentRunID]; parent != nil && parent.threadID == run.threadID {
-					thread.activeRunID = run.parentRunID
+				if parent := r.runs[run.parentRunID]; parent != nil && parent.sessionID == run.sessionID {
+					session.activeRunID = run.parentRunID
 				} else {
-					thread.activeRunID = ""
+					session.activeRunID = ""
 				}
 			} else {
-				thread.activeRunID = ""
+				session.activeRunID = ""
 			}
 		}
-		thread.updatedAt = now
+		session.updatedAt = now
 		if status == RunCompleted && run.parentRunID == "" {
-			thread.history = append(thread.history,
+			session.history = append(session.history,
 				HistoryMessage{Role: "user", Content: run.message},
 				HistoryMessage{Role: "assistant", Content: answer},
 			)
@@ -336,16 +336,16 @@ func (r *Runtime) finishLocked(run *runState, status RunStatus, answer string, e
 	}
 }
 
-// scope returns the event stream key for a thread.
-func (r *Runtime) scope(threadID string) eventlog.Scope {
-	return eventlog.Scope{TenantID: r.tenantID, ThreadID: threadID}
+// scope returns the event stream key for a session.
+func (r *Runtime) scope(sessionID string) eventlog.Scope {
+	return eventlog.Scope{TenantID: r.tenantID, SessionID: sessionID}
 }
 
 func (r *Runtime) journalNow() time.Time { return r.now().UTC() }
 
-// journalAppendPublisher publishes a journal.appended event for a thread when a
+// journalAppendPublisher publishes a journal.appended event for a session when a
 // record is appended to one of its runs' journals.
-func (r *Runtime) journalAppendPublisher(threadID string) func(string, uint64, journaled.Record, string) {
+func (r *Runtime) journalAppendPublisher(sessionID string) func(string, uint64, journaled.Record, string) {
 	return func(runID string, revision uint64, rec journaled.Record, syscallName string) {
 		event := JournalEvent{
 			RunID:    runID,
@@ -358,29 +358,29 @@ func (r *Runtime) journalAppendPublisher(threadID string) func(string, uint64, j
 			event.OutcomeStatus = rec.Result.Status()
 			event.OutcomeSize = len(rec.Result.Result())
 		}
-		r.publish(threadID, Event{Type: "journal.appended", Data: event})
+		r.publish(sessionID, Event{Type: "journal.appended", Data: event})
 	}
 }
 
-// appendRun records a run's current state to its thread's event stream.
+// appendRun records a run's current state to its session's event stream.
 func (r *Runtime) appendRun(run *runState) error {
 	ev, err := runStateEvent(r.now().UTC(), r.storedRunLocked(run))
 	if err != nil {
 		return err
 	}
-	_, err = r.log.Append(context.Background(), r.scope(run.threadID), ev)
+	_, err = r.log.Append(context.Background(), r.scope(run.sessionID), ev)
 	return err
 }
 
 func (r *Runtime) newJournal(run *runState, history *runHistory, forkOffset int) *logJournal {
-	return newLogJournal(r.log, r.scope(run.threadID), run.id, run.revision,
-		history, forkOffset, r.journalNow, r.journalAppendPublisher(run.threadID))
+	return newLogJournal(r.log, r.scope(run.sessionID), run.id, run.revision,
+		history, forkOffset, r.journalNow, r.journalAppendPublisher(run.sessionID))
 }
 
-func (r *Runtime) publish(threadID string, event Event) {
+func (r *Runtime) publish(sessionID string, event Event) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for _, ch := range r.subscribers[threadID] {
+	for _, ch := range r.subscribers[sessionID] {
 		select {
 		case ch <- event:
 		default:

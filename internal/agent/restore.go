@@ -1,7 +1,7 @@
 package agent
 
 // Restore: rebuild the runtime's in-memory state on startup by folding each
-// thread's event stream back into thread, run, and task projections.
+// session's event stream back into session, run, and task projections.
 
 import (
 	"context"
@@ -9,7 +9,7 @@ import (
 	"sort"
 )
 
-// Restore: rebuild in-memory state by folding each thread's event stream.
+// Restore: rebuild in-memory state by folding each session's event stream.
 func (r *Runtime) restore(ctx context.Context) error {
 	scopes, err := r.log.Streams(ctx, r.tenantID)
 	if err != nil {
@@ -24,11 +24,11 @@ func (r *Runtime) restore(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		journals, histories, err := foldJournals(events, r.log, scope, r.journalNow, r.journalAppendPublisher(scope.ThreadID))
+		journals, histories, err := foldJournals(events, r.log, scope, r.journalNow, r.journalAppendPublisher(scope.SessionID))
 		if err != nil {
 			return err
 		}
-		if err := r.restoreThread(proj, journals, histories); err != nil {
+		if err := r.restoreSession(proj, journals, histories); err != nil {
 			return err
 		}
 		r.tasks.seed(proj.TaskList())
@@ -36,16 +36,16 @@ func (r *Runtime) restore(ctx context.Context) error {
 	return nil
 }
 
-// restoreThread folds one thread's projection back into memory: it rebuilds the
-// thread, its runs (in creation order, deriving conversation history from
+// restoreSession folds one session's projection back into memory: it rebuilds the
+// session, its runs (in creation order, deriving conversation history from
 // completed runs), and attaches each run's journal revision. Runs left mid-flight
 // by a crash are marked interrupted and re-recorded.
-func (r *Runtime) restoreThread(proj Projection, journals map[string]map[uint64]*logJournal, histories map[string]*runHistory) error {
-	stored := proj.Thread
+func (r *Runtime) restoreSession(proj Projection, journals map[string]map[uint64]*logJournal, histories map[string]*runHistory) error {
+	stored := proj.Session
 	if stored.ID == "" {
 		return nil
 	}
-	thread := &threadState{
+	session := &sessionState{
 		id:          stored.ID,
 		title:       stored.Title,
 		createdAt:   stored.CreatedAt,
@@ -53,7 +53,7 @@ func (r *Runtime) restoreThread(proj Projection, journals map[string]map[uint64]
 		activeRunID: stored.ActiveRunID,
 		tags:        cloneTags(stored.Tags),
 	}
-	r.threads[thread.id] = thread
+	r.sessions[session.id] = session
 
 	runs := make([]StoredRun, 0, len(proj.Runs))
 	for _, sr := range proj.Runs {
@@ -62,24 +62,32 @@ func (r *Runtime) restoreThread(proj Projection, journals map[string]map[uint64]
 	sort.Slice(runs, func(i, j int) bool { return runs[i].CreatedAt.Before(runs[j].CreatedAt) })
 
 	for _, sr := range runs {
-		if sr.Manifest.Brain == "" {
-			sr.Manifest.Brain = r.brains.DefaultID()
+		if sr.Manifest.Program == "" {
+			sr.Manifest.Program = r.programs.DefaultID()
 		}
+		// Quarantine, never refuse to boot: a historical run whose manifest no
+		// longer validates against the compiled driver set (a decommissioned
+		// tool type) is restored verbatim — visible, auditable — and any later
+		// execution attempt fails with the provider's error. Dispatcher
+		// upgrades thereby follow the same drain-and-deprecate story as
+		// program upgrades.
 		em, err := ValidateManifest(sr.Manifest, r.dispatchers)
 		if err != nil {
-			return err
+			slog.Warn("run manifest no longer validates against the compiled driver set; quarantining",
+				"run_id", sr.ID, "session_id", sr.SessionID, "err", err)
+			em = sr.Manifest
 		}
-		// Runs are always restored regardless of brain registration state:
-		// brains are loaded after restore via SetBrains, so r.brains is empty
-		// here. If the brain is unavailable when execution is attempted, execute()
-		// will fail the run cleanly at that point (compute == nil check).
+		// Runs are always restored regardless of program registration state:
+		// programs are loaded after restore via SetPrograms, so r.programs is empty
+		// here. If the program is unavailable when execution is attempted, execute()
+		// will fail the run cleanly at that point (kernel == nil check).
 		status := sr.Status
 		if status == RunQueued || status == RunRunning || status == RunStopping {
 			status = RunInterrupted
 		}
 		run := &runState{
 			id:                sr.ID,
-			threadID:          sr.ThreadID,
+			sessionID:         sr.SessionID,
 			message:           sr.Message,
 			status:            status,
 			attempt:           sr.Attempt,
@@ -91,7 +99,7 @@ func (r *Runtime) restoreThread(proj Projection, journals map[string]map[uint64]
 			answer:            sr.Answer,
 			err:               sr.Error,
 			manifest:          cloneManifest(em),
-			brainDigest:       sr.BrainDigest,
+			programDigest:     sr.ProgramDigest,
 			parentRunID:       sr.ParentRunID,
 			childRunIDs:       append([]string(nil), sr.ChildRunIDs...),
 			childSpawnOffsets: append([]int(nil), sr.ChildSpawnOffsets...),
@@ -113,10 +121,10 @@ func (r *Runtime) restoreThread(proj Projection, journals map[string]map[uint64]
 			run.journal = r.newJournal(run, history, sr.ForkOffset)
 		}
 		r.runs[run.id] = run
-		run.history = append([]HistoryMessage(nil), thread.history...)
-		thread.runIDs = append(thread.runIDs, run.id)
+		run.history = append([]HistoryMessage(nil), session.history...)
+		session.runIDs = append(session.runIDs, run.id)
 		if run.status == RunCompleted {
-			thread.history = append(thread.history,
+			session.history = append(session.history,
 				HistoryMessage{Role: "user", Content: run.message},
 				HistoryMessage{Role: "assistant", Content: run.answer},
 			)
@@ -127,10 +135,10 @@ func (r *Runtime) restoreThread(proj Projection, journals map[string]map[uint64]
 			}
 		}
 	}
-	if thread.activeRunID != "" && r.runs[thread.activeRunID] == nil {
-		slog.Info("clearing active run from thread due to brain digest mismatch",
-			"thread_id", thread.id, "run_id", thread.activeRunID)
-		thread.activeRunID = ""
+	if session.activeRunID != "" && r.runs[session.activeRunID] == nil {
+		slog.Info("clearing active run from session due to program digest mismatch",
+			"session_id", session.id, "run_id", session.activeRunID)
+		session.activeRunID = ""
 	}
 	return nil
 }

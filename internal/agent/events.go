@@ -10,10 +10,10 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/internal/task"
 )
 
-// Domain event kinds appended to a thread's eventlog stream. Lifecycle payloads
+// Domain event kinds appended to a session's eventlog stream. Lifecycle payloads
 // are state-carried: a run event holds the run's full durable state at that
-// point, so folding is last-writer-wins per id. Thread state is derived from
-// the run projection (no separate thread event). Task events are semantic
+// point, so folding is last-writer-wins per id. Session state is derived from
+// the run projection (no separate session event). Task events are semantic
 // (created / resolved / executed). Capability-journal and fork events are
 // defined alongside the journal view.
 const (
@@ -61,17 +61,17 @@ func encodeEvent(kind, run string, rev uint64, now time.Time, payload any) (even
 	return eventlog.Event{Kind: kind, Time: now.UTC(), Run: run, Rev: rev, Data: data}, nil
 }
 
-// Projection is the durable state folded from a thread's event stream: the same
+// Projection is the durable state folded from a session's event stream: the same
 // StoredState + task records the runtime previously loaded from the CRUD stores,
 // now derived from the append-only log.
 type Projection struct {
-	Thread StoredThread
-	Runs   map[string]StoredRun
-	Tasks  map[string]task.Record
+	Session StoredSession
+	Runs    map[string]StoredRun
+	Tasks   map[string]task.Record
 }
 
-// Fold reconstructs a thread's durable projection from its event stream. Events
-// must be in append order (ascending Seq). Thread state is derived from the run
+// Fold reconstructs a session's durable projection from its event stream. Events
+// must be in append order (ascending Seq). Session state is derived from the run
 // projection rather than stored in a dedicated event.
 func Fold(events []eventlog.Event) (Projection, error) {
 	proj := Projection{
@@ -103,23 +103,23 @@ func Fold(events []eventlog.Event) (Projection, error) {
 				proj.Tasks[x.TaskID] = rec
 			}
 		}
-		// capability.recorded / run.forked / thread.state (legacy, ignored) are
+		// capability.recorded / run.forked / session.state (legacy, ignored) are
 		// handled by the journal view or silently skipped here.
 	}
-	proj.Thread = deriveStoredThread(proj.Runs)
+	proj.Session = deriveStoredSession(proj.Runs)
 	return proj, nil
 }
 
-// deriveStoredThread reconstructs thread metadata from the run projection.
-// Thread state is not stored in a separate event; instead it is derived:
+// deriveStoredSession reconstructs session metadata from the run projection.
+// Session state is not stored in a separate event; instead it is derived:
 // - identity (ID, TenantID) and Tags come from the earliest run
 // - Title is the first run's message truncated to 60 runes
 // - CreatedAt is the earliest run's CreatedAt
 // - UpdatedAt is the latest run's UpdatedAt
 // - ActiveRunID is the ID of the one run (if any) that is not in a terminal state
-func deriveStoredThread(runs map[string]StoredRun) StoredThread {
+func deriveStoredSession(runs map[string]StoredRun) StoredSession {
 	if len(runs) == 0 {
-		return StoredThread{}
+		return StoredSession{}
 	}
 	var first StoredRun
 	for _, r := range runs {
@@ -127,10 +127,10 @@ func deriveStoredThread(runs map[string]StoredRun) StoredThread {
 			first = r
 		}
 	}
-	th := StoredThread{
+	th := StoredSession{
 		TenantID:  first.TenantID,
-		ID:        first.ThreadID,
-		Title:     threadTitle(first.Message),
+		ID:        first.SessionID,
+		Title:     sessionTitle(first.Message),
 		CreatedAt: first.CreatedAt,
 		UpdatedAt: first.UpdatedAt,
 		Tags:      cloneTags(first.Tags),

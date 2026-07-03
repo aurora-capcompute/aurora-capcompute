@@ -49,11 +49,11 @@ type HistoryMessage struct {
 	Content string `json:"content"`
 }
 
-// Config wires a Runtime. Everything concrete is injected: brains, capability
+// Config wires a Runtime. Everything concrete is injected: programs, capability
 // drivers, the event log, leases, and the kernel's process table are supplied
 // by the application — this module ships interfaces and orchestration only.
 type Config struct {
-	Brains       BrainProvider
+	Programs     ProgramProvider
 	Dispatchers  DispatcherProvider
 	Log          eventlog.Log
 	Leases       Leases
@@ -82,7 +82,7 @@ type Config struct {
 type Runtime struct {
 	mu           sync.Mutex
 	kernels      map[string]*capcompute.Kernel[string, RunContext]
-	brains       *loadedBrains
+	programs     *loadedPrograms
 	processTable capcompute.ProcessTable[string, RunContext]
 	scheduler    *sched.Scheduler[string, RunContext]
 	taints       *capcompute.Taints[string]
@@ -90,7 +90,7 @@ type Runtime struct {
 	leases       Leases
 	tasks        *eventTaskStore
 	tenantID     string
-	threads      map[string]*threadState
+	sessions     map[string]*sessionState
 	runs         map[string]*runState
 	subscribers  map[string]map[uint64]chan Event
 	nextSubID    uint64
@@ -107,7 +107,7 @@ type Runtime struct {
 	closed       bool
 }
 
-type threadState struct {
+type sessionState struct {
 	id          string
 	title       string
 	createdAt   time.Time
@@ -120,7 +120,7 @@ type threadState struct {
 
 type runState struct {
 	id          string
-	threadID    string
+	sessionID   string
 	message     string
 	history     []HistoryMessage
 	status      RunStatus
@@ -135,11 +135,11 @@ type runState struct {
 	// stop aborts the run's in-flight quantum: the scheduler submission for a
 	// root run, the direct resume handle for a delegated child. Nil when no
 	// quantum is in flight.
-	stop            func()
-	stopRequested   bool
-	manifest        Manifest
-	revision        uint64
-	brainDigest     string
+	stop          func()
+	stopRequested bool
+	manifest      Manifest
+	revision      uint64
+	programDigest string
 	// parentRunID and childRunIDs make delegated runs addressable: a child knows
 	// the run that spawned it, and a parent records its children in spawn order.
 	parentRunID string
@@ -175,10 +175,10 @@ type runState struct {
 // triad's "who". The kernel keys processes by PID(); two revisions of one run
 // are distinct processes, so a forked retry can never resume a stale instance.
 type RunContext struct {
-	TenantID string `json:"tenant_id"`
-	ThreadID string `json:"thread_id"`
-	RunID    string `json:"run_id"`
-	Revision uint64 `json:"revision"`
+	TenantID  string `json:"tenant_id"`
+	SessionID string `json:"session_id"`
+	RunID     string `json:"run_id"`
+	Revision  uint64 `json:"revision"`
 }
 
 func (r RunContext) PID() string {
@@ -197,7 +197,7 @@ type agentInput struct {
 	Capabilities []sys.Capability `json:"capabilities,omitempty"`
 }
 
-type ThreadSummary struct {
+type SessionSummary struct {
 	ID          string            `json:"id"`
 	Title       string            `json:"title"`
 	CreatedAt   time.Time         `json:"created_at"`
@@ -207,15 +207,15 @@ type ThreadSummary struct {
 	Tags        map[string]string `json:"tags,omitempty"`
 }
 
-type ThreadSnapshot struct {
-	ThreadSummary
+type SessionSnapshot struct {
+	SessionSummary
 	History []HistoryMessage `json:"history"`
 	Runs    []RunSnapshot    `json:"runs"`
 }
 
 type RunSnapshot struct {
 	ID            string     `json:"id"`
-	ThreadID      string     `json:"thread_id"`
+	SessionID     string     `json:"session_id"`
 	Message       string     `json:"message"`
 	Status        RunStatus  `json:"status"`
 	Attempt       int        `json:"attempt"`
@@ -228,7 +228,7 @@ type RunSnapshot struct {
 	StartedAt     *time.Time `json:"started_at,omitempty"`
 	CompletedAt   *time.Time `json:"completed_at,omitempty"`
 	Manifest      Manifest   `json:"manifest"`
-	BrainDigest   string     `json:"brain_digest"`
+	ProgramDigest string     `json:"program_digest"`
 }
 
 type TaskSnapshot struct {

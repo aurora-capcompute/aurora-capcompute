@@ -32,7 +32,7 @@ func TestValidateManifestUsesInjectedProvider(t *testing.T) {
 	provider := &testDispatchers{}
 	manifest, err := ValidateManifest(Manifest{
 		Version: ManifestVersion,
-		Brain:   "brain",
+		Program: "program",
 		Tools: []Tool{{
 			Name: " custom ",
 			Type: "core.custom",
@@ -61,11 +61,11 @@ func TestValidateManifestRejectsMissingProviderAndUnknownType(t *testing.T) {
 	}
 }
 
-// A core.agent tool requires a brain (settings.code) and recurses into its tools.
+// A core.agent tool requires a program (settings.code) and recurses into its tools.
 func TestValidateManifestValidatesNestedAgent(t *testing.T) {
 	_, err := ValidateManifest(Manifest{
 		Version: ManifestVersion,
-		Brain:   "root",
+		Program: "root",
 		Tools: []Tool{{
 			Name:     "scout",
 			Type:     AgentToolType,

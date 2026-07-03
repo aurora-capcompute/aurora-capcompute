@@ -1,0 +1,75 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"testing"
+	"time"
+)
+
+// vanishedToolDispatchers refuses one tool type, standing in for a driver set
+// that no longer compiles in a capability historical manifests still name.
+type vanishedToolDispatchers struct{ runtimeDispatchers }
+
+func (p *vanishedToolDispatchers) Normalize(toolType string, settings json.RawMessage) (json.RawMessage, error) {
+	if toolType == "core.gone" {
+		return nil, errors.New("unsupported tool type")
+	}
+	return p.runtimeDispatchers.Normalize(toolType, settings)
+}
+
+// A historical run whose manifest names a decommissioned tool type must not
+// prevent the runtime from booting: it is quarantined — restored verbatim and
+// visible — and a retry fails with the provider's error instead of running.
+func TestRestoreQuarantinesStaleManifests(t *testing.T) {
+	store := newRuntimeStore()
+	now := time.Now().UTC().Add(-time.Hour)
+	store.seed(
+		StoredRun{
+			TenantID: "local", ID: "run_old", SessionID: "ses_old", Revision: 1,
+			Message: "old work", Status: RunFailed,
+			CreatedAt: now, UpdatedAt: now,
+			Manifest: Manifest{
+				Version: ManifestVersion,
+				Program: "program@1",
+				Tools:   []Tool{{Name: "gone", Type: "core.gone"}},
+			},
+			ProgramDigest: "stale-digest",
+		},
+	)
+	runtime, err := NewRuntime(context.Background(), Config{
+		Programs:     nil,
+		Dispatchers:  &vanishedToolDispatchers{},
+		Log:          store.log,
+		Leases:       store,
+		ProcessTable: newMemProcessTable(),
+		TaskSecret:   []byte("stable-secret"),
+		IDSource:     sequentialIDs(),
+	})
+	if err != nil {
+		t.Fatalf("boot with stale manifest: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = runtime.Close(ctx)
+	})
+
+	// The quarantined run is visible with its manifest intact.
+	snap, err := runtime.GetRun("run_old")
+	if err != nil {
+		t.Fatalf("get quarantined run: %v", err)
+	}
+	if len(snap.Manifest.Tools) != 1 || snap.Manifest.Tools[0].Type != "core.gone" {
+		t.Fatalf("quarantined manifest = %+v", snap.Manifest)
+	}
+
+	// Re-driving it fails at manifest/driver build, not silently.
+	if _, err := runtime.Retry("run_old", RetryRestart); err == nil {
+		run := waitForRunFailed(t, runtime, "run_old")
+		if run.Error == "" {
+			t.Fatal("retried quarantined run finished without an error")
+		}
+	}
+}

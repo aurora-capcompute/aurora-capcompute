@@ -65,8 +65,8 @@ func (r *agentRouter) Capabilities() []sys.Capability {
 
 // onChildFailure applies the child's failure-mode policy. OnFailurePropagate
 // forces the parent run to fail (a failed result alone only surfaces a
-// recoverable observation to the brain); otherwise the failure is reported to
-// the parent brain as a recoverable failed observation.
+// recoverable observation to the program); otherwise the failure is reported to
+// the parent program as a recoverable failed observation.
 func (c *agentChild) onChildFailure(parentRunID string, err error) (sys.SyscallResult, error) {
 	if c.settings.OnFailure == OnFailurePropagate {
 		c.runtime.requestRunFailure(parentRunID, fmt.Errorf("child %q failed: %w", c.tool.Name, err))
@@ -84,7 +84,7 @@ func (c *agentChild) dispatch(ctx context.Context, parent RunContext, syscall sy
 	// after a child's HITL approval), re-execution re-issues the same deterministic
 	// sequence of delegation calls. Rather than spawning a fresh child each time,
 	// reuse the existing child run recorded at this position (in spawn order).
-	if childID, threadID, cascadeMode, reuse, ok := c.runtime.nextCascadeChild(parent.RunID); ok {
+	if childID, sessionID, cascadeMode, reuse, ok := c.runtime.nextCascadeChild(parent.RunID); ok {
 		if reuse {
 			// HITL reconnect: the child already finished (e.g. after its approval was
 			// resolved while the parent was suspended). Reuse its terminal result
@@ -103,7 +103,7 @@ func (c *agentChild) dispatch(ctx context.Context, parent RunContext, syscall sy
 		if _, err := c.runtime.Retry(childID, cascadeMode); err != nil {
 			return sys.Fail(fmt.Sprintf("cascade retry child: %v", err)), nil
 		}
-		answer, parked, err := c.runtime.waitForCompletion(ctx, childID, threadID)
+		answer, parked, err := c.runtime.waitForCompletion(ctx, childID, sessionID)
 		if err != nil {
 			return c.onChildFailure(parent.RunID, err)
 		}
@@ -114,12 +114,12 @@ func (c *agentChild) dispatch(ctx context.Context, parent RunContext, syscall sy
 	}
 
 	childManifest := buildChildManifest(c.tool, c.settings, args.SystemPrompt)
-	slog.Info("spawning child run in parent thread", "parent_run", parent.RunID, "child", c.tool.Name)
-	run, err := c.runtime.createChildRun(parent.RunID, parent.ThreadID, args.Message, childManifest)
+	slog.Info("spawning child run in parent session", "parent_run", parent.RunID, "child", c.tool.Name)
+	run, err := c.runtime.createChildRun(parent.RunID, parent.SessionID, args.Message, childManifest)
 	if err != nil {
 		return sys.Fail(fmt.Sprintf("create child run: %v", err)), nil
 	}
-	answer, parked, err := c.runtime.waitForCompletion(ctx, run.ID, parent.ThreadID)
+	answer, parked, err := c.runtime.waitForCompletion(ctx, run.ID, parent.SessionID)
 	if err != nil {
 		return c.onChildFailure(parent.RunID, err)
 	}
@@ -142,7 +142,7 @@ func delegationResult(answer string) (sys.SyscallResult, error) {
 }
 
 // buildChildManifest lifts a `core.agent` tool node into a Manifest for the child
-// run: brain/system_prompt come from the tool's AgentSettings, composition from
+// run: program/system_prompt come from the tool's AgentSettings, composition from
 // its nested Tools.
 func buildChildManifest(tool Tool, settings AgentSettings, systemPromptOverride string) Manifest {
 	prompt := settings.SystemPrompt
@@ -152,7 +152,7 @@ func buildChildManifest(tool Tool, settings AgentSettings, systemPromptOverride 
 	return Manifest{
 		Version:      ManifestVersion,
 		Name:         tool.Name,
-		Brain:        settings.Code,
+		Program:      settings.Program,
 		BindingRef:   settings.BindingRef,
 		SystemPrompt: prompt,
 		OnFailure:    settings.OnFailure,
@@ -194,7 +194,7 @@ func agentCapability(name string, child agentChild) sys.Capability {
 // The returned cascadeMode is the effective retry mode to use on the child:
 // it mirrors the parent's cascadeMode except that completed children are always
 // restarted (RetryResume is invalid for completed runs).
-func (r *Runtime) nextCascadeChild(parentRunID string) (childID, threadID string, cascadeMode RetryMode, reuse, ok bool) {
+func (r *Runtime) nextCascadeChild(parentRunID string) (childID, sessionID string, cascadeMode RetryMode, reuse, ok bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	parent := r.runs[parentRunID]
@@ -224,7 +224,7 @@ func (r *Runtime) nextCascadeChild(parentRunID string) (childID, threadID string
 	// the child's terminal result directly. Re-running it would fork a new revision
 	// and, for a HITL child, re-create the now-resolved approval task.
 	if parent.reconnectChildren && isTerminal(child.status) {
-		return childID, child.threadID, parent.cascadeMode, true, true
+		return childID, child.sessionID, parent.cascadeMode, true, true
 	}
 	// A resume-mode cascade should also resume the child so only the failed step
 	// gets a new revision. Completed children cannot be resumed, so fall back to
@@ -233,14 +233,14 @@ func (r *Runtime) nextCascadeChild(parentRunID string) (childID, threadID string
 	if mode == RetryResume && child.status == RunCompleted {
 		mode = RetryRestart
 	}
-	return childID, child.threadID, mode, false, true
+	return childID, child.sessionID, mode, false, true
 }
 
-func (r *Runtime) createChildRun(parentRunID string, threadID string, message string, manifest Manifest) (RunSnapshot, error) {
+func (r *Runtime) createChildRun(parentRunID string, sessionID string, message string, manifest Manifest) (RunSnapshot, error) {
 	if message == "" {
 		return RunSnapshot{}, fmt.Errorf("%w: message is required", ErrInvalid)
 	}
-	brain, err := r.brains.Resolve(manifest.Brain)
+	program, err := r.programs.Resolve(manifest.Program)
 	if err != nil {
 		return RunSnapshot{}, err
 	}
@@ -255,42 +255,42 @@ func (r *Runtime) createChildRun(parentRunID string, threadID string, message st
 		r.mu.Unlock()
 		return RunSnapshot{}, fmt.Errorf("%w: runtime is closed", ErrConflict)
 	}
-	thread := r.threads[threadID]
-	if thread == nil {
+	session := r.sessions[sessionID]
+	if session == nil {
 		r.mu.Unlock()
-		return RunSnapshot{}, fmt.Errorf("%w: thread %s", ErrNotFound, threadID)
+		return RunSnapshot{}, fmt.Errorf("%w: session %s", ErrNotFound, sessionID)
 	}
-	if thread.activeRunID != "" && thread.activeRunID != parentRunID {
+	if session.activeRunID != "" && session.activeRunID != parentRunID {
 		r.mu.Unlock()
-		return RunSnapshot{}, fmt.Errorf("%w: thread already has active run %s", ErrConflict, thread.activeRunID)
+		return RunSnapshot{}, fmt.Errorf("%w: session already has active run %s", ErrConflict, session.activeRunID)
 	}
 	run := &runState{
-		id:          runID,
-		threadID:    threadID,
-		message:     message,
-		history:     append([]HistoryMessage(nil), thread.history...),
-		status:      RunQueued,
-		attempt:     1,
-		createdAt:   now,
-		updatedAt:   now,
-		manifest:    manifest,
-		revision:    1,
-		brainDigest: brain.Digest,
-		parentRunID: parentRunID,
+		id:            runID,
+		sessionID:     sessionID,
+		message:       message,
+		history:       append([]HistoryMessage(nil), session.history...),
+		status:        RunQueued,
+		attempt:       1,
+		createdAt:     now,
+		updatedAt:     now,
+		manifest:      manifest,
+		revision:      1,
+		programDigest: program.Digest,
+		parentRunID:   parentRunID,
 	}
 	run.journal = r.newJournal(run, newRunHistory(), 0)
 	r.runs[runID] = run
-	thread.runIDs = append(thread.runIDs, runID)
-	if len(thread.runIDs) == 1 {
-		thread.title = threadTitle(message)
+	session.runIDs = append(session.runIDs, runID)
+	if len(session.runIDs) == 1 {
+		session.title = sessionTitle(message)
 	}
-	prevActiveRunID := thread.activeRunID
-	thread.activeRunID = runID
-	thread.updatedAt = now
+	prevActiveRunID := session.activeRunID
+	session.activeRunID = runID
+	session.updatedAt = now
 	if err := r.appendRun(run); err != nil {
 		delete(r.runs, runID)
-		thread.runIDs = thread.runIDs[:len(thread.runIDs)-1]
-		thread.activeRunID = prevActiveRunID
+		session.runIDs = session.runIDs[:len(session.runIDs)-1]
+		session.activeRunID = prevActiveRunID
 		r.mu.Unlock()
 		return RunSnapshot{}, err
 	}
@@ -308,7 +308,7 @@ func (r *Runtime) createChildRun(parentRunID string, threadID string, message st
 	snapshot := r.runSnapshotLocked(run)
 	r.mu.Unlock()
 
-	r.publish(threadID, Event{Type: "run.updated", Data: snapshot})
+	r.publish(sessionID, Event{Type: "run.updated", Data: snapshot})
 	r.wg.Add(1)
 	go r.execute(runID)
 	return snapshot, nil
@@ -319,10 +319,10 @@ func (r *Runtime) createChildRun(parentRunID string, threadID string, message st
 // yield (suspend the parent durably) rather than treat the result as final;
 // there is deliberately no timeout, since a human approval may take arbitrarily
 // long. ctx cancellation (shutdown/stop) still stops the child.
-func (r *Runtime) waitForCompletion(ctx context.Context, runID, threadID string) (answer string, parked bool, err error) {
-	_, events, unsubscribe, err := r.Subscribe(threadID)
+func (r *Runtime) waitForCompletion(ctx context.Context, runID, sessionID string) (answer string, parked bool, err error) {
+	_, events, unsubscribe, err := r.Subscribe(sessionID)
 	if err != nil {
-		return "", false, fmt.Errorf("subscribe to child thread: %w", err)
+		return "", false, fmt.Errorf("subscribe to child session: %w", err)
 	}
 	defer unsubscribe()
 

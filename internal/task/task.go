@@ -1,4 +1,4 @@
-// Package task owns durable approval: when a brain's syscall yields for
+// Package task owns durable approval: when a program's syscall yields for
 // out-of-band confirmation, this package turns the yield into a persisted task
 // record, mints an HMAC-derived token the caller resolves against, and on
 // approval replays the original syscall back through the wrapped dispatcher
@@ -28,10 +28,10 @@ import (
 )
 
 type Scope struct {
-	TenantID string
-	ThreadID string
-	RunID    string
-	Revision uint64
+	TenantID  string
+	SessionID string
+	RunID     string
+	Revision  uint64
 }
 
 type State = sys.Decision
