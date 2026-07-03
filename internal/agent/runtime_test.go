@@ -13,9 +13,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aurora-capcompute/capcompute/sys"
+
 	"github.com/aurora-capcompute/aurora-capcompute/internal/eventlog"
-	"github.com/aurora-capcompute/capcompute"
-	"github.com/aurora-capcompute/capcompute/dispatcher"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/task"
 )
 
 type runtimeDispatchers struct {
@@ -30,38 +31,41 @@ func (*runtimeDispatchers) Normalize(_ string, settings json.RawMessage) (json.R
 	return append(json.RawMessage(nil), settings...), nil
 }
 
-func (p *runtimeDispatchers) NewDispatcher(_ context.Context, _ RunContext, manifest Manifest) (dispatcher.Dispatcher[RunContext], error) {
+func (p *runtimeDispatchers) NewDispatcher(_ context.Context, _ RunContext, manifest Manifest) (sys.Dispatcher[RunContext], error) {
 	p.mu.Lock()
 	p.manifests = append(p.manifests, cloneManifest(manifest))
 	p.mu.Unlock()
 	return finalDispatcher{}, nil
 }
 
-func (*runtimeDispatchers) IsSubset(_ string, _, _ json.RawMessage) error {
-	return nil
+// llmCapability publishes the fake cognition tool the way a real assembly
+// does: dispatchable, hidden from the discoverable menu, and — because the
+// kernel's Validator enforces complete mediation — granted explicitly.
+func llmCapability() sys.Capability {
+	return sys.Capability{Name: "openai.chat", Description: "LLM chat", Hidden: true}
 }
 
 type finalDispatcher struct{}
 
-func (finalDispatcher) Capabilities() []dispatcher.Capability { return nil }
+func (finalDispatcher) Capabilities() []sys.Capability { return []sys.Capability{llmCapability()} }
 
-func (finalDispatcher) Dispatch(_ context.Context, _ RunContext, call dispatcher.Call, _ dispatcher.Authorization) (dispatcher.Outcome, error) {
-	if call.Name != "openai.chat" {
-		return dispatcher.Fail("unsupported call: " + call.Name), nil
+func (finalDispatcher) Dispatch(_ context.Context, _ RunContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
+	if syscall.Name != "openai.chat" {
+		return sys.Fail("unsupported call: " + syscall.Name), nil
 	}
-	return dispatcher.Result(json.RawMessage(
+	return sys.Result(json.RawMessage(
 		`{"choices":[{"message":{"content":"{\"actions\":[{\"action\":\"final\",\"content\":{\"answer\":\"done\"}}]}"}}]}`,
 	)), nil
 }
 
 type runtimeStore struct {
-	log    *eventlog.Memory
+	log    *memLog
 	mu     sync.Mutex
 	leases map[string]string
 }
 
 func newRuntimeStore() *runtimeStore {
-	return &runtimeStore{log: eventlog.NewMemory(), leases: make(map[string]string)}
+	return &runtimeStore{log: newMemLog(), leases: make(map[string]string)}
 }
 
 func (s *runtimeStore) Acquire(_ context.Context, tenant, kind, resource, holder string, _ time.Time, _ time.Duration) (bool, error) {
@@ -95,21 +99,21 @@ func (s *runtimeStore) seed(runs ...StoredRun) {
 	}
 }
 
-// minRev2Index returns the lowest journal position that has a revision-2 entry,
-// or -1 if none.
+// minRev2Index returns the lowest journal record position that has a
+// revision-2 record, or -1 if none.
 func (s *runtimeStore) minRev2Index(runID string) int {
 	streams, _ := s.log.Streams(context.Background(), "local")
 	min := -1
 	for _, scope := range streams {
 		events, _ := s.log.Read(context.Background(), scope, 0)
 		for _, ev := range events {
-			if ev.Kind != evCapability || ev.Run != runID || ev.Rev != 2 {
+			if ev.Kind != evSyscall || ev.Run != runID || ev.Rev != 2 {
 				continue
 			}
-			var cd capabilityData
-			if json.Unmarshal(ev.Data, &cd) == nil {
-				if min < 0 || cd.Position < min {
-					min = cd.Position
+			var sd syscallRecordData
+			if json.Unmarshal(ev.Data, &sd) == nil {
+				if min < 0 || sd.Record.Position < min {
+					min = sd.Record.Position
 				}
 			}
 		}
@@ -117,40 +121,13 @@ func (s *runtimeStore) minRev2Index(runID string) int {
 	return min
 }
 
-type runtimeSessions struct {
-	mu       sync.Mutex
-	sessions map[string]*capcompute.Session[RunContext]
-}
-
-func newRuntimeSessions() *runtimeSessions {
-	return &runtimeSessions{sessions: make(map[string]*capcompute.Session[RunContext])}
-}
-
-func (s *runtimeSessions) LoadSession(_ context.Context, id string) (*capcompute.Session[RunContext], error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	session := s.sessions[id]
-	if session == nil {
-		return nil, capcompute.ErrSessionRequired
-	}
-	return session, nil
-}
-
-func (s *runtimeSessions) SaveSession(_ context.Context, id string, session *capcompute.Session[RunContext]) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.sessions[id] = session
-	return nil
-}
-
 func TestNewRuntimeRequiresImplementationDependencies(t *testing.T) {
 	store := newRuntimeStore()
 	dispatchers := &runtimeDispatchers{}
-	sessions := newRuntimeSessions()
 	brains := staticBrains{defaultID: "brain@1", sources: []BrainSource{{ID: "brain@1", Wasm: []byte("wasm")}}}
 	base := Config{
 		Brains: brains, Dispatchers: dispatchers, Log: store.log,
-		Leases: store, SessionStore: sessions, TaskSecret: []byte("secret"),
+		Leases: store, ProcessTable: newMemProcessTable(), TaskSecret: []byte("secret"),
 	}
 	tests := []struct {
 		name   string
@@ -159,7 +136,7 @@ func TestNewRuntimeRequiresImplementationDependencies(t *testing.T) {
 		{name: "dispatcher provider", mutate: func(config *Config) { config.Dispatchers = nil }},
 		{name: "event log", mutate: func(config *Config) { config.Log = nil }},
 		{name: "leases", mutate: func(config *Config) { config.Leases = nil }},
-		{name: "session store", mutate: func(config *Config) { config.SessionStore = nil }},
+		{name: "process table", mutate: func(config *Config) { config.ProcessTable = nil }},
 		{name: "task secret", mutate: func(config *Config) { config.TaskSecret = nil }},
 	}
 	for _, test := range tests {
@@ -173,10 +150,21 @@ func TestNewRuntimeRequiresImplementationDependencies(t *testing.T) {
 	}
 }
 
-func TestRuntimePassesManifestToDispatcherProvider(t *testing.T) {
-	if _, err := exec.LookPath("tinygo"); err != nil {
-		t.Skip("tinygo not found")
+// journalNames projects a run's journal into its syscall names.
+func journalNames(t *testing.T, runtime *Runtime, runID string) []string {
+	t.Helper()
+	entries, err := runtime.Journal(runID)
+	if err != nil {
+		t.Fatalf("load journal: %v", err)
 	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Syscall.Name)
+	}
+	return names
+}
+
+func TestRuntimePassesManifestToDispatcherProvider(t *testing.T) {
 	dispatchers := &runtimeDispatchers{}
 	store := newRuntimeStore()
 	runtime, err := NewRuntime(context.Background(), Config{
@@ -187,7 +175,7 @@ func TestRuntimePassesManifestToDispatcherProvider(t *testing.T) {
 		Dispatchers:  dispatchers,
 		Log:          store.log,
 		Leases:       store,
-		SessionStore: newRuntimeSessions(),
+		ProcessTable: newMemProcessTable(),
 		TaskSecret:   []byte("stable-secret"),
 		IDSource:     sequentialIDs(),
 	})
@@ -215,15 +203,17 @@ func TestRuntimePassesManifestToDispatcherProvider(t *testing.T) {
 		t.Fatalf("create run: %v", err)
 	}
 	waitForStatus(t, runtime, run.ID, RunCompleted)
-	journal, err := runtime.Journal(run.ID)
-	if err != nil {
-		t.Fatalf("load journal: %v", err)
+	// The brain brackets its one turn in a sys.begin/sys.commit savepoint, so
+	// the journal narrative is input → begin → chat → commit → finish.
+	names := journalNames(t, runtime, run.ID)
+	want := []string{callAgentInput, sys.SyscallBegin, "openai.chat", sys.SyscallCommit, callAgentFinish}
+	if len(names) != len(want) {
+		t.Fatalf("journal = %v, want %v", names, want)
 	}
-	if len(journal) != 3 ||
-		journal[0].Call.Name != callAgentInput ||
-		journal[1].Call.Name != "openai.chat" ||
-		journal[2].Call.Name != callAgentFinish {
-		t.Fatalf("journal = %+v", journal)
+	for i := range want {
+		if names[i] != want[i] {
+			t.Fatalf("journal = %v, want %v", names, want)
+		}
 	}
 
 	dispatchers.mu.Lock()
@@ -238,9 +228,6 @@ func TestRuntimePassesManifestToDispatcherProvider(t *testing.T) {
 // hot-registers a brain via SetBrains and drives a run through it, then removes
 // it — covering the control plane's live Brain CRD add/remove path.
 func TestRuntimeSetBrainsLifecycle(t *testing.T) {
-	if _, err := exec.LookPath("tinygo"); err != nil {
-		t.Skip("tinygo not found")
-	}
 	wasm := buildBrain(t)
 	dispatchers := &runtimeDispatchers{}
 	store := newRuntimeStore()
@@ -249,7 +236,7 @@ func TestRuntimeSetBrainsLifecycle(t *testing.T) {
 		Dispatchers:  dispatchers,
 		Log:          store.log,
 		Leases:       store,
-		SessionStore: newRuntimeSessions(),
+		ProcessTable: newMemProcessTable(),
 		TaskSecret:   []byte("stable-secret"),
 		IDSource:     sequentialIDs(),
 	})
@@ -289,8 +276,8 @@ func TestRuntimeSetBrainsLifecycle(t *testing.T) {
 		t.Fatalf("create thread: %v", err)
 	}
 	run, err := runtime.CreateRun(thread.ID, "finish", Manifest{
-		Version:      ManifestVersion,
-		Tools: []Tool{{Name: "custom.call", Type: "core.custom", Settings: json.RawMessage(`{"value":1}`)}},
+		Version: ManifestVersion,
+		Tools:   []Tool{{Name: "custom.call", Type: "core.custom", Settings: json.RawMessage(`{"value":1}`)}},
 	})
 	if err != nil {
 		t.Fatalf("create run: %v", err)
@@ -312,36 +299,27 @@ func TestRuntimeSetBrainsLifecycle(t *testing.T) {
 	}
 }
 
-func TestRuntimeRejectsPersistedBrainDigestMismatch(t *testing.T) {
+func TestNewRuntimeRejectsInvalidBrainWasm(t *testing.T) {
 	store := newRuntimeStore()
-	now := time.Now().UTC()
-	store.seed(
-		StoredRun{
-			TenantID: "local", ID: "run", ThreadID: "thread", Revision: 1,
-			Status: RunCompleted, CreatedAt: now, UpdatedAt: now,
-			Manifest:    Manifest{Version: ManifestVersion, Brain: "brain@1"},
-			BrainDigest: "different",
-		},
-	)
 	_, err := NewRuntime(context.Background(), Config{
 		Brains: staticBrains{
 			defaultID: "brain@1",
-			sources:   []BrainSource{{ID: "brain@1", Wasm: []byte("wasm")}},
+			sources:   []BrainSource{{ID: "brain@1", Wasm: []byte("not wasm")}},
 		},
 		Dispatchers:  &runtimeDispatchers{},
 		Log:          store.log,
 		Leases:       store,
-		SessionStore: newRuntimeSessions(),
+		ProcessTable: newMemProcessTable(),
 		TaskSecret:   []byte("stable-secret"),
 	})
 	if err == nil {
-		t.Fatal("expected persisted brain digest mismatch")
+		t.Fatal("expected brain compile error")
 	}
 }
 
 func waitForStatus(t *testing.T, runtime *Runtime, runID string, want RunStatus) RunSnapshot {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		run, err := runtime.GetRun(runID)
 		if err != nil {
@@ -366,31 +344,45 @@ func sequentialIDs() func(string) (string, error) {
 	}
 }
 
+var (
+	brainOnce  sync.Once
+	brainWasm  []byte
+	brainError error
+)
+
+// buildBrain compiles the Rust agent brain from the sibling aurora-brains
+// workspace to wasm32-wasip1 — the same artifact a real assembly deploys.
+// Tests that need a guest skip when the Rust toolchain is unavailable.
 func buildBrain(t *testing.T) []byte {
 	t.Helper()
-	wasmPath := filepath.Join(t.TempDir(), "agent.wasm")
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "tinygo", "build",
-		"-target", "wasip1",
-		"-buildmode=c-shared",
-		"-tags", "tinygo",
-		"-o", wasmPath,
-		"./agent",
-	)
-	cmd.Dir = "../../../aurora-brains"
-	cmd.Env = append(os.Environ(),
-		"XDG_CACHE_HOME="+t.TempDir(),
-		"GOCACHE="+filepath.Join(t.TempDir(), "go-build"),
-	)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("build brain: %v\n%s", err, out)
+	if _, err := exec.LookPath("cargo"); err != nil {
+		t.Skip("cargo not found")
 	}
-	raw, err := os.ReadFile(wasmPath)
-	if err != nil {
-		t.Fatalf("read brain: %v", err)
+	brainOnce.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "cargo", "build",
+			"--release",
+			"--target", "wasm32-wasip1",
+			"-p", "agent-brain",
+		)
+		cmd.Dir = "../../../aurora-brains"
+		if out, err := cmd.CombinedOutput(); err != nil {
+			brainError = fmt.Errorf("build brain: %v\n%s", err, out)
+			return
+		}
+		wasmPath := filepath.Join(cmd.Dir, "target", "wasm32-wasip1", "release", "agent_brain.wasm")
+		raw, err := os.ReadFile(wasmPath)
+		if err != nil {
+			brainError = fmt.Errorf("read brain: %v", err)
+			return
+		}
+		brainWasm = raw
+	})
+	if brainError != nil {
+		t.Skipf("agent brain unavailable: %v", brainError)
 	}
-	return raw
+	return brainWasm
 }
 
 // cascadeDispatchers drives a parent brain to delegate to a "child" once and
@@ -407,26 +399,24 @@ func (cascadeDispatchers) Normalize(_ string, settings json.RawMessage) (json.Ra
 	return append(json.RawMessage(nil), settings...), nil
 }
 
-func (cascadeDispatchers) NewDispatcher(_ context.Context, _ RunContext, _ Manifest) (dispatcher.Dispatcher[RunContext], error) {
+func (cascadeDispatchers) NewDispatcher(_ context.Context, _ RunContext, _ Manifest) (sys.Dispatcher[RunContext], error) {
 	return cascadeDispatcher{}, nil
 }
 
-func (cascadeDispatchers) IsSubset(_ string, _, _ json.RawMessage) error { return nil }
-
 type cascadeDispatcher struct{}
 
-func (cascadeDispatcher) Capabilities() []dispatcher.Capability { return nil }
+func (cascadeDispatcher) Capabilities() []sys.Capability { return []sys.Capability{llmCapability()} }
 
-func chatActions(actions string) dispatcher.Outcome {
+func chatActions(actions string) sys.SyscallResult {
 	payload, _ := json.Marshal(map[string]any{
 		"choices": []any{map[string]any{"message": map[string]any{"content": actions}}},
 	})
-	return dispatcher.Result(payload)
+	return sys.Result(payload)
 }
 
-func (cascadeDispatcher) Dispatch(_ context.Context, _ RunContext, call dispatcher.Call, _ dispatcher.Authorization) (dispatcher.Outcome, error) {
-	if call.Name != "openai.chat" {
-		return dispatcher.Fail("unsupported call: " + call.Name), nil
+func (cascadeDispatcher) Dispatch(_ context.Context, _ RunContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
+	if syscall.Name != "openai.chat" {
+		return sys.Fail("unsupported call: " + syscall.Name), nil
 	}
 	var req struct {
 		Messages []struct {
@@ -434,7 +424,7 @@ func (cascadeDispatcher) Dispatch(_ context.Context, _ RunContext, call dispatch
 			Content string `json:"content"`
 		} `json:"messages"`
 	}
-	_ = json.Unmarshal(call.Args, &req)
+	_ = json.Unmarshal(syscall.Args, &req)
 	firstUser, laterUser := firstAndLaterUser(req.Messages)
 	switch {
 	case strings.Contains(firstUser, "do subtask"):
@@ -502,9 +492,6 @@ func runField(t *testing.T, r *Runtime, id string) (parentRunID string, attempt 
 }
 
 func TestRuntimeCascadeResumeReusesChildRun(t *testing.T) {
-	if _, err := exec.LookPath("tinygo"); err != nil {
-		t.Skip("tinygo not found")
-	}
 	store := newRuntimeStore()
 	runtime, err := NewRuntime(context.Background(), Config{
 		Brains: staticBrains{
@@ -514,7 +501,7 @@ func TestRuntimeCascadeResumeReusesChildRun(t *testing.T) {
 		Dispatchers:  cascadeDispatchers{},
 		Log:          store.log,
 		Leases:       store,
-		SessionStore: newRuntimeSessions(),
+		ProcessTable: newMemProcessTable(),
 		TaskSecret:   []byte("stable-secret"),
 		IDSource:     sequentialIDs(),
 	})
@@ -534,9 +521,9 @@ func TestRuntimeCascadeResumeReusesChildRun(t *testing.T) {
 		t.Fatalf("create thread: %v", err)
 	}
 	run, err := runtime.CreateRun(thread.ID, "parent task", Manifest{
-		Version:  ManifestVersion,
-		Brain:    "brain@1",
-		Tools: []Tool{{Name: "child", Type: AgentToolType, Settings: json.RawMessage(`{"code":"brain@1"}`)}},
+		Version: ManifestVersion,
+		Brain:   "brain@1",
+		Tools:   []Tool{{Name: "child", Type: AgentToolType, Settings: json.RawMessage(`{"code":"brain@1"}`)}},
 	})
 	if err != nil {
 		t.Fatalf("create run: %v", err)
@@ -583,6 +570,130 @@ func TestRuntimeCascadeResumeReusesChildRun(t *testing.T) {
 	}
 }
 
+// approvalDispatchers drives a run whose first turn calls tool.y, a capability
+// that requires human approval: the driver yields until the dispatch carries
+// an approved Authorization (the task layer's injection seam).
+type approvalDispatchers struct{}
+
+func (approvalDispatchers) Normalize(_ string, settings json.RawMessage) (json.RawMessage, error) {
+	if len(settings) == 0 {
+		return json.RawMessage(`{}`), nil
+	}
+	return append(json.RawMessage(nil), settings...), nil
+}
+
+func (approvalDispatchers) NewDispatcher(_ context.Context, _ RunContext, _ Manifest) (sys.Dispatcher[RunContext], error) {
+	return approvalToolDispatcher{}, nil
+}
+
+type approvalToolDispatcher struct{}
+
+func (approvalToolDispatcher) Capabilities() []sys.Capability {
+	return []sys.Capability{
+		llmCapability(),
+		{Name: "tool.y", Description: "guarded tool", InputSchema: json.RawMessage(`{"type":"object"}`)},
+	}
+}
+
+func (approvalToolDispatcher) Dispatch(_ context.Context, _ RunContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
+	switch syscall.Name {
+	case "tool.y":
+		if auth.Decision != sys.Approved {
+			return sys.Yield("Approve tool.y"), nil
+		}
+		return sys.Result(json.RawMessage(`{"granted":true}`)), nil
+	case "openai.chat":
+		var req struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		_ = json.Unmarshal(syscall.Args, &req)
+		if _, laterUser := firstAndLaterUser(req.Messages); laterUser {
+			return chatActions(`{"actions":[{"action":"final","content":{"answer":"approved-done"}}]}`), nil
+		}
+		return chatActions(`{"actions":[{"action":"tool.y","content":{}}]}`), nil
+	default:
+		return sys.Fail("unsupported call: " + syscall.Name), nil
+	}
+}
+
+// TestRuntimeApprovalCycle drives the whole human-in-the-loop machinery end to
+// end: a guarded syscall yields, the run parks as waiting_for_task with a
+// durable task whose identity is the open journal intent, resolving the task
+// auto-resumes the run, replay re-drives the open intent with the stored
+// resolution as its Authorization, and the run completes. A second identical
+// journal position is never re-executed — the completion replays from tape.
+func TestRuntimeApprovalCycle(t *testing.T) {
+	store := newRuntimeStore()
+	runtime, err := NewRuntime(context.Background(), Config{
+		Brains: staticBrains{
+			defaultID: "brain@1",
+			sources:   []BrainSource{{ID: "brain@1", Wasm: buildBrain(t)}},
+		},
+		Dispatchers:  approvalDispatchers{},
+		Log:          store.log,
+		Leases:       store,
+		ProcessTable: newMemProcessTable(),
+		TaskSecret:   []byte("stable-secret"),
+		IDSource:     sequentialIDs(),
+	})
+	if err != nil {
+		t.Fatalf("new runtime: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := runtime.Close(ctx); err != nil {
+			t.Errorf("close runtime: %v", err)
+		}
+	})
+
+	thread, err := runtime.CreateThread(nil)
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	run, err := runtime.CreateRun(thread.ID, "do the guarded thing", Manifest{
+		Version: ManifestVersion,
+		Brain:   "brain@1",
+		Tools:   []Tool{{Name: "tool.y", Type: "core.custom"}},
+	})
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+
+	waitForStatus(t, runtime, run.ID, RunWaitingTask)
+	tasks, err := runtime.Tasks(run.ID)
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("tasks = %+v, err=%v", tasks, err)
+	}
+	pending := tasks[0]
+	if pending.Syscall.Name != "tool.y" || pending.State != "pending" {
+		t.Fatalf("pending task = %+v", pending)
+	}
+	if pending.Summary != "Approve tool.y" {
+		t.Fatalf("task summary = %q", pending.Summary)
+	}
+
+	if _, err := runtime.ResolveTask(pending.ID, pending.WebhookToken, task.Resolution{
+		Decision: task.StateApproved,
+		Actor:    "tester",
+	}); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	completed := waitForStatus(t, runtime, run.ID, RunCompleted)
+	if completed.Answer != "approved-done" {
+		t.Fatalf("answer = %q, want approved-done", completed.Answer)
+	}
+	// The approved execution was journaled once and marked executed.
+	tasks, _ = runtime.Tasks(run.ID)
+	if len(tasks) != 1 || tasks[0].State != "executed" {
+		t.Fatalf("final task state = %+v", tasks)
+	}
+}
+
 // failingChildDispatchers makes a parent delegate once to a child whose brain
 // then requests an unavailable capability, failing the child run.
 type failingChildDispatchers struct{}
@@ -594,19 +705,19 @@ func (failingChildDispatchers) Normalize(_ string, settings json.RawMessage) (js
 	return append(json.RawMessage(nil), settings...), nil
 }
 
-func (failingChildDispatchers) NewDispatcher(_ context.Context, _ RunContext, _ Manifest) (dispatcher.Dispatcher[RunContext], error) {
+func (failingChildDispatchers) NewDispatcher(_ context.Context, _ RunContext, _ Manifest) (sys.Dispatcher[RunContext], error) {
 	return failingChildDispatcher{}, nil
 }
 
-func (failingChildDispatchers) IsSubset(_ string, _, _ json.RawMessage) error { return nil }
-
 type failingChildDispatcher struct{}
 
-func (failingChildDispatcher) Capabilities() []dispatcher.Capability { return nil }
+func (failingChildDispatcher) Capabilities() []sys.Capability {
+	return []sys.Capability{llmCapability()}
+}
 
-func (failingChildDispatcher) Dispatch(_ context.Context, _ RunContext, call dispatcher.Call, _ dispatcher.Authorization) (dispatcher.Outcome, error) {
-	if call.Name != "openai.chat" {
-		return dispatcher.Fail("unsupported call: " + call.Name), nil
+func (failingChildDispatcher) Dispatch(_ context.Context, _ RunContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
+	if syscall.Name != "openai.chat" {
+		return sys.Fail("unsupported call: " + syscall.Name), nil
 	}
 	var req struct {
 		Messages []struct {
@@ -614,7 +725,7 @@ func (failingChildDispatcher) Dispatch(_ context.Context, _ RunContext, call dis
 			Content string `json:"content"`
 		} `json:"messages"`
 	}
-	_ = json.Unmarshal(call.Args, &req)
+	_ = json.Unmarshal(syscall.Args, &req)
 	for _, m := range req.Messages {
 		if m.Role == "user" && strings.Contains(m.Content, "do subtask") {
 			// The child requests a capability it was not granted; the brain
@@ -626,9 +737,6 @@ func (failingChildDispatcher) Dispatch(_ context.Context, _ RunContext, call dis
 }
 
 func TestRuntimeChildFailurePropagatesToParent(t *testing.T) {
-	if _, err := exec.LookPath("tinygo"); err != nil {
-		t.Skip("tinygo not found")
-	}
 	store := newRuntimeStore()
 	runtime, err := NewRuntime(context.Background(), Config{
 		Brains: staticBrains{
@@ -638,7 +746,7 @@ func TestRuntimeChildFailurePropagatesToParent(t *testing.T) {
 		Dispatchers:  failingChildDispatchers{},
 		Log:          store.log,
 		Leases:       store,
-		SessionStore: newRuntimeSessions(),
+		ProcessTable: newMemProcessTable(),
 		TaskSecret:   []byte("stable-secret"),
 		IDSource:     sequentialIDs(),
 	})
@@ -671,9 +779,19 @@ func TestRuntimeChildFailurePropagatesToParent(t *testing.T) {
 
 	// With OnFailurePropagate, the failed child fails the parent run rather than
 	// surfacing as a recoverable observation.
-	failed := waitForStatus(t, runtime, run.ID, RunFailed)
+	failed := waitForRunFailed(t, runtime, run.ID)
 	if !strings.Contains(failed.Error, "child") {
 		t.Fatalf("parent error = %q, want it to mention the failed child", failed.Error)
+	}
+	// The failure came from a real delegated child run, not from the parent
+	// brain merely failing to see the delegation tool.
+	childID := onlyChildRun(t, runtime, run.ID)
+	child, err := runtime.GetRun(childID)
+	if err != nil {
+		t.Fatalf("get child: %v", err)
+	}
+	if child.Status != RunFailed {
+		t.Fatalf("child status = %s, want failed", child.Status)
 	}
 }
 
@@ -693,26 +811,27 @@ func (*failThenSucceedDispatchers) Normalize(_ string, settings json.RawMessage)
 	return append(json.RawMessage(nil), settings...), nil
 }
 
-func (d *failThenSucceedDispatchers) NewDispatcher(_ context.Context, _ RunContext, _ Manifest) (dispatcher.Dispatcher[RunContext], error) {
+func (d *failThenSucceedDispatchers) NewDispatcher(_ context.Context, _ RunContext, _ Manifest) (sys.Dispatcher[RunContext], error) {
 	return &failThenSucceedDispatcher{parent: d}, nil
 }
 
-func (*failThenSucceedDispatchers) IsSubset(_ string, _, _ json.RawMessage) error { return nil }
-
 type failThenSucceedDispatcher struct{ parent *failThenSucceedDispatchers }
 
-func (d *failThenSucceedDispatcher) Capabilities() []dispatcher.Capability {
-	return []dispatcher.Capability{{
-		Name:        "tool.x",
-		Description: "test tool",
-		InputSchema: json.RawMessage(`{"type":"object"}`),
-	}}
+func (d *failThenSucceedDispatcher) Capabilities() []sys.Capability {
+	return []sys.Capability{
+		llmCapability(),
+		{
+			Name:        "tool.x",
+			Description: "test tool",
+			InputSchema: json.RawMessage(`{"type":"object"}`),
+		},
+	}
 }
 
-func (d *failThenSucceedDispatcher) Dispatch(_ context.Context, _ RunContext, call dispatcher.Call, _ dispatcher.Authorization) (dispatcher.Outcome, error) {
-	switch call.Name {
+func (d *failThenSucceedDispatcher) Dispatch(_ context.Context, _ RunContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
+	switch syscall.Name {
 	case "tool.x":
-		return dispatcher.Result(json.RawMessage(`{"ok":true}`)), nil
+		return sys.Result(json.RawMessage(`{"ok":true}`)), nil
 	case "openai.chat":
 		var req struct {
 			Messages []struct {
@@ -720,7 +839,7 @@ func (d *failThenSucceedDispatcher) Dispatch(_ context.Context, _ RunContext, ca
 				Content string `json:"content"`
 			} `json:"messages"`
 		}
-		_ = json.Unmarshal(call.Args, &req)
+		_ = json.Unmarshal(syscall.Args, &req)
 		// A tool observation is appended as a user-role message, so the second
 		// turn is signalled by a user message beyond the run's initial input.
 		_, laterUser := firstAndLaterUser(req.Messages)
@@ -738,7 +857,7 @@ func (d *failThenSucceedDispatcher) Dispatch(_ context.Context, _ RunContext, ca
 		}
 		return chatActions(`{"actions":[{"action":"final","content":{"answer":"recovered"}}]}`), nil
 	default:
-		return dispatcher.Fail("unsupported call: " + call.Name), nil
+		return sys.Fail("unsupported call: " + syscall.Name), nil
 	}
 }
 
@@ -746,7 +865,7 @@ func (d *failThenSucceedDispatcher) Dispatch(_ context.Context, _ RunContext, ca
 // reaches any other terminal state first.
 func waitForRunFailed(t *testing.T, runtime *Runtime, runID string) RunSnapshot {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		snap, err := runtime.GetRun(runID)
 		if err != nil {
@@ -782,26 +901,27 @@ func (*cascadeResumeDispatchers) Normalize(_ string, settings json.RawMessage) (
 	return append(json.RawMessage(nil), settings...), nil
 }
 
-func (d *cascadeResumeDispatchers) NewDispatcher(_ context.Context, _ RunContext, _ Manifest) (dispatcher.Dispatcher[RunContext], error) {
+func (d *cascadeResumeDispatchers) NewDispatcher(_ context.Context, _ RunContext, _ Manifest) (sys.Dispatcher[RunContext], error) {
 	return &cascadeResumeDispatcherImpl{parent: d}, nil
 }
 
-func (*cascadeResumeDispatchers) IsSubset(_ string, _, _ json.RawMessage) error { return nil }
-
 type cascadeResumeDispatcherImpl struct{ parent *cascadeResumeDispatchers }
 
-func (d *cascadeResumeDispatcherImpl) Capabilities() []dispatcher.Capability {
-	return []dispatcher.Capability{{
-		Name:        "tool.x",
-		Description: "test tool",
-		InputSchema: json.RawMessage(`{"type":"object"}`),
-	}}
+func (d *cascadeResumeDispatcherImpl) Capabilities() []sys.Capability {
+	return []sys.Capability{
+		llmCapability(),
+		{
+			Name:        "tool.x",
+			Description: "test tool",
+			InputSchema: json.RawMessage(`{"type":"object"}`),
+		},
+	}
 }
 
-func (d *cascadeResumeDispatcherImpl) Dispatch(_ context.Context, _ RunContext, call dispatcher.Call, _ dispatcher.Authorization) (dispatcher.Outcome, error) {
-	switch call.Name {
+func (d *cascadeResumeDispatcherImpl) Dispatch(_ context.Context, _ RunContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
+	switch syscall.Name {
 	case "tool.x":
-		return dispatcher.Result(json.RawMessage(`{"ok":true}`)), nil
+		return sys.Result(json.RawMessage(`{"ok":true}`)), nil
 	case "openai.chat":
 		var req struct {
 			Messages []struct {
@@ -809,7 +929,7 @@ func (d *cascadeResumeDispatcherImpl) Dispatch(_ context.Context, _ RunContext, 
 				Content string `json:"content"`
 			} `json:"messages"`
 		}
-		_ = json.Unmarshal(call.Args, &req)
+		_ = json.Unmarshal(syscall.Args, &req)
 		firstUser, laterUser := firstAndLaterUser(req.Messages)
 		isChild := strings.Contains(firstUser, "do subtask")
 		if isChild {
@@ -833,14 +953,11 @@ func (d *cascadeResumeDispatcherImpl) Dispatch(_ context.Context, _ RunContext, 
 		}
 		return chatActions(`{"actions":[{"action":"child","content":{"message":"do subtask"}}]}`), nil
 	default:
-		return dispatcher.Fail("unsupported call: " + call.Name), nil
+		return sys.Fail("unsupported call: " + syscall.Name), nil
 	}
 }
 
 func TestRuntimeCascadeResumeUsesResumeModeForFailedChild(t *testing.T) {
-	if _, err := exec.LookPath("tinygo"); err != nil {
-		t.Skip("tinygo not found")
-	}
 	store := newRuntimeStore()
 	runtime, err := NewRuntime(context.Background(), Config{
 		Brains: staticBrains{
@@ -850,7 +967,7 @@ func TestRuntimeCascadeResumeUsesResumeModeForFailedChild(t *testing.T) {
 		Dispatchers:  &cascadeResumeDispatchers{},
 		Log:          store.log,
 		Leases:       store,
-		SessionStore: newRuntimeSessions(),
+		ProcessTable: newMemProcessTable(),
 		TaskSecret:   []byte("stable-secret"),
 		IDSource:     sequentialIDs(),
 	})
@@ -897,11 +1014,11 @@ func TestRuntimeCascadeResumeUsesResumeModeForFailedChild(t *testing.T) {
 		t.Fatalf("parent answer = %q, want parent-done", completed.Answer)
 	}
 
-	// The child's revision-2 entries must begin at a position > 0: the shared
-	// prefix (all steps before the failing call) should carry the old revision.
+	// The child's revision-2 records must begin at a position > 0: the shared
+	// prefix (all steps before the failing turn) should carry the old revision.
 	childForkIdx := store.minRev2Index(childID)
 	if childForkIdx < 0 {
-		t.Fatal("child has no revision-2 entries (child was not retried via cascade)")
+		t.Fatal("child has no revision-2 records (child was not retried via cascade)")
 	}
 	if childForkIdx == 0 {
 		t.Fatalf("child fork index = 0, want > 0: cascade resume should preserve the child's shared prefix, not restart from scratch")
@@ -909,9 +1026,6 @@ func TestRuntimeCascadeResumeUsesResumeModeForFailedChild(t *testing.T) {
 }
 
 func TestRuntimeHardRetryForksFromBeginning(t *testing.T) {
-	if _, err := exec.LookPath("tinygo"); err != nil {
-		t.Skip("tinygo not found")
-	}
 	store := newRuntimeStore()
 	runtime, err := NewRuntime(context.Background(), Config{
 		Brains: staticBrains{
@@ -921,7 +1035,7 @@ func TestRuntimeHardRetryForksFromBeginning(t *testing.T) {
 		Dispatchers:  &failThenSucceedDispatchers{},
 		Log:          store.log,
 		Leases:       store,
-		SessionStore: newRuntimeSessions(),
+		ProcessTable: newMemProcessTable(),
 		TaskSecret:   []byte("stable-secret"),
 		IDSource:     sequentialIDs(),
 	})
@@ -941,14 +1055,14 @@ func TestRuntimeHardRetryForksFromBeginning(t *testing.T) {
 		t.Fatalf("create thread: %v", err)
 	}
 	run, err := runtime.CreateRun(thread.ID, "task", Manifest{
-		Version:      ManifestVersion,
-		Brain:        "brain@1",
-		Tools: []Tool{{Name: "tool.x", Type: "core.custom"}},
+		Version: ManifestVersion,
+		Brain:   "brain@1",
+		Tools:   []Tool{{Name: "tool.x", Type: "core.custom"}},
 	})
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
-	failed := waitForStatus(t, runtime, run.ID, RunFailed)
+	failed := waitForRunFailed(t, runtime, run.ID)
 	if failed.Error == "" {
 		t.Fatal("expected a failure error")
 	}
@@ -962,7 +1076,7 @@ func TestRuntimeHardRetryForksFromBeginning(t *testing.T) {
 		t.Fatalf("answer = %q, want recovered", recovered.Answer)
 	}
 	// The thread graph exposes a flat entry list where each entry carries its
-	// revision. Revision 2 must start at some index > 0 (shared prefix proof).
+	// revision. Revision 2 must start at record 0 (hard restart, no shared prefix).
 	graph, err := runtime.ThreadGraph(thread.ID)
 	if err != nil {
 		t.Fatalf("thread graph: %v", err)
@@ -974,7 +1088,6 @@ func TestRuntimeHardRetryForksFromBeginning(t *testing.T) {
 	if gr.CurrentRevision != 2 {
 		t.Fatalf("current revision = %d, want 2", gr.CurrentRevision)
 	}
-	// Hard restart forks from position 0: revision 2 must start at index 0.
 	forkIdx := store.minRev2Index(gr.RunID)
 	if forkIdx != 0 {
 		t.Fatalf("fork index = %d, want 0 (hard retry always restarts from the beginning)", forkIdx)

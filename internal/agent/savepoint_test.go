@@ -5,41 +5,41 @@ import (
 	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/eventlog"
-	internalhost "github.com/aurora-capcompute/aurora-capcompute/internal/host"
 
-	"github.com/aurora-capcompute/capcompute/dispatcher"
+	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-// buildJournal stores a sequence of calls and returns the journal. Each step is
-// "try"/"commit" (savepoint markers) or "name:fail"/"name" (a failing or
-// successful capability call).
+// buildJournal stores a sequence of completed syscalls (intent/completion
+// pairs) and returns the journal. Each step is "begin"/"commit" (savepoint
+// markers) or "name:fail"/"name" (a failing or successful capability call).
 func buildJournal(t *testing.T, steps ...step) *logJournal {
 	t.Helper()
-	log := eventlog.NewMemory()
+	log := newMemLog()
 	scope := eventlog.Scope{TenantID: "t", ThreadID: "th"}
 	now := func() time.Time { return time.Unix(0, 0).UTC() }
 	j := newLogJournal(log, scope, "run1", 1, newRunHistory(), 0, now, nil)
-	for i, s := range steps {
-		if err := j.Store(i, dispatcher.Call{Name: s.name}, s.outcome); err != nil {
-			t.Fatalf("store %d (%s): %v", i, s.name, err)
-		}
+	for _, s := range steps {
+		appendPair(t, j, sys.Syscall{Abi: sys.ABIVersion, Name: s.name}, s.result)
 	}
 	return j
 }
 
 type step struct {
-	name    string
-	outcome dispatcher.Outcome
+	name   string
+	result sys.SyscallResult
 }
 
-func try() step    { return step{internalhost.CapTry, dispatcher.Result([]byte("{}"))} }
-func commit() step { return step{internalhost.CapCommit, dispatcher.Result([]byte("{}"))} }
+func begin() step  { return step{sys.SyscallBegin, sys.Result([]byte("{}"))} }
+func commit() step { return step{sys.SyscallCommit, sys.Result([]byte("{}"))} }
 func ok(name string) step {
-	return step{name, dispatcher.Result([]byte("{}"))}
+	return step{name, sys.Result([]byte("{}"))}
 }
-func fail(name string) step { return step{name, dispatcher.Fail(name + " failed")} }
+func failed(name string) step { return step{name, sys.Fail(name + " failed")} }
 
-func TestOutermostOpenTry(t *testing.T) {
+func TestOutermostOpenBegin(t *testing.T) {
+	// Record offsets: each step is one intent/completion pair, so step i's
+	// intent is record 2i and its completion 2i+1. The expected fork offset is
+	// one past the open begin's completion record.
 	cases := []struct {
 		name     string
 		steps    []step
@@ -47,44 +47,44 @@ func TestOutermostOpenTry(t *testing.T) {
 		wantOpen bool
 	}{
 		{
-			name:     "no try at all",
-			steps:    []step{ok("a"), fail("b")},
+			name:     "no begin at all",
+			steps:    []step{ok("a"), failed("b")},
 			wantOpen: false,
 		},
 		{
-			name:     "single open try",
-			steps:    []step{try(), fail("x")},
-			wantOff:  1, // fork right after the try marker at position 0
+			name:     "single open begin",
+			steps:    []step{begin(), failed("x")},
+			wantOff:  2, // fork right after the begin pair at records 0-1
 			wantOpen: true,
 		},
 		{
-			name:     "committed try then bare soft fail",
-			steps:    []step{try(), ok("a"), commit(), fail("y")},
+			name:     "committed begin then bare soft fail",
+			steps:    []step{begin(), ok("a"), commit(), failed("y")},
 			wantOpen: false, // the bare fail synthesizes no fork point
 		},
 		{
 			name:     "sequential committed then open",
-			steps:    []step{try(), ok("a"), commit(), try(), fail("b")},
-			wantOff:  4, // fork after the second try at position 3
+			steps:    []step{begin(), ok("a"), commit(), begin(), failed("b")},
+			wantOff:  8, // fork after the second begin's pair at records 6-7
 			wantOpen: true,
 		},
 		{
 			name:     "nested both open forks at outermost",
-			steps:    []step{try(), ok("a"), try(), fail("b")},
-			wantOff:  1, // outermost try at position 0
+			steps:    []step{begin(), ok("a"), begin(), failed("b")},
+			wantOff:  2, // outermost begin at records 0-1
 			wantOpen: true,
 		},
 		{
 			name:     "nested inner committed outer open",
-			steps:    []step{try(), ok("a"), try(), ok("b"), commit(), fail("c")},
-			wantOff:  1, // outer try still open
+			steps:    []step{begin(), ok("a"), begin(), ok("b"), commit(), failed("c")},
+			wantOff:  2, // outer begin still open
 			wantOpen: true,
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			j := buildJournal(t, tc.steps...)
-			off, open := j.outermostOpenTry()
+			off, open := j.outermostOpenBegin()
 			if open != tc.wantOpen {
 				t.Fatalf("open = %v, want %v", open, tc.wantOpen)
 			}
@@ -92,5 +92,15 @@ func TestOutermostOpenTry(t *testing.T) {
 				t.Fatalf("forkOffset = %d, want %d", off, tc.wantOff)
 			}
 		})
+	}
+}
+
+// An uncompleted begin intent at the tail (crashed mid-marker) must not count
+// as an open bracket: nothing after it executed, so the default fork applies.
+func TestOutermostOpenBeginIgnoresUncompletedIntent(t *testing.T) {
+	j := buildJournal(t, ok("a"))
+	appendIntent(t, j, sys.Syscall{Abi: sys.ABIVersion, Name: sys.SyscallBegin})
+	if off, open := j.outermostOpenBegin(); open {
+		t.Fatalf("open = true at %d, want false for an uncompleted begin intent", off)
 	}
 }

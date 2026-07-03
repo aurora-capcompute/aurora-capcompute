@@ -6,12 +6,15 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/aurora-capcompute/capcompute/sys"
+
 	"github.com/aurora-capcompute/aurora-capcompute/internal/eventlog"
 )
 
 // ThreadGraphRun is a run within a thread graph: its metadata and the flat
-// journal of every (position, revision) entry ever written. The fork structure
-// is derivable from duplicate positions with different revision numbers.
+// journal of every syscall entry ever written, across all revisions. The fork
+// structure is derivable from duplicate positions with different revision
+// numbers.
 type ThreadGraphRun struct {
 	RunID           string         `json:"run_id"`
 	Message         string         `json:"message"`
@@ -34,8 +37,9 @@ type ThreadGraph struct {
 }
 
 // ThreadGraph builds the execution graph of a thread by reading each run's
-// capability.recorded events directly from the log. The flat entry list carries
-// per-entry revision numbers so the caller can reconstruct the fork graph.
+// syscall.recorded events directly from the log, pairing intents with their
+// completions per revision. The flat entry list carries per-entry revision
+// numbers so the caller can reconstruct the fork graph.
 func (r *Runtime) ThreadGraph(threadID string) (ThreadGraph, error) {
 	r.mu.Lock()
 	thread := r.threads[threadID]
@@ -74,30 +78,48 @@ func (r *Runtime) ThreadGraph(threadID string) (ThreadGraph, error) {
 		return ThreadGraph{}, err
 	}
 
-	// Build a flat entry list per run. Duplicates (same position + revision)
-	// are last-write-wins, which should never happen in a correct log.
+	// Pair each revision's intent records with their completions. Records
+	// arrive in append order per revision, so a completion always follows its
+	// intent within the same revision's sub-sequence.
 	type entryKey struct {
 		position int
 		revision uint64
 	}
 	allEntries := map[string]map[entryKey]JournalEntry{} // run → key → entry
+	openIntent := map[string]map[uint64]entryKey{}       // run → revision → open intent key
 
 	for _, ev := range events {
-		if ev.Kind != evCapability {
+		if ev.Kind != evSyscall {
 			continue
 		}
-		var cd capabilityData
-		if err := json.Unmarshal(ev.Data, &cd); err != nil {
-			return ThreadGraph{}, fmt.Errorf("decode capability.recorded: %w", err)
+		var sd syscallRecordData
+		if err := json.Unmarshal(ev.Data, &sd); err != nil {
+			return ThreadGraph{}, fmt.Errorf("decode syscall.recorded: %w", err)
 		}
 		if allEntries[ev.Run] == nil {
 			allEntries[ev.Run] = make(map[entryKey]JournalEntry)
+			openIntent[ev.Run] = make(map[uint64]entryKey)
 		}
-		allEntries[ev.Run][entryKey{cd.Position, ev.Rev}] = JournalEntry{
-			Index:    cd.Position,
-			Revision: ev.Rev,
-			Call:     cd.Call,
-			Outcome:  cd.Outcome,
+		rec := sd.Record
+		if rec.Syscall != nil {
+			key := entryKey{rec.Position, ev.Rev}
+			allEntries[ev.Run][key] = JournalEntry{
+				Position:    rec.Position,
+				Revision:    ev.Rev,
+				Syscall:     *rec.Syscall,
+				Outcome:     JournalOutcome{Status: sys.StatusYield, Message: "in flight"},
+				Compensates: rec.Compensates,
+			}
+			openIntent[ev.Run][ev.Rev] = key
+			continue
+		}
+		if rec.Result != nil {
+			if key, ok := openIntent[ev.Run][ev.Rev]; ok {
+				entry := allEntries[ev.Run][key]
+				entry.Outcome = encodeOutcome(*rec.Result)
+				allEntries[ev.Run][key] = entry
+				delete(openIntent[ev.Run], ev.Rev)
+			}
 		}
 	}
 
@@ -107,8 +129,8 @@ func (r *Runtime) ThreadGraph(threadID string) (ThreadGraph, error) {
 			entries = append(entries, e)
 		}
 		sort.Slice(entries, func(i, j int) bool {
-			if entries[i].Index != entries[j].Index {
-				return entries[i].Index < entries[j].Index
+			if entries[i].Position != entries[j].Position {
+				return entries[i].Position < entries[j].Position
 			}
 			return entries[i].Revision < entries[j].Revision
 		})

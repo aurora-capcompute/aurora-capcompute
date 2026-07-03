@@ -7,13 +7,13 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/aurora-capcompute/capcompute/dispatcher"
-	"github.com/aurora-capcompute/capcompute/dispatcher/replay/tape/journaled"
+	"github.com/aurora-capcompute/capcompute/sys"
+	"github.com/aurora-capcompute/capcompute/sys/replay/tape/journaled"
 )
 
-// Agent lifecycle host calls. The guest fetches its input and reports its answer
+// Agent lifecycle syscalls. The guest fetches its input and reports its answer
 // through these calls so both are recorded on the replay journal — making the
-// per-run tape the full narrative: agent.input -> capability calls -> agent.finish.
+// per-run tape the full narrative: agent.input → capability calls → agent.finish.
 const (
 	callAgentInput  = "agent.input"
 	callAgentFinish = "agent.finish"
@@ -27,11 +27,14 @@ type finishArgs struct {
 	Answer string `json:"answer"`
 }
 
-// lifecycleDispatcher intercepts the agent.input/agent.finish lifecycle calls
-// below the replay tape (so they are journaled) and forwards everything else to
-// the capability dispatcher.
+// lifecycleDispatcher serves the agent.input/agent.finish lifecycle syscalls
+// below the replay layer (so they are journaled) and forwards everything else
+// to the capability dispatcher. It publishes both — hidden — into the chain's
+// capability set: the kernel's Validator enforces complete mediation from the
+// grant set, so even the runtime's own protocol calls are granted explicitly
+// rather than smuggled past the reference monitor.
 type lifecycleDispatcher struct {
-	next         dispatcher.Dispatcher[RunKey]
+	next         sys.Dispatcher[RunContext]
 	message      string
 	history      []HistoryMessage
 	systemPrompt string
@@ -39,7 +42,7 @@ type lifecycleDispatcher struct {
 }
 
 func newLifecycleDispatcher(
-	next dispatcher.Dispatcher[RunKey],
+	next sys.Dispatcher[RunContext],
 	message string,
 	history []HistoryMessage,
 	manifest Manifest,
@@ -53,8 +56,8 @@ func newLifecycleDispatcher(
 	}
 }
 
-func (l *lifecycleDispatcher) Dispatch(ctx context.Context, key RunKey, call dispatcher.Call, auth dispatcher.Authorization) (dispatcher.Outcome, error) {
-	switch call.Name {
+func (l *lifecycleDispatcher) Dispatch(ctx context.Context, cred RunContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
+	switch syscall.Name {
 	case callAgentInput:
 		payload, err := json.Marshal(agentInput{
 			Message:      l.message,
@@ -63,29 +66,41 @@ func (l *lifecycleDispatcher) Dispatch(ctx context.Context, key RunKey, call dis
 			Capabilities: visibleCapabilities(l.next.Capabilities()),
 		})
 		if err != nil {
-			return dispatcher.Fail(err.Error()), nil
+			return sys.Fail(err.Error()), nil
 		}
-		return dispatcher.Result(payload), nil
+		return sys.Result(payload), nil
 	case callAgentFinish:
-		// The answer travels in call.Args and is recorded on the journal; the host
-		// reads it back from there. Acknowledge so the guest can return.
-		return dispatcher.Result(json.RawMessage(`{"ok":true}`)), nil
+		// The answer travels in syscall.Args and is recorded on the journal; the
+		// host reads it back from there. Acknowledge so the guest can return.
+		return sys.Result(json.RawMessage(`{"ok":true}`)), nil
 	default:
-		return l.next.Dispatch(ctx, key, call, auth)
+		return l.next.Dispatch(ctx, cred, syscall, auth)
 	}
 }
 
-func (l *lifecycleDispatcher) Capabilities() []dispatcher.Capability {
-	return l.next.Capabilities()
+func (l *lifecycleDispatcher) Capabilities() []sys.Capability {
+	return appendMissing(l.next.Capabilities(),
+		sys.Capability{
+			Name:        callAgentInput,
+			Description: "fetch this run's input: message, history, system prompt, and the visible capability menu",
+			Hidden:      true,
+		},
+		sys.Capability{
+			Name:        callAgentFinish,
+			Description: "record this run's final answer on the journal",
+			Hidden:      true,
+		},
+	)
 }
 
-// answerFromJournal reads a completed run's answer from the final journal record,
-// which must be the agent.finish call. The answer is therefore sourced from the
-// tape (the single source of truth) rather than the guest's return value.
+// answerFromJournal reads a completed run's answer from the journal's final
+// intent/completion pair, which must be the agent.finish syscall. The answer is
+// therefore sourced from the tape (the single source of truth) rather than the
+// guest's return value.
 func (r *Runtime) answerFromJournal(runID string) (string, error) {
 	r.mu.Lock()
 	run := r.runs[runID]
-	var journal journaled.Journal
+	var journal *logJournal
 	if run != nil {
 		journal = run.journal
 	}
@@ -94,18 +109,29 @@ func (r *Runtime) answerFromJournal(runID string) (string, error) {
 		return "", errors.New("agent run journal is unavailable")
 	}
 	length := journal.Length()
-	if length == 0 {
+	if length < 2 {
 		return "", errors.New("agent produced no journal records")
 	}
-	record, err := journal.Load(length - 1)
+	completion, err := journal.Load(length - 1)
 	if err != nil {
 		return "", err
 	}
-	if record.Call.Name != callAgentFinish {
-		return "", fmt.Errorf("agent did not finish (last journal call was %q)", record.Call.Name)
+	if completion.Kind != journaled.KindCompletion {
+		return "", fmt.Errorf("agent did not finish (journal tail is %s)", completion.Kind)
+	}
+	intent, err := journal.Load(length - 2)
+	if err != nil {
+		return "", err
+	}
+	if intent.Syscall == nil || intent.Syscall.Name != callAgentFinish {
+		name := ""
+		if intent.Syscall != nil {
+			name = intent.Syscall.Name
+		}
+		return "", fmt.Errorf("agent did not finish (last journal call was %q)", name)
 	}
 	var args finishArgs
-	if err := json.Unmarshal(record.Call.Args, &args); err != nil {
+	if err := json.Unmarshal(intent.Syscall.Args, &args); err != nil {
 		return "", fmt.Errorf("decode finish answer: %w", err)
 	}
 	if strings.TrimSpace(args.Answer) == "" {

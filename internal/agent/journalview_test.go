@@ -8,43 +8,47 @@ import (
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/eventlog"
 
-	"github.com/aurora-capcompute/capcompute/dispatcher"
+	"github.com/aurora-capcompute/capcompute/sys"
+	"github.com/aurora-capcompute/capcompute/sys/replay/tape/journaled"
 )
 
-// rec builds a capability call whose outcome is a JSON-string result (capability
-// outcomes are always valid JSON).
-func rec(name, result string) (dispatcher.Call, dispatcher.Outcome) {
-	return dispatcher.Call{Name: name}, dispatcher.Result([]byte(strconv.Quote(result)))
+// pair builds a syscall and a JSON-string result for it.
+func pair(name, result string) (sys.Syscall, sys.SyscallResult) {
+	return sys.Syscall{Abi: sys.ABIVersion, Name: name},
+		sys.Result([]byte(strconv.Quote(result)))
 }
 
-// loadAll reads every record from a journal as `name="result"` strings.
-func loadAll(t *testing.T, j *logJournal) []string {
+// loadEntries projects a journal into `name="result"` strings, one per
+// completed syscall.
+func loadEntries(t *testing.T, j *logJournal) []string {
 	t.Helper()
+	entries, err := j.entries()
+	if err != nil {
+		t.Fatalf("entries: %v", err)
+	}
 	var out []string
-	for i := 0; i < j.Length(); i++ {
-		r, err := j.Load(i)
-		if err != nil {
-			t.Fatalf("load %d: %v", i, err)
-		}
-		out = append(out, r.Call.Name+"="+string(r.Outcome.Result()))
+	for _, e := range entries {
+		out = append(out, e.Syscall.Name+"="+string(e.Outcome.Result))
 	}
 	return out
 }
 
 func TestLogJournalLinearRoundTrip(t *testing.T) {
-	log := eventlog.NewMemory()
+	log := newMemLog()
 	scope := eventlog.Scope{TenantID: "t", ThreadID: "th"}
 	now := func() time.Time { return time.Unix(0, 0).UTC() }
 	j := newLogJournal(log, scope, "run1", 1, newRunHistory(), 0, now, nil)
 
-	for i, n := range []string{"a", "b", "c"} {
-		call, outcome := rec(n, n)
-		if err := j.Store(i, call, outcome); err != nil {
-			t.Fatalf("store %d: %v", i, err)
-		}
+	for _, n := range []string{"a", "b", "c"} {
+		syscall, result := pair(n, n)
+		appendPair(t, j, syscall, result)
 	}
-	if got := loadAll(t, j); len(got) != 3 || got[2] != "c=\"c\"" {
+	if got := loadEntries(t, j); len(got) != 3 || got[2] != "c=\"c\"" {
 		t.Fatalf("live journal = %v", got)
+	}
+	// The stored chain is a valid hash-chained journal.
+	if err := journaled.Verify(j); err != nil {
+		t.Fatalf("verify: %v", err)
 	}
 
 	// Rebuild purely from the event stream and confirm identical records.
@@ -54,39 +58,51 @@ func TestLogJournalLinearRoundTrip(t *testing.T) {
 		t.Fatalf("fold journals: %v", err)
 	}
 	rebuilt := journals["run1"][1]
-	if got := loadAll(t, rebuilt); len(got) != 3 || got[0] != `a="a"` || got[2] != `c="c"` {
+	if got := loadEntries(t, rebuilt); len(got) != 3 || got[0] != `a="a"` || got[2] != `c="c"` {
 		t.Fatalf("rebuilt journal = %v", got)
+	}
+	if err := journaled.Verify(rebuilt); err != nil {
+		t.Fatalf("verify rebuilt: %v", err)
+	}
+	header, ok, err := rebuilt.Header()
+	if err != nil || !ok || header != testHeader() {
+		t.Fatalf("rebuilt header = %+v ok=%v err=%v", header, ok, err)
 	}
 }
 
 func TestLogJournalForkSharesPrefixThenDiverges(t *testing.T) {
-	log := eventlog.NewMemory()
+	log := newMemLog()
 	scope := eventlog.Scope{TenantID: "t", ThreadID: "th"}
 	now := func() time.Time { return time.Unix(0, 0).UTC() }
 	history := newRunHistory()
 
 	base := newLogJournal(log, scope, "run1", 1, history, 0, now, nil)
-	for i, n := range []string{"a", "b", "c"} {
-		call, outcome := rec(n, n)
-		if err := base.Store(i, call, outcome); err != nil {
-			t.Fatal(err)
-		}
+	for _, n := range []string{"a", "b", "c"} {
+		syscall, result := pair(n, n)
+		appendPair(t, base, syscall, result)
 	}
-	// Create rev 2 sharing the first two records [a, b] (forkOffset=2),
-	// then append a different third record.
-	child := newLogJournal(log, scope, "run1", 2, history, 2, now, nil)
-	if child.Length() != 2 {
-		t.Fatalf("forked length = %d, want 2 (shared prefix)", child.Length())
+	// Create rev 2 sharing the first two pairs [a, b] (forkOffset=4 records),
+	// then append a different third pair.
+	child := newLogJournal(log, scope, "run1", 2, history, 4, now, nil)
+	if child.Length() != 4 {
+		t.Fatalf("forked length = %d, want 4 (shared prefix records)", child.Length())
 	}
-	call, outcome := rec("c2", "c2")
-	if err := child.Store(2, call, outcome); err != nil {
-		t.Fatalf("store on fork: %v", err)
+	// The fork inherits the parent's writer identity with its shared prefix.
+	header, ok, err := child.Header()
+	if err != nil || !ok || header != testHeader() {
+		t.Fatalf("forked header = %+v ok=%v err=%v", header, ok, err)
 	}
-	if got := loadAll(t, child); len(got) != 3 || got[0] != `a="a"` || got[1] != `b="b"` || got[2] != `c2="c2"` {
+	syscall, result := pair("c2", "c2")
+	appendPair(t, child, syscall, result)
+	if got := loadEntries(t, child); len(got) != 3 || got[0] != `a="a"` || got[1] != `b="b"` || got[2] != `c2="c2"` {
 		t.Fatalf("forked journal = %v", got)
 	}
+	// The chain stays valid across the fork boundary.
+	if err := journaled.Verify(child); err != nil {
+		t.Fatalf("verify fork: %v", err)
+	}
 	// The base revision is untouched.
-	if got := loadAll(t, base); got[2] != `c="c"` {
+	if got := loadEntries(t, base); got[2] != `c="c"` {
 		t.Fatalf("parent mutated: %v", got)
 	}
 
@@ -96,10 +112,77 @@ func TestLogJournalForkSharesPrefixThenDiverges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := loadAll(t, journals["run1"][1]); got[2] != `c="c"` {
+	if got := loadEntries(t, journals["run1"][1]); got[2] != `c="c"` {
 		t.Fatalf("rebuilt rev1 = %v", got)
 	}
-	if got := loadAll(t, journals["run1"][2]); len(got) != 3 || got[2] != `c2="c2"` {
+	if got := loadEntries(t, journals["run1"][2]); len(got) != 3 || got[2] != `c2="c2"` {
 		t.Fatalf("rebuilt rev2 = %v", got)
+	}
+}
+
+// A journal driven by the real tape (Begin/Commit) and one built by the test
+// helpers must be indistinguishable: both hash-chained, both verifiable.
+func TestLogJournalBacksTheKernelTape(t *testing.T) {
+	log := newMemLog()
+	scope := eventlog.Scope{TenantID: "t", ThreadID: "th"}
+	now := func() time.Time { return time.Unix(0, 0).UTC() }
+	j := newLogJournal(log, scope, "run1", 1, newRunHistory(), 0, now, nil)
+
+	tape, err := journaled.NewTape(j, testHeader())
+	if err != nil {
+		t.Fatalf("new tape: %v", err)
+	}
+	call := sys.Syscall{Abi: sys.ABIVersion, Name: "x", Args: []byte(`{"k":1}`)}
+	if _, err := tape.Begin(call); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := tape.Commit(sys.Result([]byte(`"done"`))); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if err := journaled.Verify(j); err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+
+	// A fresh tape over the same journal replays the recorded pair.
+	replayTape, err := journaled.NewTape(j, testHeader())
+	if err != nil {
+		t.Fatalf("replay tape: %v", err)
+	}
+	result, replayed, err := replayTape.Next(call)
+	if err != nil || !replayed {
+		t.Fatalf("next: replayed=%v err=%v", replayed, err)
+	}
+	if string(result.Result()) != `"done"` {
+		t.Fatalf("replayed result = %s", result.Result())
+	}
+
+	// A different program identity is refused up front.
+	if _, err := journaled.NewTape(j, journaled.Header{ABI: sys.ABIVersion, Program: "other", Run: "run1"}); err == nil {
+		t.Fatal("expected ReplayIncompatibleError for a different program")
+	}
+}
+
+// An open intent at the tail (a crash window or pending approval) surfaces as
+// an in-flight entry and does not break folding.
+func TestLogJournalOpenIntentEntry(t *testing.T) {
+	log := newMemLog()
+	scope := eventlog.Scope{TenantID: "t", ThreadID: "th"}
+	now := func() time.Time { return time.Unix(0, 0).UTC() }
+	j := newLogJournal(log, scope, "run1", 1, newRunHistory(), 0, now, nil)
+
+	syscall, result := pair("a", "a")
+	appendPair(t, j, syscall, result)
+	open, _ := pair("b", "")
+	appendIntent(t, j, open)
+
+	entries, err := j.entries()
+	if err != nil {
+		t.Fatalf("entries: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("entries = %d, want 2", len(entries))
+	}
+	if entries[1].Syscall.Name != "b" || entries[1].Outcome.Status != sys.StatusYield {
+		t.Fatalf("open entry = %+v, want in-flight b", entries[1])
 	}
 }

@@ -4,35 +4,35 @@ import (
 	"context"
 	"testing"
 
-	"github.com/aurora-capcompute/capcompute/dispatcher"
+	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-// recordingDispatcher records the calls it receives so a test can assert which
-// calls were passed through versus short-circuited by the savepoint layer.
+// recordingDispatcher records the syscalls it receives so a test can assert
+// which were passed through versus short-circuited by the savepoint layer.
 type recordingDispatcher struct {
 	seen []string
 }
 
-func (d *recordingDispatcher) Dispatch(_ context.Context, _ struct{}, call dispatcher.Call, _ dispatcher.Authorization) (dispatcher.Outcome, error) {
-	d.seen = append(d.seen, call.Name)
-	return dispatcher.Result([]byte(`"passed"`)), nil
+func (d *recordingDispatcher) Dispatch(_ context.Context, _ struct{}, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
+	d.seen = append(d.seen, syscall.Name)
+	return sys.Result([]byte(`"passed"`)), nil
 }
 
-func (d *recordingDispatcher) Capabilities() []dispatcher.Capability {
-	return []dispatcher.Capability{{Name: "base.cap"}}
+func (d *recordingDispatcher) Capabilities() []sys.Capability {
+	return []sys.Capability{{Name: "base.cap"}}
 }
 
 func TestSavepointDispatcherInterceptsMarkers(t *testing.T) {
 	next := &recordingDispatcher{}
 	d := &savepointDispatcher[struct{}]{next: next}
 
-	for _, name := range []string{CapTry, CapCommit} {
-		out, err := d.Dispatch(context.Background(), struct{}{}, dispatcher.Call{Name: name}, dispatcher.Authorization{})
+	for _, name := range []string{sys.SyscallBegin, sys.SyscallCommit} {
+		out, err := d.Dispatch(context.Background(), struct{}{}, sys.Syscall{Name: name}, sys.Authorization{})
 		if err != nil {
 			t.Fatalf("%s: unexpected error: %v", name, err)
 		}
-		if out.Kind() != dispatcher.OutcomeResult {
-			t.Fatalf("%s: kind = %s, want result", name, out.Kind())
+		if out.Status() != sys.StatusResult {
+			t.Fatalf("%s: status = %s, want result", name, out.Status())
 		}
 	}
 	if len(next.seen) != 0 {
@@ -44,7 +44,7 @@ func TestSavepointDispatcherPassesThroughOtherCalls(t *testing.T) {
 	next := &recordingDispatcher{}
 	d := &savepointDispatcher[struct{}]{next: next}
 
-	out, err := d.Dispatch(context.Background(), struct{}{}, dispatcher.Call{Name: "k8s.apply"}, dispatcher.Authorization{})
+	out, err := d.Dispatch(context.Background(), struct{}{}, sys.Syscall{Name: "k8s.apply"}, sys.Authorization{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

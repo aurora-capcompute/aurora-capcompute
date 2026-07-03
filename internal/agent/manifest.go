@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/aurora-capcompute/capcompute/dispatcher"
+	"github.com/aurora-capcompute/capcompute/sys"
 )
 
 const ManifestVersion = 2
@@ -98,7 +98,7 @@ func decodeAgentSettings(tool Tool) (AgentSettings, error) {
 
 type DispatcherProvider interface {
 	Normalize(toolType string, settings json.RawMessage) (json.RawMessage, error)
-	NewDispatcher(context.Context, RunContext, Manifest) (dispatcher.Dispatcher[RunContext], error)
+	NewDispatcher(context.Context, RunContext, Manifest) (sys.Dispatcher[RunContext], error)
 }
 
 func ValidateManifest(manifest Manifest, provider DispatcherProvider) (Manifest, error) {

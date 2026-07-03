@@ -1,11 +1,13 @@
-// Package host owns the per-run dispatcher stack: it takes the caller-supplied
-// base dispatcher and wraps it, for one run, with durable task approval and the
-// replay/journal middleware. The runtime hands every brain call to a dispatcher
-// built here, so a yielded capability becomes a durable task and every recorded
-// outcome lands in that run's journal for deterministic replay.
+// Package host owns the per-run dispatcher stack. It takes the caller-supplied
+// driver chain and completes it, for one run, with durable task approval and
+// savepoint markers, then hands the whole thing to capcompute.Stack.ForRun so
+// the kernel's canonical monitor chain (Validator → FlowMonitor → replay →
+// Labeler → Declassifier → drivers) is assembled in the one correct order —
+// never by hand. The per-run piece is the tape: a journaled.Tape over the
+// run's journal, stamped with the run's header (ABI, program digest, PID).
 //
-// It owns only the wiring of that stack; the task store, journal, and base
-// dispatcher are injected.
+// It owns only the wiring of that stack; the task store, journal, grant
+// source, taint state, and driver chain are injected.
 package host
 
 import (
@@ -13,15 +15,31 @@ import (
 	"errors"
 	"time"
 
+	"github.com/aurora-capcompute/capcompute"
+	"github.com/aurora-capcompute/capcompute/sys"
+	"github.com/aurora-capcompute/capcompute/sys/replay/tape/journaled"
+
 	"github.com/aurora-capcompute/aurora-capcompute/internal/task"
-	"github.com/aurora-capcompute/capcompute/dispatcher"
-	"github.com/aurora-capcompute/capcompute/dispatcher/replay"
-	"github.com/aurora-capcompute/capcompute/dispatcher/replay/tape/journaled"
 )
 
-type Factory[K any] struct {
-	Base          func(context.Context, K) (dispatcher.Dispatcher[K], error)
-	NewJournal    func(context.Context, K) (journaled.Journal, error)
+// Factory builds one run's complete dispatcher chain.
+//
+// Drivers supplies everything below the task layer (progress reporting and
+// the application's capability drivers). Wrap stacks the runtime's protocol
+// layers above the task layer, below the savepoint markers — delegation
+// routing (which must see a syscall before the task layer so a delegated
+// child's park never becomes a human task) and the agent lifecycle (whose
+// input payload advertises the whole capability surface beneath it). The
+// resulting chain, innermost first:
+//
+//	Drivers ← task ← Wrap ← savepoints ← [Stack: Labeler/Declassifier ← replay ← FlowMonitor ← Validator]
+type Factory[ID comparable, K capcompute.PID[ID]] struct {
+	Drivers    func(context.Context, K) (sys.Dispatcher[K], error)
+	Wrap       func(K, sys.Dispatcher[K]) (sys.Dispatcher[K], error)
+	NewJournal func(context.Context, K) (journaled.Journal, error)
+	Header     func(K) journaled.Header
+	Taints     *capcompute.Taints[ID]
+
 	Tasks         task.Store
 	TaskScope     func(K) task.Scope
 	TaskSecret    []byte
@@ -29,23 +47,28 @@ type Factory[K any] struct {
 	OnTaskCreated func(task.Record)
 }
 
-func (f Factory[K]) NewDispatcher(ctx context.Context, key K) (dispatcher.Dispatcher[K], error) {
-	if f.Base == nil || f.NewJournal == nil || f.Tasks == nil || f.TaskScope == nil || len(f.TaskSecret) == 0 {
+func (f Factory[ID, K]) NewDispatcher(ctx context.Context, cred K) (sys.Dispatcher[K], error) {
+	if f.Drivers == nil || f.NewJournal == nil || f.Header == nil || f.Taints == nil ||
+		f.Tasks == nil || f.TaskScope == nil || len(f.TaskSecret) == 0 {
 		return nil, errors.New("dispatcher factory is not configured")
 	}
-	configured, err := f.Base(ctx, key)
+	drivers, err := f.Drivers(ctx, cred)
 	if err != nil {
 		return nil, err
 	}
-	if configured == nil {
+	if drivers == nil {
 		return nil, errors.New("dispatcher provider returned nil dispatcher")
 	}
-	journal, err := f.NewJournal(ctx, key)
+	journal, err := f.NewJournal(ctx, cred)
 	if err != nil {
 		return nil, err
 	}
-	withTasks := &task.Dispatcher[K]{
-		Next:          configured,
+	tape, err := journaled.NewTape(journal, f.Header(cred))
+	if err != nil {
+		return nil, err
+	}
+	var below sys.Dispatcher[K] = &task.Dispatcher[K]{
+		Next:          drivers,
 		Store:         f.Tasks,
 		Journal:       journal,
 		Scope:         f.TaskScope,
@@ -53,8 +76,24 @@ func (f Factory[K]) NewDispatcher(ctx context.Context, key K) (dispatcher.Dispat
 		TaskTTL:       f.TaskTTL,
 		OnTaskCreated: f.OnTaskCreated,
 	}
+	if f.Wrap != nil {
+		below, err = f.Wrap(cred, below)
+		if err != nil {
+			return nil, err
+		}
+	}
 	// Savepoint markers sit below replay (so they are journaled) and above the
-	// task layer (so they never become durable tasks or hit a base capability).
-	withSavepoints := &savepointDispatcher[K]{next: withTasks}
-	return replay.NewDispatcher[K](journaled.NewTape(journal), withSavepoints), nil
+	// task and routing layers (so they never become durable tasks or dispatch
+	// a child).
+	withSavepoints := &savepointDispatcher[K]{next: below}
+
+	// The grant set is the complete mediation surface: everything this run's
+	// chain can serve — drivers, delegation routes, and the runtime's own
+	// protocol capabilities — is granted explicitly; anything else is denied
+	// by the Validator before it reaches a driver.
+	stack := capcompute.Stack[ID, K]{
+		Grants: func(K) []sys.Capability { return withSavepoints.Capabilities() },
+		Taints: f.Taints,
+	}
+	return stack.ForRun(tape, withSavepoints)
 }

@@ -10,7 +10,7 @@ import (
 )
 
 // appendAll encodes and appends events to a stream, failing the test on error.
-func mustAppend(t *testing.T, log *eventlog.Memory, scope eventlog.Scope, events ...eventlog.Event) {
+func mustAppend(t *testing.T, log *memLog, scope eventlog.Scope, events ...eventlog.Event) {
 	t.Helper()
 	if _, err := log.Append(context.Background(), scope, events...); err != nil {
 		t.Fatalf("append: %v", err)
@@ -18,7 +18,7 @@ func mustAppend(t *testing.T, log *eventlog.Memory, scope eventlog.Scope, events
 }
 
 func TestFoldReconstructsLatestRunAndThreadState(t *testing.T) {
-	log := eventlog.NewMemory()
+	log := newMemLog()
 	scope := eventlog.Scope{TenantID: "t", ThreadID: "th1"}
 	now := time.Unix(0, 0).UTC()
 
@@ -57,7 +57,7 @@ func TestFoldReconstructsLatestRunAndThreadState(t *testing.T) {
 }
 
 func TestFoldTaskLifecycle(t *testing.T) {
-	log := eventlog.NewMemory()
+	log := newMemLog()
 	scope := eventlog.Scope{TenantID: "t", ThreadID: "th1"}
 	now := time.Unix(0, 0).UTC()
 	rec := task.Record{

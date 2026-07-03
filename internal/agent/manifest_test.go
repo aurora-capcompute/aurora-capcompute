@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/aurora-capcompute/capcompute/dispatcher"
+	"github.com/aurora-capcompute/capcompute/sys"
 )
 
 type testDispatchers struct {
@@ -24,7 +24,7 @@ func (p *testDispatchers) Normalize(toolType string, settings json.RawMessage) (
 	return append(json.RawMessage(nil), settings...), nil
 }
 
-func (*testDispatchers) NewDispatcher(context.Context, RunContext, Manifest) (dispatcher.Dispatcher[RunContext], error) {
+func (*testDispatchers) NewDispatcher(context.Context, RunContext, Manifest) (sys.Dispatcher[RunContext], error) {
 	return nil, nil
 }
 

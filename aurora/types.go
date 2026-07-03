@@ -1,10 +1,13 @@
 package aurora
 
 import (
+	"github.com/aurora-capcompute/capcompute"
+	"github.com/aurora-capcompute/capcompute/sched"
+	"github.com/aurora-capcompute/capcompute/sys"
+
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/eventlog"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/task"
-	"github.com/aurora-capcompute/capcompute/dispatcher"
 )
 
 // DTOs
@@ -60,6 +63,8 @@ type DispatcherProvider = agent.DispatcherProvider
 // Event log: the single append-only source of truth. Applications provide an
 // EventLog implementation (and a Leases implementation for cross-instance
 // coordination); the runtime folds the log into thread/run/task projections.
+// This module ships the interfaces only — concrete stores (in-memory, SQLite)
+// are assembly ingredients that live in their own modules.
 
 type EventLog = eventlog.Log
 type LogEvent = eventlog.Event
@@ -67,12 +72,20 @@ type LogScope = eventlog.Scope
 type Leases = agent.Leases
 type RunContext = agent.RunContext
 
+// ProcessTable is the kernel's process lookup boundary, re-exported at the
+// runtime's credential type. Applications supply an implementation (the
+// syscall host path resolves each guest syscall through it).
+type ProcessTable = capcompute.ProcessTable[string, RunContext]
+
+// Quota bounds one tenant's concurrent run quanta (see Config.QuotaOf).
+type Quota = sched.Quota
+
 // Task types
 
 type TaskScope = task.Scope
 type TaskRecord = task.Record
-type TaskState = dispatcher.Decision
-type Resolution = dispatcher.Authorization
+type TaskState = sys.Decision
+type Resolution = sys.Authorization
 
 const (
 	TaskStatePending   = task.StatePending

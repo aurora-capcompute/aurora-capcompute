@@ -2,25 +2,13 @@ package agent
 
 import (
 	"context"
-	"fmt"
 	"time"
 )
 
 const DefaultTenantID = "local"
 
-type RunContext struct {
-	TenantID string `json:"tenant_id"`
-	ThreadID string `json:"thread_id"`
-	RunID    string `json:"run_id"`
-	Revision uint64 `json:"revision"`
-}
-
-func (r RunContext) SessionKey() string {
-	return fmt.Sprintf("%s/%s/%d", r.TenantID, r.RunID, r.Revision)
-}
-
-// StoredThread is a thread's durable state, carried by thread.state events and
-// folded back into memory on restore.
+// StoredThread is a thread's durable state, derived from the run projection
+// and folded back into memory on restore.
 type StoredThread struct {
 	TenantID    string
 	ID          string
@@ -28,9 +16,10 @@ type StoredThread struct {
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 	ActiveRunID string
-	// Tags are arbitrary key-value labels set at creation time (e.g.
-	// "telegram:chat_id" → "12345"). Channel bridges use them to find their
-	// threads from the log without maintaining a separate mapping store.
+	// Tags are arbitrary key-value labels set at creation time. Applications
+	// use them to correlate threads with their own identifiers (e.g. a
+	// conversation or channel id) from the log without maintaining a separate
+	// mapping store; the runtime never interprets them.
 	Tags map[string]string
 }
 
@@ -52,17 +41,17 @@ type StoredRun struct {
 	Error       string
 	Manifest    Manifest
 	BrainDigest string
-	// Tags carries the owning thread's tags (e.g. "binding_ref", "telegram:chat_id")
-	// so thread metadata survives without a separate thread.state event.
+	// Tags carries the owning thread's tags so thread metadata survives
+	// without a separate thread.state event.
 	Tags map[string]string
 	// ParentRunID links a delegated child run back to the run that spawned it;
 	// ChildRunIDs records, in spawn order, the child runs this run delegated to.
 	ParentRunID string
 	ChildRunIDs []string
-	// ChildSpawnOffsets records the journal position each child was spawned at,
+	// ChildSpawnOffsets records the journal length at each child's spawn,
 	// parallel to ChildRunIDs. ForkOffset is the current revision's copy-on-write
 	// fork point; it is persisted so a revision that was forked but crashed before
-	// logging any entry can be reconstructed on restore.
+	// logging any record can be reconstructed on restore.
 	ChildSpawnOffsets []int
 	ForkOffset        int
 }

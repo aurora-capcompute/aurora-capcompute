@@ -3,11 +3,75 @@ package eventlog
 import (
 	"context"
 	"encoding/json"
+	"sort"
+	"sync"
 	"testing"
 )
 
+// memoryLog is this package's test double for the Log contract. The module
+// deliberately ships no concrete log — durable and in-memory implementations
+// are assembly ingredients owned by store modules — so the contract tests
+// carry their own reference implementation.
+type memoryLog struct {
+	mu      sync.RWMutex
+	streams map[Scope][]Event
+}
+
+func newMemoryLog() *memoryLog {
+	return &memoryLog{streams: make(map[Scope][]Event)}
+}
+
+func (m *memoryLog) Append(_ context.Context, scope Scope, events ...Event) (uint64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	existing := m.streams[scope]
+	head := uint64(len(existing))
+	if len(events) == 0 {
+		return head, nil
+	}
+	appended := make([]Event, len(events))
+	for i, ev := range events {
+		head++
+		ev.Seq = head
+		ev.Data = append([]byte(nil), ev.Data...)
+		appended[i] = ev
+	}
+	m.streams[scope] = append(existing, appended...)
+	return head, nil
+}
+
+func (m *memoryLog) Read(_ context.Context, scope Scope, after uint64) ([]Event, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	stream := m.streams[scope]
+	if after >= uint64(len(stream)) {
+		return nil, nil
+	}
+	out := make([]Event, 0, uint64(len(stream))-after)
+	for _, ev := range stream[after:] {
+		ev.Data = append([]byte(nil), ev.Data...)
+		out = append(out, ev)
+	}
+	return out, nil
+}
+
+func (m *memoryLog) Streams(_ context.Context, tenantID string) ([]Scope, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out []Scope
+	for scope, stream := range m.streams {
+		if scope.TenantID == tenantID && len(stream) > 0 {
+			out = append(out, scope)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ThreadID < out[j].ThreadID })
+	return out, nil
+}
+
+var _ Log = (*memoryLog)(nil)
+
 func TestAppendAssignsContiguousSeq(t *testing.T) {
-	log := NewMemory()
+	log := newMemoryLog()
 	ctx := context.Background()
 	scope := Scope{TenantID: "t", ThreadID: "th"}
 
@@ -36,7 +100,7 @@ func TestAppendAssignsContiguousSeq(t *testing.T) {
 }
 
 func TestReadAfterIsExclusive(t *testing.T) {
-	log := NewMemory()
+	log := newMemoryLog()
 	ctx := context.Background()
 	scope := Scope{TenantID: "t", ThreadID: "th"}
 	_, _ = log.Append(ctx, scope, Event{Kind: "a"}, Event{Kind: "b"}, Event{Kind: "c"})
@@ -54,7 +118,7 @@ func TestReadAfterIsExclusive(t *testing.T) {
 }
 
 func TestStoredEventsAreIsolatedFromCallerMutation(t *testing.T) {
-	log := NewMemory()
+	log := newMemoryLog()
 	ctx := context.Background()
 	scope := Scope{TenantID: "t", ThreadID: "th"}
 	data := json.RawMessage(`{"x":1}`)
@@ -75,7 +139,7 @@ func TestStoredEventsAreIsolatedFromCallerMutation(t *testing.T) {
 }
 
 func TestStreamsListsTenantThreads(t *testing.T) {
-	log := NewMemory()
+	log := newMemoryLog()
 	ctx := context.Background()
 	_, _ = log.Append(ctx, Scope{"t1", "b"}, Event{Kind: "x"})
 	_, _ = log.Append(ctx, Scope{"t1", "a"}, Event{Kind: "x"})

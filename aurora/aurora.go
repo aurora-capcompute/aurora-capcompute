@@ -1,13 +1,16 @@
 // Package aurora is the module's public surface: an implementation-neutral
-// orchestration library built on capcompute. It owns thread and run lifecycle,
-// the replay journal, durable approval tasks, retries, event subscriptions, and
+// orchestration runtime on the capcompute kernel. It owns thread and run
+// lifecycle, the intent/completion replay journal over the event log, durable
+// approval tasks, retries, delegation, scheduling, event subscriptions, and
 // execution of caller-supplied Wasm brains — all folded from a single
 // append-only event log, with no mutable row store.
 //
-// It owns no capabilities, dispatchers, persistence, or application wiring:
-// brains, dispatchers, the event log, leases, and the session store are injected
-// through Config, and applications compose those implementations explicitly.
-// The types here are thin re-exports of the internal/agent runtime.
+// It owns no capabilities, dispatchers, stores, or channels: brains,
+// dispatchers, the event log, leases, and the kernel's process table are
+// injected through Config, and a final product is an assembly — a main()
+// composing this runtime with concrete stores, capability drivers, and
+// whatever communication channels that product speaks. None of those live
+// here. The types here are thin re-exports of the internal/agent runtime.
 package aurora
 
 import (

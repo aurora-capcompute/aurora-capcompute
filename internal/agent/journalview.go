@@ -10,46 +10,42 @@ import (
 	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/eventlog"
-	internalhost "github.com/aurora-capcompute/aurora-capcompute/internal/host"
 
-	"github.com/aurora-capcompute/capcompute/dispatcher"
-	"github.com/aurora-capcompute/capcompute/dispatcher/replay/tape/journaled"
+	"github.com/aurora-capcompute/capcompute/sys"
+	"github.com/aurora-capcompute/capcompute/sys/replay/tape/journaled"
 )
 
-// Capability-journal events. Each recorded call is a capability.recorded event
-// carrying its absolute position and the revision that produced it. The fork
-// structure (which revision shared which prefix) is fully derivable from the
-// flat set of (position, revision) pairs — no separate fork event is needed.
-const evCapability = "capability.recorded"
+// Capability-journal events. Each journal record (an intent, a completion, or
+// a compensation pair member — the kernel's envelope+payload shape, hash chain
+// included) is a syscall.recorded event carrying the record verbatim plus the
+// revision that produced it. The fork structure (which revision shared which
+// prefix) is fully derivable from the flat set of (position, revision) pairs —
+// no separate fork event is needed. A journal.header event pins the writer
+// identity (ABI, program digest, run) per revision, so replaying a journal
+// under a different program is refused up front.
+const (
+	evSyscall       = "syscall.recorded"
+	evJournalHeader = "journal.header"
+)
 
-type capabilityData struct {
-	Position int             `json:"position"`
-	Revision uint64          `json:"revision"` // mirrors ev.Rev for self-documentation
-	Call     dispatcher.Call `json:"call"`
-	Outcome  JournalOutcome  `json:"outcome"`
+type syscallRecordData struct {
+	Revision uint64           `json:"revision"` // mirrors ev.Rev for self-documentation
+	Record   journaled.Record `json:"record"`
 }
 
-func encodeOutcome(o dispatcher.Outcome) JournalOutcome {
-	return JournalOutcome{Status: o.Kind(), Result: o.Result(), Message: o.Message()}
+type journalHeaderData struct {
+	Revision uint64           `json:"revision"`
+	Header   journaled.Header `json:"header"`
 }
 
-func decodeOutcome(jo JournalOutcome) dispatcher.Outcome {
-	switch jo.Status {
-	case dispatcher.OutcomeResult:
-		return dispatcher.Result(jo.Result)
-	case dispatcher.OutcomeYield:
-		return dispatcher.Yield(jo.Message)
-	default:
-		return dispatcher.Fail(jo.Message)
-	}
-}
-
-// runHistory accumulates every (position, revision, record) triple written for
-// a run. All logJournal instances for the same run share one runHistory so a
-// forked revision can serve its shared prefix without a parent-pointer chain.
+// runHistory accumulates every (position, revision, record) triple and every
+// revision header written for a run. All logJournal instances for the same run
+// share one runHistory so a forked revision can serve its shared prefix
+// without a parent-pointer chain.
 type runHistory struct {
-	mu    sync.Mutex
-	byPos map[int][]histEntry
+	mu      sync.Mutex
+	byPos   map[int][]histEntry
+	headers map[uint64]journaled.Header
 }
 
 type histEntry struct {
@@ -58,13 +54,47 @@ type histEntry struct {
 }
 
 func newRunHistory() *runHistory {
-	return &runHistory{byPos: make(map[int][]histEntry)}
+	return &runHistory{byPos: make(map[int][]histEntry), headers: make(map[uint64]journaled.Header)}
 }
 
 func (h *runHistory) add(position int, revision uint64, rec journaled.Record) {
 	h.mu.Lock()
 	h.byPos[position] = append(h.byPos[position], histEntry{revision: revision, record: rec})
 	h.mu.Unlock()
+}
+
+func (h *runHistory) setHeader(revision uint64, header journaled.Header) {
+	h.mu.Lock()
+	h.headers[revision] = header
+	h.mu.Unlock()
+}
+
+// ownHeader returns the header stamped by revision rev itself, if any.
+func (h *runHistory) ownHeader(rev uint64) (journaled.Header, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	header, ok := h.headers[rev]
+	return header, ok
+}
+
+// header returns the journal header governing revision rev: the revision's own
+// header if stamped, else the highest earlier revision's (the writer identity
+// a forked journal inherits with its shared prefix).
+func (h *runHistory) header(rev uint64) (journaled.Header, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if header, ok := h.headers[rev]; ok {
+		return header, true
+	}
+	var best uint64
+	var found bool
+	var out journaled.Header
+	for r, header := range h.headers {
+		if r < rev && (!found || r > best) {
+			best, found, out = r, true, header
+		}
+	}
+	return out, found
 }
 
 // allRevisions returns all distinct revision numbers in the history, sorted ascending.
@@ -85,19 +115,23 @@ func (h *runHistory) allRevisions() []uint64 {
 	return out
 }
 
-// allPositions returns all distinct positions in the history, sorted ascending.
-func (h *runHistory) allPositions() []int {
+// lengthAt returns the journal length effective at revision rev: one past the
+// highest position holding a record with revision ≤ rev.
+func (h *runHistory) lengthAt(rev uint64) int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	out := make([]int, 0, len(h.byPos))
-	for pos := range h.byPos {
-		out = append(out, pos)
+	length := 0
+	for position, entries := range h.byPos {
+		for _, e := range entries {
+			if e.revision <= rev && position+1 > length {
+				length = position + 1
+			}
+		}
 	}
-	sort.Ints(out)
-	return out
+	return length
 }
 
-// getAt returns a copy of the entry at position with the highest revision ≤ maxRev.
+// getAt returns a copy of the record at position with the highest revision ≤ maxRev.
 func (h *runHistory) getAt(position int, maxRev uint64) (journaled.Record, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -111,10 +145,10 @@ func (h *runHistory) getAt(position int, maxRev uint64) (journaled.Record, bool)
 	if best == nil {
 		return journaled.Record{}, false
 	}
-	return journaled.Record{Call: best.record.Call.Copy(), Outcome: best.record.Outcome.Copy()}, true
+	return copyRecord(best.record), true
 }
 
-// revAt returns the revision number of the entry at position with the highest
+// revAt returns the revision number of the record at position with the highest
 // revision ≤ maxRev. Used to annotate shared-prefix entries with their origin revision.
 func (h *runHistory) revAt(position int, maxRev uint64) (uint64, bool) {
 	h.mu.Lock()
@@ -130,22 +164,41 @@ func (h *runHistory) revAt(position int, maxRev uint64) (uint64, bool) {
 	return best, found
 }
 
+func copyRecord(rec journaled.Record) journaled.Record {
+	out := rec
+	if rec.Syscall != nil {
+		copied := rec.Syscall.Copy()
+		out.Syscall = &copied
+	}
+	if rec.Result != nil {
+		copied := rec.Result.Copy()
+		out.Result = &copied
+	}
+	if rec.Compensates != nil {
+		compensates := *rec.Compensates
+		out.Compensates = &compensates
+	}
+	return out
+}
+
 // logJournal implements journaled.Journal over an event stream. Positions
 // [0, forkOffset) are served from the shared runHistory (written by prior
 // revisions); positions [forkOffset, ...) are from this revision's own records.
+// Hash-chain integrity holds across the fork: a record appended at forkOffset
+// chains from the shared prefix's tail record, which Load serves verbatim.
 type logJournal struct {
 	log      eventlog.Log
 	scope    eventlog.Scope
 	run      string
 	rev      uint64
 	now      func() time.Time
-	onAppend func(run string, position int, revision uint64, call dispatcher.Call, outcome dispatcher.Outcome)
+	onAppend func(run string, revision uint64, rec journaled.Record, syscallName string)
 
 	history    *runHistory
 	forkOffset int // positions [0, forkOffset) come from history
 
 	mu      sync.Mutex
-	records []journaled.Record // entries appended during this revision
+	records []journaled.Record // records appended during this revision
 }
 
 func newLogJournal(
@@ -156,7 +209,7 @@ func newLogJournal(
 	history *runHistory,
 	forkOffset int,
 	now func() time.Time,
-	onAppend func(string, int, uint64, dispatcher.Call, dispatcher.Outcome),
+	onAppend func(string, uint64, journaled.Record, string),
 ) *logJournal {
 	return &logJournal{
 		log: log, scope: scope, run: run, rev: rev,
@@ -165,48 +218,41 @@ func newLogJournal(
 	}
 }
 
+func (j *logJournal) Header() (journaled.Header, bool, error) {
+	if header, ok := j.history.ownHeader(j.rev); ok {
+		return header, true, nil
+	}
+	// A forked journal inherits the writer identity of the shared prefix it
+	// replays, so a resume under a different program digest is refused by the
+	// tape. A fresh (fork-0) journal inherits nothing: a hard restart may
+	// legitimately run a different program.
+	if j.forkOffset > 0 {
+		if header, ok := j.history.header(j.rev); ok {
+			return header, true, nil
+		}
+	}
+	return journaled.Header{}, false, nil
+}
+
+func (j *logJournal) SetHeader(header journaled.Header) error {
+	ev, err := encodeEvent(evJournalHeader, j.run, j.rev, j.now(), journalHeaderData{
+		Revision: j.rev,
+		Header:   header,
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := j.log.Append(context.Background(), j.scope, ev); err != nil {
+		return err
+	}
+	j.history.setHeader(j.rev, header)
+	return nil
+}
+
 func (j *logJournal) Length() int {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	return j.forkOffset + len(j.records)
-}
-
-// outermostOpenTry scans the effective journal for the outermost host.try
-// marker that was never closed by a matching host.commit, treating the markers
-// as balanced brackets. It returns the fork offset (one past that try, so the
-// marker itself is replayed from history and its body re-executes live) and
-// true when such an open try exists. The outermost still-open try is the
-// transaction the brain was inside when it failed; forking there re-runs the
-// whole declared unit. With no open try it returns false and the caller keeps
-// the default (replay everything, including recorded soft failures).
-func (j *logJournal) outermostOpenTry() (int, bool) {
-	n := j.Length()
-	depth := 0
-	start := -1
-	for i := 0; i < n; i++ {
-		rec, err := j.Load(i)
-		if err != nil {
-			return 0, false
-		}
-		switch rec.Call.Name {
-		case internalhost.CapTry:
-			if depth == 0 {
-				start = i
-			}
-			depth++
-		case internalhost.CapCommit:
-			if depth > 0 {
-				depth--
-				if depth == 0 {
-					start = -1
-				}
-			}
-		}
-	}
-	if depth > 0 && start >= 0 {
-		return start + 1, true
-	}
-	return 0, false
 }
 
 func (j *logJournal) Load(index int) (journaled.Record, error) {
@@ -225,21 +271,19 @@ func (j *logJournal) Load(index int) (journaled.Record, error) {
 	if local < 0 || local >= len(j.records) {
 		return journaled.Record{}, errors.New("journal record not found")
 	}
-	r := j.records[local]
-	return journaled.Record{Call: r.Call.Copy(), Outcome: r.Outcome.Copy()}, nil
+	return copyRecord(j.records[local]), nil
 }
 
-func (j *logJournal) Store(index int, call dispatcher.Call, outcome dispatcher.Outcome) error {
+func (j *logJournal) Append(rec journaled.Record) error {
 	j.mu.Lock()
-	if index != j.forkOffset+len(j.records) {
+	if rec.Position != j.forkOffset+len(j.records) {
 		j.mu.Unlock()
-		return errors.New("invalid journal index")
+		return fmt.Errorf("invalid journal position %d (want %d)", rec.Position, j.forkOffset+len(j.records))
 	}
-	ev, err := encodeEvent(evCapability, j.run, j.rev, j.now(), capabilityData{
-		Position: index,
+	stored := copyRecord(rec)
+	ev, err := encodeEvent(evSyscall, j.run, j.rev, j.now(), syscallRecordData{
 		Revision: j.rev,
-		Call:     call.Copy(),
-		Outcome:  encodeOutcome(outcome),
+		Record:   stored,
 	})
 	if err != nil {
 		j.mu.Unlock()
@@ -249,73 +293,197 @@ func (j *logJournal) Store(index int, call dispatcher.Call, outcome dispatcher.O
 		j.mu.Unlock()
 		return err
 	}
-	rec := journaled.Record{Call: call.Copy(), Outcome: outcome.Copy()}
-	j.records = append(j.records, rec)
-	j.history.add(index, j.rev, rec) // update shared history while still holding j.mu
+	j.records = append(j.records, stored)
+	j.history.add(rec.Position, j.rev, stored) // update shared history while still holding j.mu
+	name := j.syscallNameLocked(stored)
 	j.mu.Unlock()
 	if j.onAppend != nil {
-		j.onAppend(j.run, index, j.rev, call, outcome)
+		j.onAppend(j.run, j.rev, stored, name)
 	}
 	return nil
 }
 
+// syscallNameLocked resolves the syscall a record belongs to: an intent
+// carries it; a completion pairs with the immediately preceding intent.
+func (j *logJournal) syscallNameLocked(rec journaled.Record) string {
+	if rec.Syscall != nil {
+		return rec.Syscall.Name
+	}
+	prev := rec.Position - 1
+	if prev < j.forkOffset {
+		if intent, ok := j.history.getAt(prev, j.rev); ok && intent.Syscall != nil {
+			return intent.Syscall.Name
+		}
+		return ""
+	}
+	local := prev - j.forkOffset
+	if local >= 0 && local < len(j.records) && j.records[local].Syscall != nil {
+		return j.records[local].Syscall.Name
+	}
+	return ""
+}
+
+// outermostOpenBegin scans the effective journal for the outermost sys.begin
+// savepoint that was never closed by a matching sys.commit, treating the
+// markers as balanced brackets over completed syscalls. It returns the fork
+// offset (one past that begin's completion record, so the marker itself is
+// replayed from history and its whole body re-executes live) and true when
+// such an open begin exists. The outermost still-open begin is the unit the
+// brain was inside when it failed; forking there re-runs the whole declared
+// unit. With no open begin it returns false and the caller keeps the default
+// (replay everything, including recorded soft failures).
+func (j *logJournal) outermostOpenBegin() (int, bool) {
+	length := j.Length()
+	depth := 0
+	start := -1 // position of the outermost open begin's completion record
+	for i := 0; i < length; i++ {
+		rec, err := j.Load(i)
+		if err != nil {
+			return 0, false
+		}
+		if rec.Kind != journaled.KindIntent || rec.Syscall == nil {
+			continue
+		}
+		completed := i+1 < length
+		switch rec.Syscall.Name {
+		case sys.SyscallBegin:
+			if !completed {
+				continue // an uncompleted begin intent never bracketed anything
+			}
+			if depth == 0 {
+				start = i + 1
+			}
+			depth++
+		case sys.SyscallCommit:
+			if !completed {
+				continue
+			}
+			if depth > 0 {
+				depth--
+				if depth == 0 {
+					start = -1
+				}
+			}
+		}
+	}
+	if depth > 0 && start >= 0 {
+		return start + 1, true
+	}
+	return 0, false
+}
+
+// entriesLocked pairs the journal's intent/completion records into per-syscall
+// entries. An intent with no completion (an open intent — a crash window or a
+// pending external task) yields an entry whose outcome is a yield with the
+// task summary unavailable; callers render it as in-flight.
+func (j *logJournal) entries() ([]JournalEntry, error) {
+	length := j.Length()
+	entries := make([]JournalEntry, 0, length/2+1)
+	for i := 0; i < length; i++ {
+		rec, err := j.Load(i)
+		if err != nil {
+			return nil, err
+		}
+		if rec.Syscall == nil {
+			continue // completions fold into their intent's entry below
+		}
+		rev := j.rev
+		if r, ok := j.history.revAt(i, j.rev); ok {
+			rev = r
+		}
+		entry := JournalEntry{
+			Position: rec.Position,
+			Revision: rev,
+			Syscall:  *rec.Syscall,
+			Outcome:  JournalOutcome{Status: sys.StatusYield, Message: "in flight"},
+		}
+		if rec.Kind == journaled.KindCompensationIntent {
+			entry.Compensates = rec.Compensates
+		}
+		if i+1 < length {
+			completion, err := j.Load(i + 1)
+			if err != nil {
+				return nil, err
+			}
+			if completion.Result != nil {
+				entry.Outcome = encodeOutcome(*completion.Result)
+			}
+		}
+		entries = append(entries, entry)
+	}
+	return entries, nil
+}
+
+func encodeOutcome(result sys.SyscallResult) JournalOutcome {
+	return JournalOutcome{
+		Status:  result.Status(),
+		Code:    result.Errno(),
+		Result:  result.Result(),
+		Message: result.Message(),
+		Labels:  result.Labels(),
+	}
+}
+
 // foldJournals rebuilds every revision's journal for a thread stream from its
-// capability.recorded events. Revisions are linked to a shared runHistory so
-// forked journals can serve the shared prefix without parent-pointer chains.
-// It returns both the journals and the per-run histories (so callers that need
-// to create new revisions for an existing run can share the same history).
+// syscall.recorded and journal.header events. Revisions are linked to a shared
+// runHistory so forked journals can serve the shared prefix without
+// parent-pointer chains. It returns both the journals and the per-run
+// histories (so callers that need to create new revisions for an existing run
+// can share the same history).
 func foldJournals(
 	events []eventlog.Event,
 	log eventlog.Log,
 	scope eventlog.Scope,
 	now func() time.Time,
-	onAppend func(string, int, uint64, dispatcher.Call, dispatcher.Outcome),
+	onAppend func(string, uint64, journaled.Record, string),
 ) (map[string]map[uint64]*logJournal, map[string]*runHistory, error) {
 	histories := map[string]*runHistory{}
-	type posEntry struct {
-		position int
-		record   journaled.Record
-	}
-	revData := map[string]map[uint64][]posEntry{} // run → rev → entries (in log order)
+	revData := map[string]map[uint64][]journaled.Record{} // run → rev → records (in log order)
 
 	for _, ev := range events {
-		if ev.Kind != evCapability {
-			continue
+		switch ev.Kind {
+		case evJournalHeader:
+			var hd journalHeaderData
+			if err := json.Unmarshal(ev.Data, &hd); err != nil {
+				return nil, nil, fmt.Errorf("decode journal.header: %w", err)
+			}
+			if histories[ev.Run] == nil {
+				histories[ev.Run] = newRunHistory()
+			}
+			histories[ev.Run].setHeader(ev.Rev, hd.Header)
+		case evSyscall:
+			var sd syscallRecordData
+			if err := json.Unmarshal(ev.Data, &sd); err != nil {
+				return nil, nil, fmt.Errorf("decode syscall.recorded: %w", err)
+			}
+			rev := ev.Rev // authoritative; sd.Revision is the same on new events
+			if histories[ev.Run] == nil {
+				histories[ev.Run] = newRunHistory()
+			}
+			histories[ev.Run].add(sd.Record.Position, rev, sd.Record)
+			if revData[ev.Run] == nil {
+				revData[ev.Run] = map[uint64][]journaled.Record{}
+			}
+			revData[ev.Run][rev] = append(revData[ev.Run][rev], sd.Record)
 		}
-		var cd capabilityData
-		if err := json.Unmarshal(ev.Data, &cd); err != nil {
-			return nil, nil, fmt.Errorf("decode capability.recorded: %w", err)
-		}
-		rev := ev.Rev // authoritative; cd.Revision is the same on new entries
-		rec := journaled.Record{Call: cd.Call, Outcome: decodeOutcome(cd.Outcome)}
-
-		if histories[ev.Run] == nil {
-			histories[ev.Run] = newRunHistory()
-		}
-		histories[ev.Run].add(cd.Position, rev, rec)
-
-		if revData[ev.Run] == nil {
-			revData[ev.Run] = map[uint64][]posEntry{}
-		}
-		revData[ev.Run][rev] = append(revData[ev.Run][rev], posEntry{cd.Position, rec})
 	}
 
 	result := map[string]map[uint64]*logJournal{}
 	for run, history := range histories {
 		result[run] = map[uint64]*logJournal{}
-		for rev, entries := range revData[run] {
-			// Sort by position so forkOffset = entries[0].position is reliable.
-			sort.Slice(entries, func(i, k int) bool { return entries[i].position < entries[k].position })
+		for rev, records := range revData[run] {
+			// Sort by position so forkOffset = records[0].Position is reliable.
+			sort.Slice(records, func(i, k int) bool { return records[i].Position < records[k].Position })
 			forkOffset := 0
-			if len(entries) > 0 {
-				forkOffset = entries[0].position
+			if len(records) > 0 {
+				forkOffset = records[0].Position
 			}
 			j := newLogJournal(log, scope, run, rev, history, forkOffset, now, onAppend)
-			for _, e := range entries {
-				j.records = append(j.records, e.record)
-			}
+			j.records = append(j.records, records...)
 			result[run][rev] = j
 		}
+		// A revision that stamped a header but crashed before its first record
+		// still needs a journal view; restore synthesizes it from run state.
 	}
 	return result, histories, nil
 }

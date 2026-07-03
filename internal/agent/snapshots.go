@@ -7,15 +7,14 @@ package agent
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"github.com/aurora-capcompute/capcompute/dispatcher"
 	"strings"
 	"time"
+
+	"github.com/aurora-capcompute/capcompute/sys"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/task"
 )
 
-// Read projections: building API snapshots and StoredThread/StoredRun event
-// payloads from in-memory state, plus small shared helpers.
 func (r *Runtime) threadSummaryLocked(thread *threadState) ThreadSummary {
 	return ThreadSummary{
 		ID:          thread.id,
@@ -85,7 +84,7 @@ func (r *Runtime) taskSnapshot(record task.Record) TaskSnapshot {
 		RunID:           record.Scope.RunID,
 		Revision:        record.Scope.Revision,
 		JournalPosition: record.JournalPosition,
-		Call:            record.Call.Copy(),
+		Syscall:         record.Syscall.Copy(),
 		Summary:         record.Summary,
 		State:           record.State,
 		Resolution:      record.Resolution,
@@ -114,11 +113,11 @@ func copyTime(value *time.Time) *time.Time {
 }
 
 // visibleCapabilities drops capabilities marked Hidden (e.g. the LLM cognition
-// tool) from the brain's discoverable menu. Hidden is set at build time on each
-// published capability, so it works even when a tool's published operation names
-// differ from its local name.
-func visibleCapabilities(caps []dispatcher.Capability) []dispatcher.Capability {
-	visible := make([]dispatcher.Capability, 0, len(caps))
+// tool and the runtime's protocol calls) from the brain's discoverable menu.
+// Hidden is set at build time on each published capability, so it works even
+// when a tool's published operation names differ from its local name.
+func visibleCapabilities(caps []sys.Capability) []sys.Capability {
+	visible := make([]sys.Capability, 0, len(caps))
 	for _, c := range caps {
 		if !c.Hidden {
 			visible = append(visible, c)

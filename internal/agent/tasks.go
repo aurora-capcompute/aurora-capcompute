@@ -168,7 +168,7 @@ func (s *eventTaskStore) MarkExecuted(ctx context.Context, tenantID, taskID stri
 
 func cloneTaskRecord(record task.Record) task.Record {
 	clone := record
-	clone.Call = record.Call.Copy()
+	clone.Syscall = record.Syscall.Copy()
 	clone.TokenHash = append([]byte(nil), record.TokenHash...)
 	clone.Resolution.Data = append([]byte(nil), record.Resolution.Data...)
 	clone.ExpiresAt = copyTime(record.ExpiresAt)

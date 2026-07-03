@@ -7,15 +7,17 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/aurora-capcompute/capcompute/dispatcher"
+	"github.com/aurora-capcompute/capcompute/sys"
 )
 
 // agentRouter is the dispatcher for `core.agent` tools. It runs each sub-agent
-// as a tracked child run of the runtime; its Dispatch forwards a call to that
-// run and returns the child's answer (or propagates a yield for HITL). It sits
-// in the runtime dispatcher stack where the leaf tools cannot reach the runtime.
+// as a tracked child run of the runtime; its Dispatch forwards a syscall to
+// that run and returns the child's answer (or propagates a yield for HITL). It
+// sits above the task layer — a delegated child's park suspends the parent
+// transparently, it never becomes a human-approvable task — and below the
+// savepoint markers and replay, so delegation results are journaled effects.
 type agentRouter struct {
-	next     dispatcher.Dispatcher[RunContext]
+	next     sys.Dispatcher[RunContext]
 	children map[string]agentChild
 }
 
@@ -34,7 +36,7 @@ type delegateResult struct {
 	Answer string `json:"answer"`
 }
 
-func newAgentRouter(next dispatcher.Dispatcher[RunContext], agents []Tool, runtime *Runtime) (*agentRouter, error) {
+func newAgentRouter(next sys.Dispatcher[RunContext], agents []Tool, runtime *Runtime) (*agentRouter, error) {
 	m := make(map[string]agentChild, len(agents))
 	for _, tool := range agents {
 		settings, err := decodeAgentSettings(tool)
@@ -46,14 +48,14 @@ func newAgentRouter(next dispatcher.Dispatcher[RunContext], agents []Tool, runti
 	return &agentRouter{next: next, children: m}, nil
 }
 
-func (r *agentRouter) Dispatch(ctx context.Context, key RunContext, call dispatcher.Call, auth dispatcher.Authorization) (dispatcher.Outcome, error) {
-	if child, ok := r.children[call.Name]; ok {
-		return child.dispatch(ctx, key, call)
+func (r *agentRouter) Dispatch(ctx context.Context, cred RunContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
+	if child, ok := r.children[syscall.Name]; ok {
+		return child.dispatch(ctx, cred, syscall)
 	}
-	return r.next.Dispatch(ctx, key, call, auth)
+	return r.next.Dispatch(ctx, cred, syscall, auth)
 }
 
-func (r *agentRouter) Capabilities() []dispatcher.Capability {
+func (r *agentRouter) Capabilities() []sys.Capability {
 	caps := r.next.Capabilities()
 	for name, child := range r.children {
 		caps = append(caps, agentCapability(name, child))
@@ -62,20 +64,20 @@ func (r *agentRouter) Capabilities() []dispatcher.Capability {
 }
 
 // onChildFailure applies the child's failure-mode policy. OnFailurePropagate
-// forces the parent run to fail (a dispatcher error alone only surfaces a
+// forces the parent run to fail (a failed result alone only surfaces a
 // recoverable observation to the brain); otherwise the failure is reported to
 // the parent brain as a recoverable failed observation.
-func (c *agentChild) onChildFailure(parentRunID string, err error) (dispatcher.Outcome, error) {
+func (c *agentChild) onChildFailure(parentRunID string, err error) (sys.SyscallResult, error) {
 	if c.settings.OnFailure == OnFailurePropagate {
 		c.runtime.requestRunFailure(parentRunID, fmt.Errorf("child %q failed: %w", c.tool.Name, err))
 	}
-	return dispatcher.Fail(err.Error()), nil
+	return sys.Fail(err.Error()), nil
 }
 
-func (c *agentChild) dispatch(ctx context.Context, parent RunContext, call dispatcher.Call) (dispatcher.Outcome, error) {
+func (c *agentChild) dispatch(ctx context.Context, parent RunContext, syscall sys.Syscall) (sys.SyscallResult, error) {
 	var args delegateArgs
-	if err := json.Unmarshal(call.Args, &args); err != nil {
-		return dispatcher.Fail(fmt.Sprintf("decode delegation args: %v", err)), nil
+	if err := json.Unmarshal(syscall.Args, &args); err != nil {
+		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode delegation args: %v", err)), nil
 	}
 
 	// Deep cascade resume: when the parent run is being restarted (or re-driven
@@ -90,7 +92,7 @@ func (c *agentChild) dispatch(ctx context.Context, parent RunContext, call dispa
 			// re-create the child's approval task.
 			snap, err := c.runtime.GetRun(childID)
 			if err != nil {
-				return dispatcher.Fail(fmt.Sprintf("reconnect child: %v", err)), nil
+				return sys.Fail(fmt.Sprintf("reconnect child: %v", err)), nil
 			}
 			answer, _, runErr := childTerminal(snap)
 			if runErr != nil {
@@ -99,14 +101,14 @@ func (c *agentChild) dispatch(ctx context.Context, parent RunContext, call dispa
 			return delegationResult(answer)
 		}
 		if _, err := c.runtime.Retry(childID, cascadeMode); err != nil {
-			return dispatcher.Fail(fmt.Sprintf("cascade retry child: %v", err)), nil
+			return sys.Fail(fmt.Sprintf("cascade retry child: %v", err)), nil
 		}
 		answer, parked, err := c.runtime.waitForCompletion(ctx, childID, threadID)
 		if err != nil {
 			return c.onChildFailure(parent.RunID, err)
 		}
 		if parked {
-			return dispatcher.Yield(fmt.Sprintf("waiting on child %s", c.tool.Name)), nil
+			return sys.Yield(fmt.Sprintf("waiting on child %s", c.tool.Name)), nil
 		}
 		return delegationResult(answer)
 	}
@@ -115,7 +117,7 @@ func (c *agentChild) dispatch(ctx context.Context, parent RunContext, call dispa
 	slog.Info("spawning child run in parent thread", "parent_run", parent.RunID, "child", c.tool.Name)
 	run, err := c.runtime.createChildRun(parent.RunID, parent.ThreadID, args.Message, childManifest)
 	if err != nil {
-		return dispatcher.Fail(fmt.Sprintf("create child run: %v", err)), nil
+		return sys.Fail(fmt.Sprintf("create child run: %v", err)), nil
 	}
 	answer, parked, err := c.runtime.waitForCompletion(ctx, run.ID, parent.ThreadID)
 	if err != nil {
@@ -125,18 +127,18 @@ func (c *agentChild) dispatch(ctx context.Context, parent RunContext, call dispa
 		// The child parked for human approval. Yield so the parent run suspends
 		// durably; the child→parent finish hook re-drives this call once the child
 		// finishes, and the reconnect branch above returns its answer.
-		return dispatcher.Yield(fmt.Sprintf("waiting on child %s", c.tool.Name)), nil
+		return sys.Yield(fmt.Sprintf("waiting on child %s", c.tool.Name)), nil
 	}
 	return delegationResult(answer)
 }
 
 // delegationResult marshals a child's answer into the delegate result envelope.
-func delegationResult(answer string) (dispatcher.Outcome, error) {
+func delegationResult(answer string) (sys.SyscallResult, error) {
 	result, err := json.Marshal(delegateResult{Answer: answer})
 	if err != nil {
-		return dispatcher.Outcome{}, err
+		return sys.SyscallResult{}, err
 	}
-	return dispatcher.Result(result), nil
+	return sys.Result(result), nil
 }
 
 // buildChildManifest lifts a `core.agent` tool node into a Manifest for the child
@@ -158,7 +160,7 @@ func buildChildManifest(tool Tool, settings AgentSettings, systemPromptOverride 
 	}
 }
 
-func agentCapability(name string, child agentChild) dispatcher.Capability {
+func agentCapability(name string, child agentChild) sys.Capability {
 	var desc strings.Builder
 	desc.WriteString("Delegate work to the ")
 	desc.WriteString(name)
@@ -176,7 +178,7 @@ func agentCapability(name string, child agentChild) dispatcher.Capability {
 	} else {
 		desc.WriteString(" Pure computation agent, no external tools.")
 	}
-	return dispatcher.Capability{
+	return sys.Capability{
 		Name:        name,
 		Description: desc.String(),
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"message":{"type":"string","description":"Task description for the child agent"},"system_prompt":{"type":"string","description":"Optional system prompt override"}},"required":["message"],"additionalProperties":false}`),
@@ -276,11 +278,7 @@ func (r *Runtime) createChildRun(parentRunID string, threadID string, message st
 		brainDigest: brain.Digest,
 		parentRunID: parentRunID,
 	}
-	run.journal, err = r.newJournal(run, newRunHistory(), 0)
-	if err != nil {
-		r.mu.Unlock()
-		return RunSnapshot{}, err
-	}
+	run.journal = r.newJournal(run, newRunHistory(), 0)
 	r.runs[runID] = run
 	thread.runIDs = append(thread.runIDs, runID)
 	if len(thread.runIDs) == 1 {
@@ -299,8 +297,8 @@ func (r *Runtime) createChildRun(parentRunID string, threadID string, message st
 	if parent := r.runs[parentRunID]; parent != nil {
 		spawnOffset := 0
 		if parent.journal != nil {
-			// The position this call.<child> occupies in the parent journal; it is
-			// recorded once the dispatch returns.
+			// One past the delegation intent this child was spawned under; the
+			// completion is recorded once the dispatch returns.
 			spawnOffset = parent.journal.Length()
 		}
 		parent.childRunIDs = append(parent.childRunIDs, runID)
@@ -391,8 +389,8 @@ func childParked(s RunSnapshot) bool {
 // HITL approval, once that child has reached a terminal state. It is a no-op when
 // the parent is not parked — e.g. a parent still actively blocked in a synchronous
 // delegation call observes the child's completion through its own subscription.
-// The parent is re-driven via fork+replay (reconnectChildren) so the un-recorded
-// delegation call re-executes and reconnects to the finished child.
+// The parent is re-driven by replay (reconnectChildren) so the un-committed
+// delegation intent re-executes and reconnects to the finished child.
 func (r *Runtime) resumeParentIfWaiting(parentRunID string) {
 	r.mu.Lock()
 	parent := r.runs[parentRunID]

@@ -1,9 +1,13 @@
-// Package task owns durable approval: when a brain yields a capability that
-// needs out-of-band confirmation, this package turns the yield into a persisted
-// task record, mints an HMAC-derived token the caller resolves against, and on
-// approval replays the original call back through the wrapped dispatcher. A
-// task's token hash is the only secret-derived value the store persists out of
-// band; the record itself omits it from JSON.
+// Package task owns durable approval: when a brain's syscall yields for
+// out-of-band confirmation, this package turns the yield into a persisted task
+// record, mints an HMAC-derived token the caller resolves against, and on
+// approval replays the original syscall back through the wrapped dispatcher
+// with the stored resolution as its Authorization. This is the approval
+// injection seam the kernel deliberately does not own: the kernel's syscall
+// host path always passes a zero Authorization, so promoting a human decision
+// into a dispatch is the runtime's job, keyed by the intent the replay layer
+// journaled. A task's token hash is the only secret-derived value the store
+// persists out of band; the record itself omits it from JSON.
 //
 // It owns the task lifecycle and token scheme, not the capability behind the
 // task — the underlying dispatcher and the durable store are injected.
@@ -17,17 +21,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"github.com/aurora-capcompute/capcompute/dispatcher"
-	"github.com/aurora-capcompute/capcompute/dispatcher/replay/tape/journaled"
-	"strings"
 	"time"
-)
 
-// delegationCallPrefix marks a call as a delegation to a child run (call.<name>).
-// Such a yield suspends the parent pending the child's own approval and must not
-// be turned into a human-approvable task. Mirrors the prefix used by the agent's
-// delegation router.
-const delegationCallPrefix = "call."
+	"github.com/aurora-capcompute/capcompute/sys"
+	"github.com/aurora-capcompute/capcompute/sys/replay/tape/journaled"
+)
 
 type Scope struct {
 	TenantID string
@@ -36,34 +34,34 @@ type Scope struct {
 	Revision uint64
 }
 
-type State = dispatcher.Decision
+type State = sys.Decision
 
 const (
 	StatePending   State = "pending"
-	StateApproved        = dispatcher.Approved
-	StateCompleted       = dispatcher.Completed
-	StateFailed          = dispatcher.Failed
-	StateDenied          = dispatcher.Denied
-	StateCancelled       = dispatcher.Cancelled
+	StateApproved        = sys.Approved
+	StateCompleted       = sys.Completed
+	StateFailed          = sys.Failed
+	StateDenied          = sys.Denied
+	StateCancelled       = sys.Cancelled
 	StateExpired   State = "expired"
 	StateExecuted  State = "executed"
 )
 
-type Resolution = dispatcher.Authorization
+type Resolution = sys.Authorization
 
 type Record struct {
-	Scope           Scope           `json:"scope"`
-	ID              string          `json:"id"`
-	JournalPosition int             `json:"journal_position"`
-	CallHash        string          `json:"call_hash"`
-	Call            dispatcher.Call `json:"call"`
-	Summary         string          `json:"summary"`
-	State           State           `json:"state"`
-	TokenHash       []byte          `json:"-"`
-	Resolution      Resolution      `json:"resolution,omitempty"`
-	CreatedAt       time.Time       `json:"created_at"`
-	ExpiresAt       *time.Time      `json:"expires_at,omitempty"`
-	ResolvedAt      *time.Time      `json:"resolved_at,omitempty"`
+	Scope           Scope       `json:"scope"`
+	ID              string      `json:"id"`
+	JournalPosition int         `json:"journal_position"`
+	CallHash        string      `json:"call_hash"`
+	Syscall         sys.Syscall `json:"syscall"`
+	Summary         string      `json:"summary"`
+	State           State       `json:"state"`
+	TokenHash       []byte      `json:"-"`
+	Resolution      Resolution  `json:"resolution,omitempty"`
+	CreatedAt       time.Time   `json:"created_at"`
+	ExpiresAt       *time.Time  `json:"expires_at,omitempty"`
+	ResolvedAt      *time.Time  `json:"resolved_at,omitempty"`
 }
 
 type Store interface {
@@ -82,8 +80,13 @@ var (
 	ErrUnauthorized = errors.New("invalid task token")
 )
 
+// Dispatcher sits below the replay layer: by the time a syscall reaches it,
+// the replay dispatcher has already journaled the intent, so the current
+// journal tail is this syscall's intent record. That intent position is the
+// task's identity within the run revision — a resumed run re-reaches the same
+// position and finds the same task.
 type Dispatcher[K any] struct {
-	Next          dispatcher.Dispatcher[K]
+	Next          sys.Dispatcher[K]
 	Store         Store
 	Journal       journaled.Journal
 	Scope         func(K) Scope
@@ -93,44 +96,42 @@ type Dispatcher[K any] struct {
 	OnTaskCreated func(Record)
 }
 
-func (d *Dispatcher[K]) Dispatch(ctx context.Context, key K, call dispatcher.Call, auth dispatcher.Authorization) (dispatcher.Outcome, error) {
+func (d *Dispatcher[K]) Dispatch(ctx context.Context, cred K, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	if d.Next == nil || d.Store == nil || d.Journal == nil || d.Scope == nil {
-		return dispatcher.Outcome{}, errors.New("task dispatcher is not configured")
+		return sys.SyscallResult{}, errors.New("task dispatcher is not configured")
 	}
-	scope := d.Scope(key)
-	position := d.Journal.Length()
-	callHash := HashCall(call)
+	scope := d.Scope(cred)
+	// The replay layer appends the intent before delegating, so the syscall's
+	// journal position is the current tail.
+	position := d.Journal.Length() - 1
+	if position < 0 {
+		position = 0
+	}
+	callHash := HashCall(syscall)
 	record, found, err := d.Store.Find(ctx, scope, position, callHash)
 	if err != nil {
-		return dispatcher.Outcome{}, err
+		return sys.SyscallResult{}, err
 	}
 	if found {
-		return d.resume(ctx, key, record)
+		return d.resume(ctx, cred, record)
 	}
 
-	outcome, err := d.Next.Dispatch(ctx, key, call, auth)
-	if err != nil || outcome.Kind() != dispatcher.OutcomeYield {
-		return outcome, err
-	}
-	// A delegation call (call.<child>) yields to suspend its parent while the child
-	// awaits its own out-of-band approval. That is not a human-approvable task —
-	// the parent is re-driven from its journal once the child finishes — so the
-	// yield is propagated transparently, without creating a task record.
-	if strings.HasPrefix(call.Name, delegationCallPrefix) {
-		return outcome, nil
+	result, err := d.Next.Dispatch(ctx, cred, syscall, auth)
+	if err != nil || result.Status() != sys.StatusYield {
+		return result, err
 	}
 	now := d.now()
 	taskID, err := randomID()
 	if err != nil {
-		return dispatcher.Outcome{}, err
+		return sys.SyscallResult{}, err
 	}
 	record = Record{
 		Scope:           scope,
 		ID:              taskID,
 		JournalPosition: position,
 		CallHash:        callHash,
-		Call:            call.Copy(),
-		Summary:         outcome.Message(),
+		Syscall:         syscall.Copy(),
+		Summary:         result.Message(),
 		State:           StatePending,
 		CreatedAt:       now,
 	}
@@ -142,53 +143,53 @@ func (d *Dispatcher[K]) Dispatch(ctx context.Context, key K, call dispatcher.Cal
 	sum := sha256.Sum256([]byte(token))
 	record.TokenHash = sum[:]
 	if err := d.Store.Create(ctx, record); err != nil {
-		return dispatcher.Outcome{}, err
+		return sys.SyscallResult{}, err
 	}
 	if d.OnTaskCreated != nil {
 		d.OnTaskCreated(record)
 	}
-	return dispatcher.Yield(record.ID), nil
+	return sys.Yield(record.ID), nil
 }
 
-func (d *Dispatcher[K]) resume(ctx context.Context, key K, record Record) (dispatcher.Outcome, error) {
+func (d *Dispatcher[K]) resume(ctx context.Context, cred K, record Record) (sys.SyscallResult, error) {
 	if record.ExpiresAt != nil && !d.now().Before(*record.ExpiresAt) && record.State == StatePending {
-		return dispatcher.Fail("external task expired"), nil
+		return sys.FailCode(sys.ErrnoExpired, "external task expired"), nil
 	}
 	switch record.State {
 	case StatePending:
-		return dispatcher.Yield(record.ID), nil
+		return sys.Yield(record.ID), nil
 	case StateApproved:
-		outcome, err := d.Next.Dispatch(ctx, key, record.Call, record.Resolution)
-		if err == nil && outcome.Kind() != dispatcher.OutcomeYield {
+		result, err := d.Next.Dispatch(ctx, cred, record.Syscall, record.Resolution)
+		if err == nil && result.Status() != sys.StatusYield {
 			_ = d.Store.MarkExecuted(ctx, record.Scope.TenantID, record.ID, d.now())
 		}
-		return outcome, err
+		return result, err
 	case StateCompleted:
-		return dispatcher.Result(record.Resolution.Data), nil
+		return sys.Result(record.Resolution.Data), nil
 	case StateDenied:
-		return dispatcher.Fail(nonempty(record.Resolution.Reason, "external task denied")), nil
+		return sys.FailCode(sys.ErrnoDenied, nonempty(record.Resolution.Reason, "external task denied")), nil
 	case StateFailed:
-		return dispatcher.Fail(nonempty(record.Resolution.Reason, "external task failed")), nil
+		return sys.FailCode(sys.ErrnoInternal, nonempty(record.Resolution.Reason, "external task failed")), nil
 	case StateCancelled:
-		return dispatcher.Fail("external task cancelled"), nil
+		return sys.FailCode(sys.ErrnoDenied, "external task cancelled"), nil
 	case StateExpired:
-		return dispatcher.Fail("external task expired"), nil
+		return sys.FailCode(sys.ErrnoExpired, "external task expired"), nil
 	case StateExecuted:
-		return d.Next.Dispatch(ctx, key, record.Call, record.Resolution)
+		return d.Next.Dispatch(ctx, cred, record.Syscall, record.Resolution)
 	default:
-		return dispatcher.Outcome{}, fmt.Errorf("unsupported task state %q", record.State)
+		return sys.SyscallResult{}, fmt.Errorf("unsupported task state %q", record.State)
 	}
 }
 
-func (d *Dispatcher[K]) Capabilities() []dispatcher.Capability {
+func (d *Dispatcher[K]) Capabilities() []sys.Capability {
 	return d.Next.Capabilities()
 }
 
-func HashCall(call dispatcher.Call) string {
+func HashCall(syscall sys.Syscall) string {
 	sum := sha256.New()
-	_, _ = sum.Write([]byte(call.Name))
+	_, _ = sum.Write([]byte(syscall.Name))
 	_, _ = sum.Write([]byte{0})
-	_, _ = sum.Write(call.Args)
+	_, _ = sum.Write(syscall.Args)
 	return hex.EncodeToString(sum.Sum(nil))
 }
 

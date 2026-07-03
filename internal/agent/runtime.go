@@ -1,14 +1,15 @@
-// Package agent is the runtime: it owns thread and run lifecycle, the play
-// goroutine that drives a compiled Wasm brain, durable approval tasks, retries,
-// event subscriptions, and the read projections (snapshots, journal, call graph)
-// the public API exposes. All durable state is a fold of one append-only event
-// stream per thread — the runtime keeps no mutable row store, and restore
-// rebuilds in-memory state by replaying each stream from the beginning.
+// Package agent is the runtime: it owns thread and run lifecycle, the
+// scheduler-driven quanta that resume Wasm brains on the capcompute kernel,
+// durable approval tasks, retries, event subscriptions, and the read
+// projections (snapshots, journal, call graph) the public API exposes. All
+// durable state is a fold of one append-only event stream per thread — the
+// runtime keeps no mutable row store, and restore rebuilds in-memory state by
+// replaying each stream from the beginning.
 //
-// It does not own capability implementations, brain bytes, or the concrete log:
-// dispatchers, brains, the event log, leases, and the session store are all
-// injected. The aurora package re-exports this package's types as the module's
-// public surface.
+// It does not own capability implementations, brain bytes, or any concrete
+// store: dispatchers, brains, the event log, leases, and the kernel's process
+// table are all injected. The aurora package re-exports this package's types
+// as the module's public surface.
 package agent
 
 import (
@@ -17,17 +18,24 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/aurora-capcompute/capcompute"
-	"github.com/aurora-capcompute/capcompute/dispatcher"
-	"github.com/aurora-capcompute/capcompute/dispatcher/replay/tape/journaled"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/aurora-capcompute/capcompute"
+	"github.com/aurora-capcompute/capcompute/sched"
+	"github.com/aurora-capcompute/capcompute/sys"
+	"github.com/aurora-capcompute/capcompute/sys/replay/tape/journaled"
 
 	internalhost "github.com/aurora-capcompute/aurora-capcompute/internal/host"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/task"
 
 	extism "github.com/extism/go-sdk"
+)
+
+const (
+	defaultMaxConcurrentRuns = 16
+	defaultMaxResidentRuns   = 64
 )
 
 func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
@@ -40,8 +48,8 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 	if config.Leases == nil {
 		return nil, fmt.Errorf("%w: leases are required", ErrInvalid)
 	}
-	if config.SessionStore == nil {
-		return nil, fmt.Errorf("%w: session store is required", ErrInvalid)
+	if config.ProcessTable == nil {
+		return nil, fmt.Errorf("%w: process table is required", ErrInvalid)
 	}
 	if len(config.TaskSecret) == 0 {
 		return nil, fmt.Errorf("%w: task secret is required", ErrInvalid)
@@ -51,9 +59,10 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		return nil, err
 	}
 	runtime := &Runtime{
-		computes:     make(map[string]*capcompute.ComputeCompiledPlugin[string, RunKey]),
+		kernels:      make(map[string]*capcompute.Kernel[string, RunContext]),
 		brains:       brains,
-		sessionStore: config.SessionStore,
+		processTable: config.ProcessTable,
+		taints:       capcompute.NewTaints[string](),
 		log:          config.Log,
 		leases:       config.Leases,
 		tenantID:     strings.TrimSpace(config.TenantID),
@@ -99,58 +108,21 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		return nil, fmt.Errorf("restore runtime: %w", err)
 	}
 
-	dispatcherFactory := internalhost.Factory[RunKey]{
-		Base: func(resolveCtx context.Context, key RunKey) (dispatcher.Dispatcher[RunKey], error) {
-			runtime.mu.Lock()
-			run := runtime.runs[key.RunID]
-			var manifest Manifest
-			var message string
-			var history []HistoryMessage
-			if run != nil {
-				manifest = cloneManifest(run.manifest)
-				message = run.message
-				history = append([]HistoryMessage(nil), run.history...)
-			}
-			runtime.mu.Unlock()
-			if run == nil {
-				return nil, fmt.Errorf("%w: run %s", ErrNotFound, key.RunID)
-			}
-			base, err := runtime.dispatchers.NewDispatcher(resolveCtx, key, manifest)
-			if err != nil {
-				return nil, err
-			}
-			var d dispatcher.Dispatcher[RunKey] = base
-			d = newProgressDispatcher(d, runtime.publish, key.ThreadID, key.RunID)
-			if agents := manifest.agentTools(); len(agents) > 0 {
-				router, err := newAgentRouter(d, agents, runtime)
-				if err != nil {
-					return nil, err
-				}
-				d = router
-			}
-			// Wrap with the lifecycle dispatcher so agent.input/agent.finish are
-			// recorded on the replay journal alongside capability calls.
-			return newLifecycleDispatcher(d, message, history, manifest), nil
-		},
-		NewJournal: func(_ context.Context, key RunKey) (journaled.Journal, error) {
-			runtime.mu.Lock()
-			run := runtime.runs[key.RunID]
-			runtime.mu.Unlock()
-			if run != nil && run.journal != nil {
-				return run.journal, nil
-			}
-			return newLogJournal(runtime.log, runtime.scope(key.ThreadID), key.RunID, key.Revision,
-				newRunHistory(), 0, runtime.journalNow, runtime.journalAppendPublisher(key.ThreadID)), nil
-		},
+	runtime.factory = internalhost.Factory[string, RunContext]{
+		Drivers:    runtime.runDrivers,
+		Wrap:       runtime.wrapProtocol,
+		NewJournal: runtime.journalFor,
+		Header:     runtime.headerFor,
+		Taints:     runtime.taints,
 		Tasks:      runtime.tasks,
 		TaskSecret: runtime.taskSecret,
 		TaskTTL:    runtime.taskTTL,
-		TaskScope: func(key RunKey) task.Scope {
+		TaskScope: func(cred RunContext) task.Scope {
 			return task.Scope{
-				TenantID: key.TenantID,
-				ThreadID: key.ThreadID,
-				RunID:    key.RunID,
-				Revision: key.Revision,
+				TenantID: cred.TenantID,
+				ThreadID: cred.ThreadID,
+				RunID:    cred.RunID,
+				Revision: cred.Revision,
 			}
 		},
 		OnTaskCreated: func(record task.Record) {
@@ -160,39 +132,139 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 			})
 		},
 	}
-	runtime.dispatcherFactory = dispatcherFactory
+
+	maxConcurrent := config.MaxConcurrentRuns
+	if maxConcurrent <= 0 {
+		maxConcurrent = defaultMaxConcurrentRuns
+	}
+	maxResident := config.MaxResidentRuns
+	if maxResident <= 0 {
+		maxResident = defaultMaxResidentRuns
+	}
+	runtime.scheduler, err = sched.New(sched.Config[string, RunContext]{
+		Activate: runtime.activateProcess,
+		Resume:   runtime.resumeProcess,
+		Deactivate: func(pid string, process *capcompute.Process[RunContext]) {
+			_ = process.Close(context.Background())
+		},
+		QuotaOf:       config.QuotaOf,
+		MaxConcurrent: maxConcurrent,
+		MaxResident:   maxResident,
+	})
+	if err != nil {
+		return nil, err
+	}
+
 	for _, artifact := range brains.List() {
 		source, err := brains.Source(artifact.ID)
 		if err != nil {
 			return nil, err
 		}
-		compute, err := runtime.compileBrain(ctx, artifact.ID, source.Wasm, artifact.Digest)
+		kernel, err := runtime.compileBrain(ctx, artifact.ID, source.Wasm, artifact.Digest)
 		if err != nil {
-			for _, opened := range runtime.computes {
-				_ = opened.CloseCompiled(context.Background())
+			for _, opened := range runtime.kernels {
+				_ = opened.Shutdown(context.Background())
 			}
 			return nil, err
 		}
-		runtime.computes[artifact.ID] = compute
+		runtime.kernels[artifact.ID] = kernel
 	}
 	return runtime, nil
 }
 
-// compileBrain compiles a brain's wasm into a runnable compute plugin. It is
-// pure with respect to runtime state (it only reads the session store), so it
-// can be called outside the runtime mutex while preparing a SetBrains swap.
-func (r *Runtime) compileBrain(ctx context.Context, id string, wasm []byte, digest string) (*capcompute.ComputeCompiledPlugin[string, RunKey], error) {
-	compute, err := capcompute.NewComputeCompiledPlugin[string, RunKey](ctx, capcompute.Config[string, RunKey]{
-		Manifest: extism.Manifest{
+// runDrivers builds the driver chain below the task layer for one run: the
+// application's capability dispatcher wrapped with progress reporting.
+func (r *Runtime) runDrivers(resolveCtx context.Context, cred RunContext) (sys.Dispatcher[RunContext], error) {
+	r.mu.Lock()
+	run := r.runs[cred.RunID]
+	var manifest Manifest
+	if run != nil {
+		manifest = cloneManifest(run.manifest)
+	}
+	r.mu.Unlock()
+	if run == nil {
+		return nil, fmt.Errorf("%w: run %s", ErrNotFound, cred.RunID)
+	}
+	base, err := r.dispatchers.NewDispatcher(resolveCtx, cred, manifest)
+	if err != nil {
+		return nil, err
+	}
+	return newProgressDispatcher(base, r.publish, cred.ThreadID, cred.RunID), nil
+}
+
+// wrapProtocol stacks the runtime's protocol layers above the task layer:
+// the delegation router (above tasks, so a delegated child's park suspends
+// the parent transparently instead of becoming a human-approvable task), then
+// the agent lifecycle outermost — its agent.input payload advertises every
+// capability beneath it, delegation tools included.
+func (r *Runtime) wrapProtocol(cred RunContext, next sys.Dispatcher[RunContext]) (sys.Dispatcher[RunContext], error) {
+	r.mu.Lock()
+	run := r.runs[cred.RunID]
+	var manifest Manifest
+	var message string
+	var history []HistoryMessage
+	if run != nil {
+		manifest = cloneManifest(run.manifest)
+		message = run.message
+		history = append([]HistoryMessage(nil), run.history...)
+	}
+	r.mu.Unlock()
+	if run == nil {
+		return nil, fmt.Errorf("%w: run %s", ErrNotFound, cred.RunID)
+	}
+	if agents := manifest.agentTools(); len(agents) > 0 {
+		router, err := newAgentRouter(next, agents, r)
+		if err != nil {
+			return nil, err
+		}
+		next = router
+	}
+	return newLifecycleDispatcher(next, message, history, manifest), nil
+}
+
+// journalFor returns the run's live journal view.
+func (r *Runtime) journalFor(_ context.Context, cred RunContext) (journaled.Journal, error) {
+	r.mu.Lock()
+	run := r.runs[cred.RunID]
+	r.mu.Unlock()
+	if run == nil || run.journal == nil {
+		return nil, fmt.Errorf("%w: run %s has no journal", ErrNotFound, cred.RunID)
+	}
+	if run.journal.rev != cred.Revision {
+		return nil, fmt.Errorf("%w: run %s journal is at revision %d, not %d",
+			ErrConflict, cred.RunID, run.journal.rev, cred.Revision)
+	}
+	return run.journal, nil
+}
+
+// headerFor is the journal writer identity for one run revision: the syscall
+// ABI, the brain digest as the program, and the run id. The tape refuses to
+// replay a journal whose recorded header differs — the versioned-replay law.
+func (r *Runtime) headerFor(cred RunContext) journaled.Header {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	program := ""
+	if run := r.runs[cred.RunID]; run != nil {
+		program = run.brainDigest
+	}
+	return journaled.Header{ABI: sys.ABIVersion, Program: program, Run: cred.RunID}
+}
+
+// compileBrain compiles a brain's wasm into a kernel. It is pure with respect
+// to runtime state, so it can be called outside the runtime mutex while
+// preparing a SetBrains swap.
+func (r *Runtime) compileBrain(ctx context.Context, id string, wasm []byte, digest string) (*capcompute.Kernel[string, RunContext], error) {
+	kernel, err := capcompute.NewKernel(ctx, capcompute.Config[string, RunContext]{
+		Image: extism.Manifest{
 			Wasm: []extism.Wasm{extism.WasmData{Data: wasm, Hash: digest, Name: id}},
 		},
 		PluginConfig: extism.PluginConfig{EnableWasi: true},
-		SessionStore: r.sessionStore,
+		ProcessTable: r.processTable,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("compile brain %q: %w", id, err)
 	}
-	return compute, nil
+	return kernel, nil
 }
 
 // SetBrains declaratively reconciles the registered brains to the given set:
@@ -209,10 +281,10 @@ func (r *Runtime) SetBrains(ctx context.Context, sources []BrainSource) error {
 
 	// Compile additions/replacements outside the lock; fail atomically.
 	type compiled struct {
-		id      string
-		wasm    []byte
-		digest  string
-		compute *capcompute.ComputeCompiledPlugin[string, RunKey]
+		id     string
+		wasm   []byte
+		digest string
+		kernel *capcompute.Kernel[string, RunContext]
 	}
 	var fresh []compiled
 	for _, src := range sources {
@@ -229,49 +301,49 @@ func (r *Runtime) SetBrains(ctx context.Context, sources []BrainSource) error {
 		if cur, ok := current[id]; ok && cur == digest {
 			continue // unchanged
 		}
-		compute, err := r.compileBrain(ctx, id, wasm, digest)
+		kernel, err := r.compileBrain(ctx, id, wasm, digest)
 		if err != nil {
 			for _, c := range fresh {
-				_ = c.compute.CloseCompiled(context.Background())
+				_ = c.kernel.Shutdown(context.Background())
 			}
 			return err
 		}
-		fresh = append(fresh, compiled{id: id, wasm: wasm, digest: digest, compute: compute})
+		fresh = append(fresh, compiled{id: id, wasm: wasm, digest: digest, kernel: kernel})
 	}
 
-	// Swap under the runtime mutex (which guards r.computes), collecting the
-	// compute plugins that are being replaced or removed so they can be closed
+	// Swap under the runtime mutex (which guards r.kernels), collecting the
+	// kernels that are being replaced or removed so they can be shut down
 	// after the lock is released.
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
 		for _, c := range fresh {
-			_ = c.compute.CloseCompiled(context.Background())
+			_ = c.kernel.Shutdown(context.Background())
 		}
 		return fmt.Errorf("%w: runtime is closed", ErrConflict)
 	}
-	var retired []*capcompute.ComputeCompiledPlugin[string, RunKey]
+	var retired []*capcompute.Kernel[string, RunContext]
 	for _, c := range fresh {
-		if old := r.computes[c.id]; old != nil {
+		if old := r.kernels[c.id]; old != nil {
 			retired = append(retired, old)
 		}
-		r.computes[c.id] = c.compute
+		r.kernels[c.id] = c.kernel
 		r.brains.put(c.id, c.wasm, c.digest)
 	}
 	for id := range current {
 		if _, keep := desired[id]; keep {
 			continue
 		}
-		if old := r.computes[id]; old != nil {
+		if old := r.kernels[id]; old != nil {
 			retired = append(retired, old)
 		}
-		delete(r.computes, id)
+		delete(r.kernels, id)
 		r.brains.remove(id)
 	}
 	r.mu.Unlock()
 
 	for _, old := range retired {
-		_ = old.CloseCompiled(context.Background())
+		_ = old.Shutdown(context.Background())
 	}
 	return nil
 }
@@ -365,11 +437,7 @@ func (r *Runtime) CreateRun(threadID string, message string, manifest Manifest) 
 		revision:    1,
 		brainDigest: brain.Digest,
 	}
-	run.journal, err = r.newJournal(run, newRunHistory(), 0)
-	if err != nil {
-		r.mu.Unlock()
-		return RunSnapshot{}, err
-	}
+	run.journal = r.newJournal(run, newRunHistory(), 0)
 	r.runs[runID] = run
 	thread.runIDs = append(thread.runIDs, runID)
 	if len(thread.runIDs) == 1 {
@@ -403,6 +471,10 @@ func (r *Runtime) GetRun(runID string) (RunSnapshot, error) {
 	return r.runSnapshotLocked(run), nil
 }
 
+// Journal returns the run's current-revision journal as per-syscall entries:
+// each intent folded together with its completion, open intents rendered as
+// in-flight. Entry positions are intent-record positions in the hash-chained
+// journal.
 func (r *Runtime) Journal(runID string) ([]JournalEntry, error) {
 	r.mu.Lock()
 	run := r.runs[runID]
@@ -410,43 +482,18 @@ func (r *Runtime) Journal(runID string) ([]JournalEntry, error) {
 	if run == nil {
 		return nil, fmt.Errorf("%w: run %s", ErrNotFound, runID)
 	}
-	j, ok := run.journal.(*logJournal)
-	if !ok {
+	if run.journal == nil {
 		return nil, fmt.Errorf("%w: run %s has no readable journal", ErrNotFound, runID)
 	}
-	length := j.Length()
-	entries := make([]JournalEntry, 0, length)
-	for i := 0; i < length; i++ {
-		record, err := j.Load(i)
-		if err != nil {
-			return nil, err
-		}
-		rev := j.rev
-		if i < j.forkOffset {
-			if r, ok2 := j.history.revAt(i, j.rev); ok2 {
-				rev = r
-			}
-		}
-		entries = append(entries, JournalEntry{
-			Index:    i,
-			Revision: rev,
-			Call:     record.Call,
-			Outcome: JournalOutcome{
-				Status:  record.Outcome.Kind(),
-				Result:  record.Outcome.Result(),
-				Message: record.Outcome.Message(),
-			},
-		})
-	}
-	return entries, nil
+	return run.journal.entries()
 }
 
 // JournalRevisions returns a per-revision snapshot of the run's journal.
-// For each revision r the snapshot contains, at every position, the entry with
+// For each revision r the snapshot contains, at every position, the record with
 // the highest revision ≤ r — i.e. the effective state of the run at that point.
-// The entry's Revision field reflects when it was first written, so callers can
+// Each entry's Revision field reflects when it was first written, so callers can
 // distinguish steps carried forward from earlier revisions versus steps first
-// executed at revision r (including any that failed in a prior attempt).
+// executed at revision r.
 func (r *Runtime) JournalRevisions(runID string) (map[uint64][]JournalEntry, error) {
 	r.mu.Lock()
 	run := r.runs[runID]
@@ -454,31 +501,18 @@ func (r *Runtime) JournalRevisions(runID string) (map[uint64][]JournalEntry, err
 	if run == nil {
 		return nil, fmt.Errorf("%w: run %s", ErrNotFound, runID)
 	}
-	j, ok := run.journal.(*logJournal)
-	if !ok {
+	if run.journal == nil {
 		return nil, fmt.Errorf("%w: run %s has no readable journal", ErrNotFound, runID)
 	}
-	revs := j.history.allRevisions()
-	positions := j.history.allPositions()
+	journal := run.journal
+	revs := journal.history.allRevisions()
 	result := make(map[uint64][]JournalEntry, len(revs))
 	for _, rev := range revs {
-		entries := make([]JournalEntry, 0, len(positions))
-		for _, pos := range positions {
-			rec, ok := j.history.getAt(pos, rev)
-			if !ok {
-				continue
-			}
-			actualRev, _ := j.history.revAt(pos, rev)
-			entries = append(entries, JournalEntry{
-				Index:    pos,
-				Revision: actualRev,
-				Call:     rec.Call,
-				Outcome: JournalOutcome{
-					Status:  rec.Outcome.Kind(),
-					Result:  rec.Outcome.Result(),
-					Message: rec.Outcome.Message(),
-				},
-			})
+		view := newLogJournal(journal.log, journal.scope, journal.run, rev,
+			journal.history, journal.history.lengthAt(rev), journal.now, nil)
+		entries, err := view.entries()
+		if err != nil {
+			return nil, err
 		}
 		result[rev] = entries
 	}
@@ -552,21 +586,22 @@ func (r *Runtime) Stop(runID string) (RunSnapshot, error) {
 		r.mu.Unlock()
 		return RunSnapshot{}, fmt.Errorf("%w: run %s", ErrNotFound, runID)
 	}
-	var closeSession *capcompute.Session[RunKey]
 	switch run.status {
 	case RunQueued:
 		run.stopRequested = true
 		run.status = RunStopping
 		run.updatedAt = r.now().UTC()
+		if run.stop != nil {
+			run.stop()
+		}
 	case RunRunning:
 		run.stopRequested = true
 		run.status = RunStopping
 		run.updatedAt = r.now().UTC()
-		if run.handle != nil {
-			run.handle.Stop()
+		if run.stop != nil {
+			run.stop()
 		}
 	case RunYielded, RunWaitingTask:
-		closeSession = run.session
 		r.finishLocked(run, RunStopped, "", context.Canceled)
 	case RunStopping, RunStopped:
 	default:
@@ -576,9 +611,6 @@ func (r *Runtime) Stop(runID string) (RunSnapshot, error) {
 	snapshot := r.runSnapshotLocked(run)
 	_ = r.appendRun(run)
 	r.mu.Unlock()
-	if closeSession != nil {
-		_ = closeSession.Close(context.Background())
-	}
 	r.publish(run.threadID, Event{Type: "run.updated", Data: snapshot})
 	return snapshot, nil
 }
@@ -634,52 +666,34 @@ func (r *Runtime) Retry(runID string, mode RetryMode) (RunSnapshot, error) {
 	if mode == RetryRestart {
 		// Hard restart: always fork from the beginning (the agent.input step),
 		// giving the brain a completely fresh revision with no shared prefix.
-		if err := r.forkJournalLocked(run, 0, RetryRestart); err != nil {
-			r.mu.Unlock()
-			return RunSnapshot{}, err
+		r.forkJournalLocked(run, 0, RetryRestart)
+	} else if run.status == RunYielded || run.status == RunWaitingTask {
+		// Resume from a park: no fork. The journal's open intent at the tail is
+		// re-driven by replay under its original idempotency key; a resolved
+		// task's stored authorization is injected by the task layer. When the
+		// park was a delegated child's approval, enable cascade reconnection so
+		// the re-executed delegation call reuses the now-finished child.
+		if run.reconnectChildren {
+			run.cascade = true
+			run.cascadeMode = RetryResume
+			run.cascadeCursor = childrenBefore(run.childSpawnOffsets, run.journal.Length())
+		} else {
+			run.cascade = false
 		}
 	} else {
-		isSessionPreserved := run.status == RunYielded || run.status == RunWaitingTask
-		run.preserveSession = isSessionPreserved
-		if isSessionPreserved {
-			if run.reconnectChildren {
-				// Resuming a parent suspended on a delegated child's approval. This is
-				// a continuation, not a retry: the delegation call yielded and was
-				// never recorded, so re-executing it appends to the SAME revision
-				// (no fork — forking would gratuitously bump every step from the
-				// delegation call onward). Enable cascade reconnection so that call
-				// reuses the now-finished child instead of spawning a fresh one,
-				// positioning the cursor past children already replayed from the
-				// recorded prefix.
-				run.cascade = true
-				run.cascadeMode = RetryResume
-				run.cascadeCursor = childrenBefore(run.childSpawnOffsets, run.journal.Length())
-			} else {
-				run.cascade = false
-			}
-		} else {
-			j, ok := run.journal.(*logJournal)
-			if !ok {
-				r.mu.Unlock()
-				return RunSnapshot{}, fmt.Errorf("%w: run %s has no forkable journal", ErrConflict, run.id)
-			}
-			// Default: fork at the end of the journal and let the brain continue,
-			// replaying every recorded outcome including soft failures. A failed run
-			// only forks earlier when the brain explicitly left a savepoint open: we
-			// fork right after the outermost still-open host.try so its whole body
-			// re-executes live under the bumped revision. Nothing is inferred from a
-			// bare failing call — soft failures are simply replayed.
-			forkOffset := j.Length()
-			if run.status == RunFailed {
-				if off, ok := j.outermostOpenTry(); ok {
-					forkOffset = off
-				}
-			}
-			if err := r.forkJournalLocked(run, forkOffset, RetryResume); err != nil {
-				r.mu.Unlock()
-				return RunSnapshot{}, err
+		// Failed/stopped/interrupted resume: fork at the end of the journal and
+		// let the brain continue, replaying every recorded outcome including
+		// soft failures. A failed run only forks earlier when the brain
+		// explicitly left a savepoint open: we fork right after the outermost
+		// still-open sys.begin so its whole body re-executes live under the
+		// bumped revision.
+		forkOffset := run.journal.Length()
+		if run.status == RunFailed {
+			if off, ok := run.journal.outermostOpenBegin(); ok {
+				forkOffset = off
 			}
 		}
+		r.forkJournalLocked(run, forkOffset, RetryResume)
 	}
 	run.status = RunQueued
 	run.attempt++
@@ -705,34 +719,32 @@ func (r *Runtime) Retry(runID string, mode RetryMode) (RunSnapshot, error) {
 	return snapshot, nil
 }
 
-// forkJournalLocked re-forks run's journal at forkOffset, records the retry mode
-// for downstream cascade children, and sets cascade/preserveSession.
-// Must be called with the runtime mutex held.
-func (r *Runtime) forkJournalLocked(run *runState, forkOffset int, mode RetryMode) error {
-	parentJournal, ok := run.journal.(*logJournal)
-	if !ok {
-		return fmt.Errorf("%w: run %s has no forkable journal", ErrConflict, run.id)
-	}
+// forkJournalLocked re-forks run's journal at forkOffset as a new revision,
+// records the retry mode for downstream cascade children, and positions the
+// cascade cursor. Must be called with the runtime mutex held.
+func (r *Runtime) forkJournalLocked(run *runState, forkOffset int, mode RetryMode) {
+	parent := run.journal
 	run.revision++
 	run.forkOffset = forkOffset
 	run.journal = newLogJournal(
-		parentJournal.log, parentJournal.scope, parentJournal.run, run.revision,
-		parentJournal.history, forkOffset,
-		parentJournal.now, parentJournal.onAppend,
+		parent.log, parent.scope, parent.run, run.revision,
+		parent.history, forkOffset,
+		parent.now, parent.onAppend,
 	)
-	run.preserveSession = false
 	// Reuse the existing child subtree in spawn order (deep cascade resume).
-	// Children whose spawn call is replayed from the shared prefix are skipped;
-	// the cursor starts at the first child re-executed past the fork offset.
+	// Children whose delegation call is replayed from the shared prefix are
+	// skipped; the cursor starts at the first child re-executed past the fork.
 	run.cascade = true
 	run.cascadeMode = mode
 	run.cascadeCursor = childrenBefore(run.childSpawnOffsets, forkOffset)
-	return nil
 }
 
-// childrenBefore counts the children whose spawn call sits before offset in the
-// parent journal. Those are replayed from the shared/recorded prefix, so the
-// cascade cursor starts past them — at the first child re-executed at offset.
+// childrenBefore counts the children whose delegation completion sits inside
+// the shared prefix [0, offset). A spawn offset is one past the delegation
+// intent, so a child is prefix-served — and skipped by the cascade cursor —
+// exactly when its offset is strictly below the fork offset; a child whose
+// intent closes the prefix (offset == fork offset) is re-executed and must be
+// the first the cursor reuses.
 func childrenBefore(spawnOffsets []int, offset int) int {
 	n := 0
 	for _, off := range spawnOffsets {
@@ -778,20 +790,21 @@ func (r *Runtime) Close(ctx context.Context) error {
 		return nil
 	}
 	r.closed = true
-	handles := make([]*capcompute.PlayHandle[RunKey], 0)
+	stops := make([]func(), 0)
 	for _, run := range r.runs {
-		if run.handle != nil && (run.status == RunRunning || run.status == RunStopping) {
-			handles = append(handles, run.handle)
+		if run.stop != nil && (run.status == RunRunning || run.status == RunStopping || run.status == RunQueued) {
+			stops = append(stops, run.stop)
 		}
 	}
 	r.mu.Unlock()
-	for _, handle := range handles {
-		handle.Stop()
+	for _, stop := range stops {
+		stop()
 	}
 
 	done := make(chan struct{})
 	go func() {
 		r.wg.Wait()
+		r.scheduler.Close()
 		close(done)
 	}()
 	select {
@@ -800,20 +813,9 @@ func (r *Runtime) Close(ctx context.Context) error {
 		return ctx.Err()
 	}
 
-	r.mu.Lock()
-	sessions := make([]*capcompute.Session[RunKey], 0, len(r.runs))
-	for _, run := range r.runs {
-		if run.session != nil {
-			sessions = append(sessions, run.session)
-		}
-	}
-	r.mu.Unlock()
-	for _, session := range sessions {
-		_ = session.Close(context.Background())
-	}
 	closeErrors := []error{}
-	for _, compute := range r.computes {
-		closeErrors = append(closeErrors, compute.CloseCompiled(context.Background()))
+	for _, kernel := range r.kernels {
+		closeErrors = append(closeErrors, kernel.Shutdown(context.Background()))
 	}
 	return errors.Join(closeErrors...)
 }
