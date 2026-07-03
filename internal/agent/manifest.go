@@ -19,9 +19,13 @@ const AgentToolType = "core.agent"
 // node; Tools is its unified composition — leaf I/O tools plus `core.agent`
 // sub-agents, all sharing one shape.
 type Manifest struct {
-	Version      int    `json:"version"`
-	Name         string `json:"name,omitempty"`
-	Brain        string `json:"brain,omitempty"`
+	Version int    `json:"version"`
+	Name    string `json:"name,omitempty"`
+	Brain   string `json:"brain,omitempty"`
+	// BindingRef is an opaque application correlation reference (e.g. the
+	// name of the control-plane binding that produced this manifest). The
+	// runtime never interprets it; it only propagates it to delegated child
+	// manifests, like Tags on threads.
 	BindingRef   string `json:"binding_ref,omitempty"`
 	SystemPrompt string `json:"system_prompt,omitempty"`
 	// OnFailure selects how a failure of this node (when it is a delegated child)

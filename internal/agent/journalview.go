@@ -372,10 +372,10 @@ func (j *logJournal) outermostOpenBegin() (int, bool) {
 	return 0, false
 }
 
-// entriesLocked pairs the journal's intent/completion records into per-syscall
+// entries pairs the journal's intent/completion records into per-syscall
 // entries. An intent with no completion (an open intent — a crash window or a
-// pending external task) yields an entry whose outcome is a yield with the
-// task summary unavailable; callers render it as in-flight.
+// pending external task) yields an entry with a yield outcome; callers render
+// it as in-flight.
 func (j *logJournal) entries() ([]JournalEntry, error) {
 	length := j.Length()
 	entries := make([]JournalEntry, 0, length/2+1)

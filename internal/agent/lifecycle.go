@@ -19,10 +19,6 @@ const (
 	callAgentFinish = "agent.finish"
 )
 
-// AgentABIVersion is the guest<->host lifecycle protocol version. Bump it when the
-// lifecycle calls or their payloads change.
-const AgentABIVersion = 1
-
 type finishArgs struct {
 	Answer string `json:"answer"`
 }

@@ -676,7 +676,7 @@ func TestRuntimeApprovalCycle(t *testing.T) {
 		t.Fatalf("task summary = %q", pending.Summary)
 	}
 
-	if _, err := runtime.ResolveTask(pending.ID, pending.WebhookToken, task.Resolution{
+	if _, err := runtime.ResolveTask(pending.ID, pending.ResolutionToken, task.Resolution{
 		Decision: task.StateApproved,
 		Actor:    "tester",
 	}); err != nil {

@@ -91,7 +91,7 @@ func (r *Runtime) taskSnapshot(record task.Record) TaskSnapshot {
 		CreatedAt:       record.CreatedAt,
 		ExpiresAt:       copyTime(record.ExpiresAt),
 		ResolvedAt:      copyTime(record.ResolvedAt),
-		WebhookToken:    task.Token(r.taskSecret, record.Scope.TenantID, record.ID),
+		ResolutionToken: task.Token(r.taskSecret, record.Scope.TenantID, record.ID),
 	}
 }
 

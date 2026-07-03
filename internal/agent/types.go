@@ -197,11 +197,6 @@ type agentInput struct {
 	Capabilities []sys.Capability `json:"capabilities,omitempty"`
 }
 
-type agentOutput struct {
-	Status string `json:"status"`
-	Answer string `json:"answer"`
-}
-
 type ThreadSummary struct {
 	ID          string            `json:"id"`
 	Title       string            `json:"title"`
@@ -248,7 +243,11 @@ type TaskSnapshot struct {
 	CreatedAt       time.Time       `json:"created_at"`
 	ExpiresAt       *time.Time      `json:"expires_at,omitempty"`
 	ResolvedAt      *time.Time      `json:"resolved_at,omitempty"`
-	WebhookToken    string          `json:"webhook_token"`
+	// ResolutionToken is the bearer credential ResolveTask authenticates
+	// against — the runtime's only secret-derived task value. How it reaches
+	// the resolver (a webhook URL, a chat button callback, a CLI) is the
+	// assembly's concern.
+	ResolutionToken string `json:"resolution_token"`
 }
 
 // JournalEntry is one syscall of a run's journal: the intent (its position in

@@ -239,13 +239,9 @@ func (r *Runtime) driveDirect(pid string) (<-chan capcompute.ResumeResult[RunCon
 }
 
 // failureStatus maps a pre-quantum error to the run status it should finish
-// with: an incompatible journal or an already-scheduled process is a lifecycle
-// conflict (interrupted), everything else a failure.
+// with: a scheduling conflict is an interruption (the run can be re-driven),
+// everything else — an incompatible journal, a missing brain — is a failure.
 func (r *Runtime) failureStatus(err error) RunStatus {
-	var incompatible journaled.ReplayIncompatibleError
-	if errors.As(err, &incompatible) {
-		return RunFailed
-	}
 	if errors.Is(err, sched.ErrAlreadyScheduled) || errors.Is(err, sched.ErrClosed) {
 		return RunInterrupted
 	}

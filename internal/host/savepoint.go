@@ -6,12 +6,6 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-// IsSavepoint reports whether name is one of the kernel's reserved savepoint
-// markers (sys.begin / sys.commit).
-func IsSavepoint(name string) bool {
-	return name == sys.SyscallBegin || name == sys.SyscallCommit
-}
-
 // savepointResult is the canonical, side-effect-free result recorded for every
 // marker syscall. It is constant so replay matching stays deterministic.
 var savepointResult = []byte("{}")
@@ -28,7 +22,7 @@ type savepointDispatcher[K any] struct {
 }
 
 func (d *savepointDispatcher[K]) Dispatch(ctx context.Context, cred K, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
-	if IsSavepoint(syscall.Name) {
+	if syscall.Name == sys.SyscallBegin || syscall.Name == sys.SyscallCommit {
 		return sys.Result(savepointResult), nil
 	}
 	return d.next.Dispatch(ctx, cred, syscall, auth)
