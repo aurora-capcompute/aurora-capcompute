@@ -3,7 +3,7 @@ module github.com/aurora-capcompute/aurora-capcompute
 go 1.26
 
 require (
-	github.com/aurora-capcompute/capcompute v0.0.0-20260703234306-8d7e039f9e40
+	github.com/aurora-capcompute/capcompute v0.0.0-20260703235707-80e04f04b5a3
 	github.com/extism/go-sdk v1.7.1
 )
 
@@ -17,6 +17,6 @@ require (
 	github.com/tetratelabs/wazero v1.12.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.10.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect
-	golang.org/x/text v0.34.0 // indirect
+	golang.org/x/text v0.38.0 // indirect
 	google.golang.org/protobuf v1.36.12-0.20260120151049-f2248ac996af // indirect
 )
