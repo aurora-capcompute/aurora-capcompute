@@ -76,8 +76,8 @@ func TestAppendAssignsContiguousSeq(t *testing.T) {
 	scope := Scope{TenantID: "t", SessionID: "th"}
 
 	head, err := log.Append(ctx, scope,
-		Event{Kind: "run.created"},
-		Event{Kind: "run.started"},
+		Event{Kind: "proc.created"},
+		Event{Kind: "proc.started"},
 	)
 	if err != nil {
 		t.Fatalf("append: %v", err)
@@ -93,7 +93,7 @@ func TestAppendAssignsContiguousSeq(t *testing.T) {
 		t.Fatalf("unexpected events %+v", events)
 	}
 	// A second append continues the sequence.
-	head, err = log.Append(ctx, scope, Event{Kind: "run.finished"})
+	head, err = log.Append(ctx, scope, Event{Kind: "proc.finished"})
 	if err != nil || head != 3 {
 		t.Fatalf("second append head = %d, err = %v", head, err)
 	}

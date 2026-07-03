@@ -1,10 +1,10 @@
-// Package host owns the per-run dispatcher stack. It takes the caller-supplied
-// driver chain and completes it, for one run, with durable task approval and
-// savepoint markers, then hands the whole thing to capcompute.Stack.ForRun so
+// Package host owns the per-process dispatcher stack. It takes the caller-supplied
+// driver chain and completes it, for one process, with durable task approval and
+// savepoint markers, then hands the whole thing to capcompute.Stack.ForProcess so
 // the kernel's canonical monitor chain (Validator → FlowMonitor → replay →
 // Labeler → Declassifier → drivers) is assembled in the one correct order —
-// never by hand. The per-run piece is the tape: a journaled.Tape over the
-// run's journal, stamped with the run's header (ABI, program digest, PID).
+// never by hand. The per-process piece is the tape: a journaled.Tape over the
+// process's journal, stamped with the process's header (ABI, program digest, PID).
 //
 // It owns only the wiring of that stack; the task store, journal, grant
 // source, taint state, and driver chain are injected.
@@ -22,7 +22,7 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/internal/task"
 )
 
-// Factory builds one run's complete dispatcher chain.
+// Factory builds one process's complete dispatcher chain.
 //
 // Drivers supplies everything below the task layer (progress reporting and
 // the application's capability drivers). Wrap stacks the runtime's protocol
@@ -87,7 +87,7 @@ func (f Factory[ID, K]) NewDispatcher(ctx context.Context, cred K) (sys.Dispatch
 	// a child).
 	withSavepoints := &savepointDispatcher[K]{next: below}
 
-	// The grant set is the complete mediation surface: everything this run's
+	// The grant set is the complete mediation surface: everything this process's
 	// chain can serve — drivers, delegation routes, and the runtime's own
 	// protocol capabilities — is granted explicitly; anything else is denied
 	// by the Validator before it reaches a driver.
@@ -95,5 +95,5 @@ func (f Factory[ID, K]) NewDispatcher(ctx context.Context, cred K) (sys.Dispatch
 		Grants: func(K) []sys.Capability { return withSavepoints.Capabilities() },
 		Taints: f.Taints,
 	}
-	return stack.ForRun(tape, withSavepoints)
+	return stack.ForProcess(tape, withSavepoints)
 }

@@ -18,13 +18,13 @@ type AgentSettings = agent.AgentSettings
 type SessionSummary = agent.SessionSummary
 type SessionSnapshot = agent.SessionSnapshot
 type HistoryMessage = agent.HistoryMessage
-type RunSnapshot = agent.RunSnapshot
+type ProcessSnapshot = agent.ProcessSnapshot
 type TaskSnapshot = agent.TaskSnapshot
 type JournalEntry = agent.JournalEntry
 type JournalOutcome = agent.JournalOutcome
-type RunGraphNode = agent.RunGraphNode
+type ProcessGraphNode = agent.ProcessGraphNode
 type SessionGraph = agent.SessionGraph
-type SessionGraphRun = agent.SessionGraphRun
+type SessionGraphProcess = agent.SessionGraphProcess
 type Event = agent.Event
 type JournalEvent = agent.JournalEvent
 type ProgressEvent = agent.ProgressEvent
@@ -32,18 +32,18 @@ type ProgramArtifact = agent.ProgramArtifact
 
 // Status types
 
-type RunStatus = agent.RunStatus
+type ProcessStatus = agent.ProcessStatus
 
 const (
-	RunQueued      = agent.RunQueued
-	RunRunning     = agent.RunRunning
-	RunStopping    = agent.RunStopping
-	RunYielded     = agent.RunYielded
-	RunWaitingTask = agent.RunWaitingTask
-	RunInterrupted = agent.RunInterrupted
-	RunCompleted   = agent.RunCompleted
-	RunStopped     = agent.RunStopped
-	RunFailed      = agent.RunFailed
+	ProcessQueued      = agent.ProcessQueued
+	ProcessRunning     = agent.ProcessRunning
+	ProcessStopping    = agent.ProcessStopping
+	ProcessYielded     = agent.ProcessYielded
+	ProcessWaitingTask = agent.ProcessWaitingTask
+	ProcessInterrupted = agent.ProcessInterrupted
+	ProcessCompleted   = agent.ProcessCompleted
+	ProcessStopped     = agent.ProcessStopped
+	ProcessFailed      = agent.ProcessFailed
 )
 
 type RetryMode = agent.RetryMode
@@ -62,7 +62,7 @@ type DispatcherProvider = agent.DispatcherProvider
 
 // Event log: the single append-only source of truth. Applications provide an
 // EventLog implementation (and a Leases implementation for cross-instance
-// coordination); the runtime folds the log into session/run/task projections.
+// coordination); the runtime folds the log into session/process/task projections.
 // This module ships the interfaces only — concrete stores (in-memory, SQLite)
 // are assembly ingredients that live in their own modules.
 
@@ -70,14 +70,14 @@ type EventLog = eventlog.Log
 type LogEvent = eventlog.Event
 type LogScope = eventlog.Scope
 type Leases = agent.Leases
-type RunContext = agent.RunContext
+type ProcessContext = agent.ProcessContext
 
 // ProcessTable is the kernel's process lookup boundary, re-exported at the
 // runtime's credential type. Applications supply an implementation (the
 // syscall host path resolves each guest syscall through it).
-type ProcessTable = capcompute.ProcessTable[string, RunContext]
+type ProcessTable = capcompute.ProcessTable[string, ProcessContext]
 
-// Quota bounds one tenant's concurrent run quanta (see Config.QuotaOf).
+// Quota bounds one tenant's concurrent process quanta (see Config.QuotaOf).
 type Quota = sched.Quota
 
 // Task types

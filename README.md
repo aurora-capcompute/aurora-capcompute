@@ -3,9 +3,10 @@
 Implementation-neutral Aurora orchestration runtime on the
 [`capcompute`](https://github.com/aurora-capcompute/capcompute) kernel.
 
-The module owns session and run lifecycle, the intent/completion replay journal
-over the event log, durable approval tasks, retries, delegation to child
-agents, run scheduling, event subscriptions, and execution of caller-supplied
+The module owns session and process lifecycle, the intent/completion replay
+journal over the event log, durable approval tasks, retries, delegation to
+child agents, process scheduling, event subscriptions, and execution of
+caller-supplied
 Wasm programs. All durable state is a fold of a single append-only event log —
 the runtime keeps no mutable row store.
 
@@ -34,7 +35,7 @@ runtime, err := aurora.NewRuntime(ctx, aurora.Config{
     Dispatchers:  dispatcherProvider,
     Log:          eventLog,
     Leases:       leases,
-    ProcessTable: processTable, // capcompute.ProcessTable[string, aurora.RunContext]
+    ProcessTable: processTable, // capcompute.ProcessTable[string, aurora.ProcessContext]
     TaskSecret:   taskSecret,
 })
 ```
@@ -45,11 +46,11 @@ injected stores and providers.
 
 ## The kernel chain
 
-Every run's syscalls flow through the kernel's canonical monitor chain,
-assembled by `capcompute.Stack.ForRun` — never by hand:
+Every process's syscalls flow through the kernel's canonical monitor chain,
+assembled by `capcompute.Stack.ForProcess` — never by hand:
 
 ```
-Validator → FlowMonitor → [replay over the run's journal] →
+Validator → FlowMonitor → [replay over the process's journal] →
 Labeler → Declassifier → savepoints → lifecycle → delegation → tasks → progress → drivers
 ```
 
@@ -62,16 +63,17 @@ Labeler → Declassifier → savepoints → lifecycle → delegation → tasks �
   event stream (`syscall.recorded` events; a `journal.header` event pins the
   writer identity per revision, so replaying under a different program digest is
   refused up front). Retries fork the journal copy-on-write into a new
-  revision; a failed run resumes right after the outermost open `sys.begin`
+  revision; a failed process resumes right after the outermost open `sys.begin`
   savepoint so the program's whole declared unit re-executes.
 - **Approval** — a yielded syscall becomes a durable task and leaves its
   intent open; resolving the task re-drives the intent under its original
   idempotency key with the stored resolution as the dispatch Authorization.
   This is the approval-injection seam the kernel deliberately leaves to the
   runtime.
-- **Scheduling** — root runs are quanta of the kernel's fair-share scheduler
-  (per-tenant round-robin, quotas via `Config.QuotaOf`, virtual-actor
-  residency with reactivation by replay). Delegated child runs execute inside
+- **Scheduling** — root processes are quanta of the kernel's fair-share
+  scheduler (per-tenant round-robin, quotas via `Config.QuotaOf`,
+  virtual-actor residency with reactivation by replay). Delegated child
+  processes execute inside
   their parent's quantum — the kernel's sync-spawn posture — so delegation
   cannot deadlock the concurrency cap. The runtime's event-sourced retry
   machinery is the supervision layer; `sched.Supervisor` is deliberately not
@@ -88,8 +90,8 @@ type ProgramProvider interface {
 }
 ```
 
-The runtime copies the bytes, computes SHA-256 digests, and pins each run to its
-program digest. Filesystem, object-store, embedded, and remote loaders belong in
+The runtime copies the bytes, computes SHA-256 digests, and pins each process
+to its program digest. Filesystem, object-store, embedded, and remote loaders belong in
 application or adapter modules. Programs can be hot-swapped at runtime with
 `Runtime.SetPrograms`.
 
@@ -102,14 +104,14 @@ type DispatcherProvider interface {
     Normalize(name string, settings json.RawMessage) (json.RawMessage, error)
     NewDispatcher(
         context.Context,
-        aurora.RunContext,
+        aurora.ProcessContext,
         aurora.Manifest,
     ) (sys.Dispatcher[aurora.RunContext], error)
 }
 ```
 
 The core validates and normalizes manifests through this provider. For each
-run, it completes the returned driver chain with the monitor stack above.
+process, it completes the returned driver chain with the monitor stack above.
 
 ## Storage contracts
 
@@ -124,16 +126,17 @@ type EventLog interface {
 }
 ```
 
-One stream per session carries every run, task, journal-record, and
-journal-header event. There is no mutable row store: sessions, runs, tasks, and
-the replay journal are all projections of the log. Cross-instance coordination
+One stream per session carries every process, task, journal-record, and
+journal-header event. There is no mutable row store: sessions, processes,
+tasks, and the replay journal are all projections of the log. Cross-instance coordination
 uses a separate `Leases` interface — an ephemeral fencing token with a TTL,
 kept out of a session's immutable history. Guest instances are looked up
-through the kernel's `capcompute.ProcessTable[string, aurora.RunContext]`
+through the kernel's `capcompute.ProcessTable[string, aurora.ProcessContext]`
 seam; the journal, not the instance, is the durable process.
 
-Concrete implementations (in-memory, SQLite) live in the separate
-`aurora-stores` repository; this module's tests carry local doubles.
+Concrete implementations (in-memory, SQLite) live in the `aurora-dist`
+distribution (they folded there from the deprecated `aurora-stores`); this
+module's tests carry local doubles.
 
 ## Manifest helpers
 

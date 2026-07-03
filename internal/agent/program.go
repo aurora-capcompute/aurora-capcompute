@@ -46,7 +46,7 @@ func digestOf(wasm []byte) string {
 
 // loadPrograms snapshots the provider into a registry. A nil provider or an empty
 // program list yields an empty registry (no default): the runtime then boots with
-// no program and program runs fail with a clear error until one is registered. When
+// no program and program processes fail with a clear error until one is registered. When
 // the provider lists at least one program, its declared default must be present.
 func loadPrograms(ctx context.Context, provider ProgramProvider) (*loadedPrograms, error) {
 	loaded := &loadedPrograms{

@@ -8,16 +8,16 @@ type Runtime interface {
 	Programs() []ProgramArtifact
 	SetPrograms(ctx context.Context, programs []ProgramSource) error
 	GetSession(sessionID string) (SessionSnapshot, error)
-	CreateRun(sessionID string, message string, manifest Manifest) (RunSnapshot, error)
-	GetRun(runID string) (RunSnapshot, error)
-	Journal(runID string) ([]JournalEntry, error)
-	JournalRevisions(runID string) (map[uint64][]JournalEntry, error)
-	CallGraph(runID string) (RunGraphNode, error)
+	CreateProcess(sessionID string, message string, manifest Manifest) (ProcessSnapshot, error)
+	GetProcess(processID string) (ProcessSnapshot, error)
+	Journal(processID string) ([]JournalEntry, error)
+	JournalRevisions(processID string) (map[uint64][]JournalEntry, error)
+	CallGraph(processID string) (ProcessGraphNode, error)
 	SessionGraph(sessionID string) (SessionGraph, error)
-	Tasks(runID string) ([]TaskSnapshot, error)
+	Tasks(processID string) ([]TaskSnapshot, error)
 	ResolveTask(taskID string, token string, resolution Resolution) (TaskSnapshot, error)
-	Stop(runID string) (RunSnapshot, error)
-	Retry(runID string, mode RetryMode) (RunSnapshot, error)
+	Stop(processID string) (ProcessSnapshot, error)
+	Retry(processID string, mode RetryMode) (ProcessSnapshot, error)
 	Subscribe(sessionID string) (Event, <-chan Event, func(), error)
 	Close(ctx context.Context) error
 }

@@ -7,15 +7,15 @@ import (
 
 const DefaultTenantID = "local"
 
-// StoredSession is a session's durable state, derived from the run projection
+// StoredSession is a session's durable state, derived from the process projection
 // and folded back into memory on restore.
 type StoredSession struct {
-	TenantID    string
-	ID          string
-	Title       string
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
-	ActiveRunID string
+	TenantID        string
+	ID              string
+	Title           string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+	ActiveProcessID string
 	// Tags are arbitrary key-value labels set at creation time. Applications
 	// use them to correlate sessions with their own identifiers (e.g. a
 	// conversation or channel id) from the log without maintaining a separate
@@ -23,15 +23,15 @@ type StoredSession struct {
 	Tags map[string]string
 }
 
-// StoredRun is a run's durable state, carried by run.state events and folded
+// StoredProcess is a process's durable state, carried by process.state events and folded
 // back into memory on restore.
-type StoredRun struct {
+type StoredProcess struct {
 	TenantID      string
 	ID            string
 	SessionID     string
 	Revision      uint64
 	Message       string
-	Status        RunStatus
+	Status        ProcessStatus
 	Attempt       int
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
@@ -44,19 +44,20 @@ type StoredRun struct {
 	// Tags carries the owning session's tags so session metadata survives
 	// without a separate session.state event.
 	Tags map[string]string
-	// ParentRunID links a delegated child run back to the run that spawned it;
-	// ChildRunIDs records, in spawn order, the child runs this run delegated to.
-	ParentRunID string
-	ChildRunIDs []string
+	// ParentProcessID links a delegated child back to the process that spawned
+	// it; ChildProcessIDs records, in spawn order, the children this process
+	// delegated to.
+	ParentProcessID string
+	ChildProcessIDs []string
 	// ChildSpawnOffsets records the journal length at each child's spawn,
-	// parallel to ChildRunIDs. ForkOffset is the current revision's copy-on-write
+	// parallel to ChildProcessIDs. ForkOffset is the current revision's copy-on-write
 	// fork point; it is persisted so a revision that was forked but crashed before
 	// logging any record can be reconstructed on restore.
 	ChildSpawnOffsets []int
 	ForkOffset        int
 }
 
-// Leases coordinates exclusive run and task execution across runtime instances.
+// Leases coordinates exclusive process and task execution across runtime instances.
 // It is deliberately separate from the event log: a lease is ephemeral
 // coordination (a fencing token with a TTL), not part of a session's immutable
 // history.

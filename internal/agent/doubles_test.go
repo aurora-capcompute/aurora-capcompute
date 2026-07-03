@@ -81,14 +81,14 @@ func (m *memLog) Streams(_ context.Context, tenantID string) ([]eventlog.Scope, 
 // memProcessTable is an in-memory capcompute.ProcessTable.
 type memProcessTable struct {
 	mu        sync.Mutex
-	processes map[string]*capcompute.Process[RunContext]
+	processes map[string]*capcompute.Process[ProcessContext]
 }
 
 func newMemProcessTable() *memProcessTable {
-	return &memProcessTable{processes: make(map[string]*capcompute.Process[RunContext])}
+	return &memProcessTable{processes: make(map[string]*capcompute.Process[ProcessContext])}
 }
 
-func (t *memProcessTable) LoadProcess(_ context.Context, pid string) (*capcompute.Process[RunContext], error) {
+func (t *memProcessTable) LoadProcess(_ context.Context, pid string) (*capcompute.Process[ProcessContext], error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	process, ok := t.processes[pid]
@@ -98,7 +98,7 @@ func (t *memProcessTable) LoadProcess(_ context.Context, pid string) (*capcomput
 	return process, nil
 }
 
-func (t *memProcessTable) SaveProcess(_ context.Context, pid string, process *capcompute.Process[RunContext]) error {
+func (t *memProcessTable) SaveProcess(_ context.Context, pid string, process *capcompute.Process[ProcessContext]) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.processes[pid] = process
@@ -114,7 +114,7 @@ type testingT interface {
 }
 
 func testHeader() journaled.Header {
-	return journaled.Header{ABI: sys.ABIVersion, Program: "test-program", Run: "run1"}
+	return journaled.Header{ABI: sys.ABIVersion, Program: "test-program", Process: "proc1"}
 }
 
 func ensureHeader(t testingT, journal journaled.Journal) {

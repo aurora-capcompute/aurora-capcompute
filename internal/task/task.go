@@ -30,7 +30,7 @@ import (
 type Scope struct {
 	TenantID  string
 	SessionID string
-	RunID     string
+	ProcessID string
 	Revision  uint64
 }
 
@@ -83,7 +83,7 @@ var (
 // Dispatcher sits below the replay layer: by the time a syscall reaches it,
 // the replay dispatcher has already journaled the intent, so the current
 // journal tail is this syscall's intent record. That intent position is the
-// task's identity within the run revision — a resumed run re-reaches the same
+// task's identity within the process revision — a resumed process re-reaches the same
 // position and finds the same task.
 type Dispatcher[K any] struct {
 	Next          sys.Dispatcher[K]

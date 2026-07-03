@@ -84,12 +84,12 @@ func (s *eventTaskStore) Get(_ context.Context, tenantID, taskID string) (task.R
 	return cloneTaskRecord(record), nil
 }
 
-func (s *eventTaskStore) List(_ context.Context, tenantID, runID string) ([]task.Record, error) {
+func (s *eventTaskStore) List(_ context.Context, tenantID, processID string) ([]task.Record, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out []task.Record
 	for _, record := range s.records {
-		if record.Scope.TenantID == tenantID && (runID == "" || record.Scope.RunID == runID) {
+		if record.Scope.TenantID == tenantID && (processID == "" || record.Scope.ProcessID == processID) {
 			out = append(out, cloneTaskRecord(record))
 		}
 	}
@@ -152,7 +152,7 @@ func (s *eventTaskStore) MarkExecuted(ctx context.Context, tenantID, taskID stri
 		return task.ErrNotFound
 	}
 	record.State = task.StateExecuted
-	ev, err := taskExecutedEvent(s.now().UTC(), record.Scope.RunID, record.Scope.Revision, taskID)
+	ev, err := taskExecutedEvent(s.now().UTC(), record.Scope.ProcessID, record.Scope.Revision, taskID)
 	if err != nil {
 		s.mu.Unlock()
 		return err

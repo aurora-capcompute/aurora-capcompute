@@ -1,7 +1,7 @@
 package agent
 
 // Restore: rebuild the runtime's in-memory state on startup by folding each
-// session's event stream back into session, run, and task projections.
+// session's event stream back into session, process, and task projections.
 
 import (
 	"context"
@@ -37,35 +37,35 @@ func (r *Runtime) restore(ctx context.Context) error {
 }
 
 // restoreSession folds one session's projection back into memory: it rebuilds the
-// session, its runs (in creation order, deriving conversation history from
-// completed runs), and attaches each run's journal revision. Runs left mid-flight
+// session, its processes (in creation order, deriving conversation history from
+// completed processes), and attaches each process's journal revision. Processes left mid-flight
 // by a crash are marked interrupted and re-recorded.
-func (r *Runtime) restoreSession(proj Projection, journals map[string]map[uint64]*logJournal, histories map[string]*runHistory) error {
+func (r *Runtime) restoreSession(proj Projection, journals map[string]map[uint64]*logJournal, histories map[string]*processHistory) error {
 	stored := proj.Session
 	if stored.ID == "" {
 		return nil
 	}
 	session := &sessionState{
-		id:          stored.ID,
-		title:       stored.Title,
-		createdAt:   stored.CreatedAt,
-		updatedAt:   stored.UpdatedAt,
-		activeRunID: stored.ActiveRunID,
-		tags:        cloneTags(stored.Tags),
+		id:              stored.ID,
+		title:           stored.Title,
+		createdAt:       stored.CreatedAt,
+		updatedAt:       stored.UpdatedAt,
+		activeProcessID: stored.ActiveProcessID,
+		tags:            cloneTags(stored.Tags),
 	}
 	r.sessions[session.id] = session
 
-	runs := make([]StoredRun, 0, len(proj.Runs))
-	for _, sr := range proj.Runs {
-		runs = append(runs, sr)
+	procs := make([]StoredProcess, 0, len(proj.Processes))
+	for _, sr := range proj.Processes {
+		procs = append(procs, sr)
 	}
-	sort.Slice(runs, func(i, j int) bool { return runs[i].CreatedAt.Before(runs[j].CreatedAt) })
+	sort.Slice(procs, func(i, j int) bool { return procs[i].CreatedAt.Before(procs[j].CreatedAt) })
 
-	for _, sr := range runs {
+	for _, sr := range procs {
 		if sr.Manifest.Program == "" {
 			sr.Manifest.Program = r.programs.DefaultID()
 		}
-		// Quarantine, never refuse to boot: a historical run whose manifest no
+		// Quarantine, never refuse to boot: a historical process whose manifest no
 		// longer validates against the compiled driver set (a decommissioned
 		// tool type) is restored verbatim — visible, auditable — and any later
 		// execution attempt fails with the provider's error. Dispatcher
@@ -73,19 +73,19 @@ func (r *Runtime) restoreSession(proj Projection, journals map[string]map[uint64
 		// program upgrades.
 		em, err := ValidateManifest(sr.Manifest, r.dispatchers)
 		if err != nil {
-			slog.Warn("run manifest no longer validates against the compiled driver set; quarantining",
-				"run_id", sr.ID, "session_id", sr.SessionID, "err", err)
+			slog.Warn("process manifest no longer validates against the compiled driver set; quarantining",
+				"process_id", sr.ID, "session_id", sr.SessionID, "err", err)
 			em = sr.Manifest
 		}
-		// Runs are always restored regardless of program registration state:
+		// Processes are always restored regardless of program registration state:
 		// programs are loaded after restore via SetPrograms, so r.programs is empty
 		// here. If the program is unavailable when execution is attempted, execute()
-		// will fail the run cleanly at that point (kernel == nil check).
+		// will fail the process cleanly at that point (kernel == nil check).
 		status := sr.Status
-		if status == RunQueued || status == RunRunning || status == RunStopping {
-			status = RunInterrupted
+		if status == ProcessQueued || status == ProcessRunning || status == ProcessStopping {
+			status = ProcessInterrupted
 		}
-		run := &runState{
+		proc := &processState{
 			id:                sr.ID,
 			sessionID:         sr.SessionID,
 			message:           sr.Message,
@@ -100,45 +100,45 @@ func (r *Runtime) restoreSession(proj Projection, journals map[string]map[uint64
 			err:               sr.Error,
 			manifest:          cloneManifest(em),
 			programDigest:     sr.ProgramDigest,
-			parentRunID:       sr.ParentRunID,
-			childRunIDs:       append([]string(nil), sr.ChildRunIDs...),
+			parentProcessID:   sr.ParentProcessID,
+			childProcessIDs:   append([]string(nil), sr.ChildProcessIDs...),
 			childSpawnOffsets: append([]int(nil), sr.ChildSpawnOffsets...),
 			forkOffset:        sr.ForkOffset,
 		}
-		if run.revision == 0 {
-			run.revision = 1
+		if proc.revision == 0 {
+			proc.revision = 1
 		}
-		if j := journals[run.id][run.revision]; j != nil {
-			run.journal = j
+		if j := journals[proc.id][proc.revision]; j != nil {
+			proc.journal = j
 		} else {
-			// No records logged for this revision yet (run crashed before any
+			// No records logged for this revision yet (process crashed before any
 			// syscall). Share the existing history so replay can serve the shared
 			// prefix; the exact fork point was persisted when the revision forked.
-			history := histories[run.id]
+			history := histories[proc.id]
 			if history == nil {
-				history = newRunHistory()
+				history = newProcessHistory()
 			}
-			run.journal = r.newJournal(run, history, sr.ForkOffset)
+			proc.journal = r.newJournal(proc, history, sr.ForkOffset)
 		}
-		r.runs[run.id] = run
-		run.history = append([]HistoryMessage(nil), session.history...)
-		session.runIDs = append(session.runIDs, run.id)
-		if run.status == RunCompleted {
+		r.processes[proc.id] = proc
+		proc.history = append([]HistoryMessage(nil), session.history...)
+		session.processIDs = append(session.processIDs, proc.id)
+		if proc.status == ProcessCompleted {
 			session.history = append(session.history,
-				HistoryMessage{Role: "user", Content: run.message},
-				HistoryMessage{Role: "assistant", Content: run.answer},
+				HistoryMessage{Role: "user", Content: proc.message},
+				HistoryMessage{Role: "assistant", Content: proc.answer},
 			)
 		}
 		if status != sr.Status {
-			if err := r.appendRun(run); err != nil {
+			if err := r.appendProcess(proc); err != nil {
 				return err
 			}
 		}
 	}
-	if session.activeRunID != "" && r.runs[session.activeRunID] == nil {
-		slog.Info("clearing active run from session due to program digest mismatch",
-			"session_id", session.id, "run_id", session.activeRunID)
-		session.activeRunID = ""
+	if session.activeProcessID != "" && r.processes[session.activeProcessID] == nil {
+		slog.Info("clearing active process from session due to program digest mismatch",
+			"session_id", session.id, "process_id", session.activeProcessID)
+		session.activeProcessID = ""
 	}
 	return nil
 }

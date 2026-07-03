@@ -1,5 +1,5 @@
 // Package aurora is the module's public surface: an implementation-neutral
-// orchestration runtime on the capcompute kernel. It owns session and run
+// orchestration runtime on the capcompute kernel. It owns session and process
 // lifecycle, the intent/completion replay journal over the event log, durable
 // approval tasks, retries, delegation, scheduling, event subscriptions, and
 // execution of caller-supplied Wasm programs — all folded from a single

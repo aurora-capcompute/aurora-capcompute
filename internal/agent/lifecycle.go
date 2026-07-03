@@ -13,7 +13,7 @@ import (
 
 // Agent lifecycle syscalls. The guest fetches its input and reports its answer
 // through these calls so both are recorded on the replay journal — making the
-// per-run tape the full narrative: agent.input → capability calls → agent.finish.
+// per-process tape the full narrative: agent.input → capability calls → agent.finish.
 const (
 	callAgentInput  = "agent.input"
 	callAgentFinish = "agent.finish"
@@ -30,7 +30,7 @@ type finishArgs struct {
 // grant set, so even the runtime's own protocol calls are granted explicitly
 // rather than smuggled past the reference monitor.
 type lifecycleDispatcher struct {
-	next         sys.Dispatcher[RunContext]
+	next         sys.Dispatcher[ProcessContext]
 	message      string
 	history      []HistoryMessage
 	systemPrompt string
@@ -38,7 +38,7 @@ type lifecycleDispatcher struct {
 }
 
 func newLifecycleDispatcher(
-	next sys.Dispatcher[RunContext],
+	next sys.Dispatcher[ProcessContext],
 	message string,
 	history []HistoryMessage,
 	manifest Manifest,
@@ -52,7 +52,7 @@ func newLifecycleDispatcher(
 	}
 }
 
-func (l *lifecycleDispatcher) Dispatch(ctx context.Context, cred RunContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
+func (l *lifecycleDispatcher) Dispatch(ctx context.Context, cred ProcessContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	switch syscall.Name {
 	case callAgentInput:
 		payload, err := json.Marshal(agentInput{
@@ -78,31 +78,31 @@ func (l *lifecycleDispatcher) Capabilities() []sys.Capability {
 	return appendMissing(l.next.Capabilities(),
 		sys.Capability{
 			Name:        callAgentInput,
-			Description: "fetch this run's input: message, history, system prompt, and the visible capability menu",
+			Description: "fetch this process's input: message, history, system prompt, and the visible capability menu",
 			Hidden:      true,
 		},
 		sys.Capability{
 			Name:        callAgentFinish,
-			Description: "record this run's final answer on the journal",
+			Description: "record this process's final answer on the journal",
 			Hidden:      true,
 		},
 	)
 }
 
-// answerFromJournal reads a completed run's answer from the journal's final
+// answerFromJournal reads a completed process's answer from the journal's final
 // intent/completion pair, which must be the agent.finish syscall. The answer is
 // therefore sourced from the tape (the single source of truth) rather than the
 // guest's return value.
-func (r *Runtime) answerFromJournal(runID string) (string, error) {
+func (r *Runtime) answerFromJournal(processID string) (string, error) {
 	r.mu.Lock()
-	run := r.runs[runID]
+	proc := r.processes[processID]
 	var journal *logJournal
-	if run != nil {
-		journal = run.journal
+	if proc != nil {
+		journal = proc.journal
 	}
 	r.mu.Unlock()
 	if journal == nil {
-		return "", errors.New("agent run journal is unavailable")
+		return "", errors.New("agent process journal is unavailable")
 	}
 	length := journal.Length()
 	if length < 2 {

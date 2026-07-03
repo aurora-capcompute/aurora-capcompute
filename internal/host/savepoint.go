@@ -15,7 +15,7 @@ var savepointResult = []byte("{}")
 // unchanged. It sits just below the replay layer (so markers are journaled as
 // intent/completion pairs) and above the task and delegation layers (so
 // markers never become durable tasks or reach a driver). A guest brackets a
-// unit of retryable work with begin … commit; on a failed run the runtime
+// unit of retryable work with begin … commit; on a failed process the runtime
 // forks resume just past the outermost begin that was never committed.
 type savepointDispatcher[K any] struct {
 	next sys.Dispatcher[K]

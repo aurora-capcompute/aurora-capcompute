@@ -12,7 +12,7 @@ import (
 const ManifestVersion = 2
 
 // AgentToolType is the tool `type` for a sub-agent. A tool of this type is not a
-// leaf I/O dispatcher; it is run by the runtime as a child agent (see agent.go).
+// leaf I/O dispatcher; it is process by the runtime as a child agent (see agent.go).
 const AgentToolType = "core.agent"
 
 // Manifest is one agent node (root or child). Program/SystemPrompt configure this
@@ -76,7 +76,7 @@ func (m Manifest) LeafTools() []Tool {
 	return out
 }
 
-// agentTools returns the node's `core.agent` tools (run by the agent router).
+// agentTools returns the node's `core.agent` tools (process by the agent router).
 func (m Manifest) agentTools() []Tool {
 	out := make([]Tool, 0, len(m.Tools))
 	for _, t := range m.Tools {
@@ -102,7 +102,7 @@ func decodeAgentSettings(tool Tool) (AgentSettings, error) {
 
 type DispatcherProvider interface {
 	Normalize(toolType string, settings json.RawMessage) (json.RawMessage, error)
-	NewDispatcher(context.Context, RunContext, Manifest) (sys.Dispatcher[RunContext], error)
+	NewDispatcher(context.Context, ProcessContext, Manifest) (sys.Dispatcher[ProcessContext], error)
 }
 
 func ValidateManifest(manifest Manifest, provider DispatcherProvider) (Manifest, error) {

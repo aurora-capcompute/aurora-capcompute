@@ -24,7 +24,7 @@ func (p *testDispatchers) Normalize(toolType string, settings json.RawMessage) (
 	return append(json.RawMessage(nil), settings...), nil
 }
 
-func (*testDispatchers) NewDispatcher(context.Context, RunContext, Manifest) (sys.Dispatcher[RunContext], error) {
+func (*testDispatchers) NewDispatcher(context.Context, ProcessContext, Manifest) (sys.Dispatcher[ProcessContext], error) {
 	return nil, nil
 }
 

@@ -25,13 +25,13 @@ type Scope struct {
 
 // Event is one immutable record in a stream. Seq is assigned by the log on
 // append (1-based, contiguous per stream). Kind and Data are owned by the domain
-// layer; Run and Rev locate the event within a run's revision when applicable
-// (zero for session-level events).
+// layer; Proc and Rev locate the event within a process's revision when
+// applicable (zero for session-level events).
 type Event struct {
 	Seq  uint64          `json:"seq"`
 	Kind string          `json:"kind"`
 	Time time.Time       `json:"time"`
-	Run  string          `json:"run,omitempty"`
+	Proc string          `json:"proc,omitempty"`
 	Rev  uint64          `json:"rev,omitempty"`
 	Data json.RawMessage `json:"data,omitempty"`
 }

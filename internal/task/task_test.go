@@ -15,7 +15,7 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys/replay/tape/journaled"
 )
 
-type run struct{}
+type proc struct{}
 
 type taskStore struct {
 	mu      sync.Mutex
@@ -57,12 +57,12 @@ func (s *taskStore) Get(_ context.Context, _ string, id string) (task.Record, er
 	return record, nil
 }
 
-func (s *taskStore) List(_ context.Context, _ string, runID string) ([]task.Record, error) {
+func (s *taskStore) List(_ context.Context, _ string, processID string) ([]task.Record, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var records []task.Record
 	for _, record := range s.records {
-		if runID == "" || record.Scope.RunID == runID {
+		if processID == "" || record.Scope.ProcessID == processID {
 			records = append(records, record)
 		}
 	}
@@ -141,7 +141,7 @@ type approvalDispatcher struct {
 
 func (*approvalDispatcher) Capabilities() []sys.Capability { return nil }
 
-func (d *approvalDispatcher) Dispatch(_ context.Context, _ run, _ sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
+func (d *approvalDispatcher) Dispatch(_ context.Context, _ proc, _ sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	if auth.Decision == "" {
 		return sys.Yield("approve test operation"), nil
 	}
@@ -161,15 +161,15 @@ func TestDispatcherPersistsAndResumesYieldedTask(t *testing.T) {
 	store := newTaskStore()
 	journal := &journal{}
 	next := &approvalDispatcher{}
-	scope := task.Scope{TenantID: "tenant", SessionID: "session", RunID: "run", Revision: 1}
+	scope := task.Scope{TenantID: "tenant", SessionID: "session", ProcessID: "proc", Revision: 1}
 	secret := []byte("test-secret")
-	header := journaled.Header{ABI: sys.ABIVersion, Program: "prog", Run: "run"}
-	build := func() sys.Dispatcher[run] {
-		taskDispatcher := &task.Dispatcher[run]{
+	header := journaled.Header{ABI: sys.ABIVersion, Program: "prog", Process: "proc"}
+	build := func() sys.Dispatcher[proc] {
+		taskDispatcher := &task.Dispatcher[proc]{
 			Next:        next,
 			Store:       store,
 			Journal:     journal,
-			Scope:       func(run) task.Scope { return scope },
+			Scope:       func(proc) task.Scope { return scope },
 			TokenSecret: secret,
 			TaskTTL:     time.Hour,
 		}
@@ -177,18 +177,18 @@ func TestDispatcherPersistsAndResumesYieldedTask(t *testing.T) {
 		if err != nil {
 			t.Fatalf("new tape: %v", err)
 		}
-		return replay.NewDispatcher[run](tape, taskDispatcher)
+		return replay.NewDispatcher[proc](tape, taskDispatcher)
 	}
 	call := sys.Syscall{Abi: sys.ABIVersion, Name: "internet.read", Args: json.RawMessage(`{"url":"https://example.com"}`)}
 
-	result, err := build().Dispatch(context.Background(), run{}, call, sys.Authorization{})
+	result, err := build().Dispatch(context.Background(), proc{}, call, sys.Authorization{})
 	if err != nil {
 		t.Fatalf("initial dispatch: %v", err)
 	}
 	if result.Status() != sys.StatusYield {
 		t.Fatalf("initial status = %s", result.Status())
 	}
-	records, err := store.List(context.Background(), scope.TenantID, scope.RunID)
+	records, err := store.List(context.Background(), scope.TenantID, scope.ProcessID)
 	if err != nil || len(records) != 1 {
 		t.Fatalf("tasks = %+v, err=%v", records, err)
 	}
@@ -209,7 +209,7 @@ func TestDispatcherPersistsAndResumesYieldedTask(t *testing.T) {
 		t.Fatalf("resolve: %v", err)
 	}
 
-	result, err = build().Dispatch(context.Background(), run{}, call, sys.Authorization{})
+	result, err = build().Dispatch(context.Background(), proc{}, call, sys.Authorization{})
 	if err != nil {
 		t.Fatalf("resumed dispatch: %v", err)
 	}
@@ -220,7 +220,7 @@ func TestDispatcherPersistsAndResumesYieldedTask(t *testing.T) {
 		t.Fatalf("journal length = %d, want 2 (intent + completion)", journal.Length())
 	}
 
-	result, err = build().Dispatch(context.Background(), run{}, call, sys.Authorization{})
+	result, err = build().Dispatch(context.Background(), proc{}, call, sys.Authorization{})
 	if err != nil {
 		t.Fatalf("replayed dispatch: %v", err)
 	}
@@ -234,15 +234,15 @@ func TestDispatcherDeniedTask(t *testing.T) {
 	store := newTaskStore()
 	journal := &journal{}
 	next := &approvalDispatcher{}
-	scope := task.Scope{TenantID: "tenant", SessionID: "session", RunID: "run", Revision: 1}
+	scope := task.Scope{TenantID: "tenant", SessionID: "session", ProcessID: "proc", Revision: 1}
 	secret := []byte("test-secret")
-	header := journaled.Header{ABI: sys.ABIVersion, Program: "prog", Run: "run"}
-	build := func() sys.Dispatcher[run] {
-		taskDispatcher := &task.Dispatcher[run]{
+	header := journaled.Header{ABI: sys.ABIVersion, Program: "prog", Process: "proc"}
+	build := func() sys.Dispatcher[proc] {
+		taskDispatcher := &task.Dispatcher[proc]{
 			Next:        next,
 			Store:       store,
 			Journal:     journal,
-			Scope:       func(run) task.Scope { return scope },
+			Scope:       func(proc) task.Scope { return scope },
 			TokenSecret: secret,
 			TaskTTL:     time.Hour,
 		}
@@ -250,14 +250,14 @@ func TestDispatcherDeniedTask(t *testing.T) {
 		if err != nil {
 			t.Fatalf("new tape: %v", err)
 		}
-		return replay.NewDispatcher[run](tape, taskDispatcher)
+		return replay.NewDispatcher[proc](tape, taskDispatcher)
 	}
 	call := sys.Syscall{Abi: sys.ABIVersion, Name: "internet.read", Args: json.RawMessage(`{"url":"https://example.com"}`)}
 
-	if _, err := build().Dispatch(context.Background(), run{}, call, sys.Authorization{}); err != nil {
+	if _, err := build().Dispatch(context.Background(), proc{}, call, sys.Authorization{}); err != nil {
 		t.Fatalf("initial dispatch: %v", err)
 	}
-	records, _ := store.List(context.Background(), scope.TenantID, scope.RunID)
+	records, _ := store.List(context.Background(), scope.TenantID, scope.ProcessID)
 	token := task.Token(secret, scope.TenantID, records[0].ID)
 	sum := sha256.Sum256([]byte(token))
 	if _, err := store.Resolve(context.Background(), scope.TenantID, records[0].ID, sum[:], task.Resolution{
@@ -267,7 +267,7 @@ func TestDispatcherDeniedTask(t *testing.T) {
 		t.Fatalf("resolve: %v", err)
 	}
 
-	result, err := build().Dispatch(context.Background(), run{}, call, sys.Authorization{})
+	result, err := build().Dispatch(context.Background(), proc{}, call, sys.Authorization{})
 	if err != nil {
 		t.Fatalf("denied dispatch: %v", err)
 	}

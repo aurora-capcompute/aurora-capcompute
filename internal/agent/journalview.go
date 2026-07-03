@@ -21,7 +21,7 @@ import (
 // revision that produced it. The fork structure (which revision shared which
 // prefix) is fully derivable from the flat set of (position, revision) pairs —
 // no separate fork event is needed. A journal.header event pins the writer
-// identity (ABI, program digest, run) per revision, so replaying a journal
+// identity (ABI, program digest, proc) per revision, so replaying a journal
 // under a different program is refused up front.
 const (
 	evSyscall       = "syscall.recorded"
@@ -38,11 +38,11 @@ type journalHeaderData struct {
 	Header   journaled.Header `json:"header"`
 }
 
-// runHistory accumulates every (position, revision, record) triple and every
-// revision header written for a run. All logJournal instances for the same run
-// share one runHistory so a forked revision can serve its shared prefix
+// processHistory accumulates every (position, revision, record) triple and every
+// revision header written for a process. All logJournal instances for the same process
+// share one processHistory so a forked revision can serve its shared prefix
 // without a parent-pointer chain.
-type runHistory struct {
+type processHistory struct {
 	mu      sync.Mutex
 	byPos   map[int][]histEntry
 	headers map[uint64]journaled.Header
@@ -53,24 +53,24 @@ type histEntry struct {
 	record   journaled.Record
 }
 
-func newRunHistory() *runHistory {
-	return &runHistory{byPos: make(map[int][]histEntry), headers: make(map[uint64]journaled.Header)}
+func newProcessHistory() *processHistory {
+	return &processHistory{byPos: make(map[int][]histEntry), headers: make(map[uint64]journaled.Header)}
 }
 
-func (h *runHistory) add(position int, revision uint64, rec journaled.Record) {
+func (h *processHistory) add(position int, revision uint64, rec journaled.Record) {
 	h.mu.Lock()
 	h.byPos[position] = append(h.byPos[position], histEntry{revision: revision, record: rec})
 	h.mu.Unlock()
 }
 
-func (h *runHistory) setHeader(revision uint64, header journaled.Header) {
+func (h *processHistory) setHeader(revision uint64, header journaled.Header) {
 	h.mu.Lock()
 	h.headers[revision] = header
 	h.mu.Unlock()
 }
 
 // ownHeader returns the header stamped by revision rev itself, if any.
-func (h *runHistory) ownHeader(rev uint64) (journaled.Header, bool) {
+func (h *processHistory) ownHeader(rev uint64) (journaled.Header, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	header, ok := h.headers[rev]
@@ -80,7 +80,7 @@ func (h *runHistory) ownHeader(rev uint64) (journaled.Header, bool) {
 // header returns the journal header governing revision rev: the revision's own
 // header if stamped, else the highest earlier revision's (the writer identity
 // a forked journal inherits with its shared prefix).
-func (h *runHistory) header(rev uint64) (journaled.Header, bool) {
+func (h *processHistory) header(rev uint64) (journaled.Header, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if header, ok := h.headers[rev]; ok {
@@ -98,7 +98,7 @@ func (h *runHistory) header(rev uint64) (journaled.Header, bool) {
 }
 
 // allRevisions returns all distinct revision numbers in the history, sorted ascending.
-func (h *runHistory) allRevisions() []uint64 {
+func (h *processHistory) allRevisions() []uint64 {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	seen := make(map[uint64]struct{})
@@ -117,7 +117,7 @@ func (h *runHistory) allRevisions() []uint64 {
 
 // lengthAt returns the journal length effective at revision rev: one past the
 // highest position holding a record with revision ≤ rev.
-func (h *runHistory) lengthAt(rev uint64) int {
+func (h *processHistory) lengthAt(rev uint64) int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	length := 0
@@ -132,7 +132,7 @@ func (h *runHistory) lengthAt(rev uint64) int {
 }
 
 // getAt returns a copy of the record at position with the highest revision ≤ maxRev.
-func (h *runHistory) getAt(position int, maxRev uint64) (journaled.Record, bool) {
+func (h *processHistory) getAt(position int, maxRev uint64) (journaled.Record, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	var best *histEntry
@@ -150,7 +150,7 @@ func (h *runHistory) getAt(position int, maxRev uint64) (journaled.Record, bool)
 
 // revAt returns the revision number of the record at position with the highest
 // revision ≤ maxRev. Used to annotate shared-prefix entries with their origin revision.
-func (h *runHistory) revAt(position int, maxRev uint64) (uint64, bool) {
+func (h *processHistory) revAt(position int, maxRev uint64) (uint64, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	var best uint64
@@ -182,19 +182,19 @@ func copyRecord(rec journaled.Record) journaled.Record {
 }
 
 // logJournal implements journaled.Journal over an event stream. Positions
-// [0, forkOffset) are served from the shared runHistory (written by prior
+// [0, forkOffset) are served from the shared processHistory (written by prior
 // revisions); positions [forkOffset, ...) are from this revision's own records.
 // Hash-chain integrity holds across the fork: a record appended at forkOffset
 // chains from the shared prefix's tail record, which Load serves verbatim.
 type logJournal struct {
 	log      eventlog.Log
 	scope    eventlog.Scope
-	run      string
+	proc     string
 	rev      uint64
 	now      func() time.Time
-	onAppend func(run string, revision uint64, rec journaled.Record, syscallName string)
+	onAppend func(proc string, revision uint64, rec journaled.Record, syscallName string)
 
-	history    *runHistory
+	history    *processHistory
 	forkOffset int // positions [0, forkOffset) come from history
 
 	mu      sync.Mutex
@@ -204,15 +204,15 @@ type logJournal struct {
 func newLogJournal(
 	log eventlog.Log,
 	scope eventlog.Scope,
-	run string,
+	proc string,
 	rev uint64,
-	history *runHistory,
+	history *processHistory,
 	forkOffset int,
 	now func() time.Time,
 	onAppend func(string, uint64, journaled.Record, string),
 ) *logJournal {
 	return &logJournal{
-		log: log, scope: scope, run: run, rev: rev,
+		log: log, scope: scope, proc: proc, rev: rev,
 		history: history, forkOffset: forkOffset,
 		now: now, onAppend: onAppend,
 	}
@@ -235,7 +235,7 @@ func (j *logJournal) Header() (journaled.Header, bool, error) {
 }
 
 func (j *logJournal) SetHeader(header journaled.Header) error {
-	ev, err := encodeEvent(evJournalHeader, j.run, j.rev, j.now(), journalHeaderData{
+	ev, err := encodeEvent(evJournalHeader, j.proc, j.rev, j.now(), journalHeaderData{
 		Revision: j.rev,
 		Header:   header,
 	})
@@ -281,7 +281,7 @@ func (j *logJournal) Append(rec journaled.Record) error {
 		return fmt.Errorf("invalid journal position %d (want %d)", rec.Position, j.forkOffset+len(j.records))
 	}
 	stored := copyRecord(rec)
-	ev, err := encodeEvent(evSyscall, j.run, j.rev, j.now(), syscallRecordData{
+	ev, err := encodeEvent(evSyscall, j.proc, j.rev, j.now(), syscallRecordData{
 		Revision: j.rev,
 		Record:   stored,
 	})
@@ -298,7 +298,7 @@ func (j *logJournal) Append(rec journaled.Record) error {
 	name := j.syscallNameLocked(stored)
 	j.mu.Unlock()
 	if j.onAppend != nil {
-		j.onAppend(j.run, j.rev, stored, name)
+		j.onAppend(j.proc, j.rev, stored, name)
 	}
 	return nil
 }
@@ -426,9 +426,9 @@ func encodeOutcome(result sys.SyscallResult) JournalOutcome {
 
 // foldJournals rebuilds every revision's journal for a session stream from its
 // syscall.recorded and journal.header events. Revisions are linked to a shared
-// runHistory so forked journals can serve the shared prefix without
-// parent-pointer chains. It returns both the journals and the per-run
-// histories (so callers that need to create new revisions for an existing run
+// processHistory so forked journals can serve the shared prefix without
+// parent-pointer chains. It returns both the journals and the per-process
+// histories (so callers that need to create new revisions for an existing process
 // can share the same history).
 func foldJournals(
 	events []eventlog.Event,
@@ -436,9 +436,9 @@ func foldJournals(
 	scope eventlog.Scope,
 	now func() time.Time,
 	onAppend func(string, uint64, journaled.Record, string),
-) (map[string]map[uint64]*logJournal, map[string]*runHistory, error) {
-	histories := map[string]*runHistory{}
-	revData := map[string]map[uint64][]journaled.Record{} // run → rev → records (in log order)
+) (map[string]map[uint64]*logJournal, map[string]*processHistory, error) {
+	histories := map[string]*processHistory{}
+	revData := map[string]map[uint64][]journaled.Record{} // process → rev → records (in log order)
 
 	for _, ev := range events {
 		switch ev.Kind {
@@ -447,43 +447,43 @@ func foldJournals(
 			if err := json.Unmarshal(ev.Data, &hd); err != nil {
 				return nil, nil, fmt.Errorf("decode journal.header: %w", err)
 			}
-			if histories[ev.Run] == nil {
-				histories[ev.Run] = newRunHistory()
+			if histories[ev.Proc] == nil {
+				histories[ev.Proc] = newProcessHistory()
 			}
-			histories[ev.Run].setHeader(ev.Rev, hd.Header)
+			histories[ev.Proc].setHeader(ev.Rev, hd.Header)
 		case evSyscall:
 			var sd syscallRecordData
 			if err := json.Unmarshal(ev.Data, &sd); err != nil {
 				return nil, nil, fmt.Errorf("decode syscall.recorded: %w", err)
 			}
 			rev := ev.Rev // authoritative; sd.Revision is the same on new events
-			if histories[ev.Run] == nil {
-				histories[ev.Run] = newRunHistory()
+			if histories[ev.Proc] == nil {
+				histories[ev.Proc] = newProcessHistory()
 			}
-			histories[ev.Run].add(sd.Record.Position, rev, sd.Record)
-			if revData[ev.Run] == nil {
-				revData[ev.Run] = map[uint64][]journaled.Record{}
+			histories[ev.Proc].add(sd.Record.Position, rev, sd.Record)
+			if revData[ev.Proc] == nil {
+				revData[ev.Proc] = map[uint64][]journaled.Record{}
 			}
-			revData[ev.Run][rev] = append(revData[ev.Run][rev], sd.Record)
+			revData[ev.Proc][rev] = append(revData[ev.Proc][rev], sd.Record)
 		}
 	}
 
 	result := map[string]map[uint64]*logJournal{}
-	for run, history := range histories {
-		result[run] = map[uint64]*logJournal{}
-		for rev, records := range revData[run] {
+	for proc, history := range histories {
+		result[proc] = map[uint64]*logJournal{}
+		for rev, records := range revData[proc] {
 			// Sort by position so forkOffset = records[0].Position is reliable.
 			sort.Slice(records, func(i, k int) bool { return records[i].Position < records[k].Position })
 			forkOffset := 0
 			if len(records) > 0 {
 				forkOffset = records[0].Position
 			}
-			j := newLogJournal(log, scope, run, rev, history, forkOffset, now, onAppend)
+			j := newLogJournal(log, scope, proc, rev, history, forkOffset, now, onAppend)
 			j.records = append(j.records, records...)
-			result[run][rev] = j
+			result[proc][rev] = j
 		}
 		// A revision that stamped a header but crashed before its first record
-		// still needs a journal view; restore synthesizes it from run state.
+		// still needs a journal view; restore synthesizes it from process state.
 	}
 	return result, histories, nil
 }

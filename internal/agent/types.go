@@ -23,18 +23,18 @@ var (
 	ErrInvalid  = errors.New("invalid request")
 )
 
-type RunStatus string
+type ProcessStatus string
 
 const (
-	RunQueued      RunStatus = "queued"
-	RunRunning     RunStatus = "running"
-	RunStopping    RunStatus = "stopping"
-	RunYielded     RunStatus = "yielded"
-	RunWaitingTask RunStatus = "waiting_for_task"
-	RunInterrupted RunStatus = "interrupted"
-	RunCompleted   RunStatus = "completed"
-	RunStopped     RunStatus = "stopped"
-	RunFailed      RunStatus = "failed"
+	ProcessQueued      ProcessStatus = "queued"
+	ProcessRunning     ProcessStatus = "running"
+	ProcessStopping    ProcessStatus = "stopping"
+	ProcessYielded     ProcessStatus = "yielded"
+	ProcessWaitingTask ProcessStatus = "waiting_for_task"
+	ProcessInterrupted ProcessStatus = "interrupted"
+	ProcessCompleted   ProcessStatus = "completed"
+	ProcessStopped     ProcessStatus = "stopped"
+	ProcessFailed      ProcessStatus = "failed"
 )
 
 type RetryMode string
@@ -57,7 +57,7 @@ type Config struct {
 	Dispatchers  DispatcherProvider
 	Log          eventlog.Log
 	Leases       Leases
-	ProcessTable capcompute.ProcessTable[string, RunContext]
+	ProcessTable capcompute.ProcessTable[string, ProcessContext]
 	IDSource     func(prefix string) (string, error)
 	Now          func() time.Time
 	EventSize    int
@@ -67,31 +67,31 @@ type Config struct {
 	InstanceID   string
 	LeaseTTL     time.Duration
 
-	// MaxConcurrentRuns bounds simultaneously executing run quanta across the
-	// runtime (0 = a default of 16). Delegated child runs execute inside their
+	// MaxConcurrentProcesses bounds simultaneously executing process quanta across the
+	// runtime (0 = a default of 16). Delegated child processes execute inside their
 	// parent's quantum and are not counted.
-	MaxConcurrentRuns int
-	// MaxResidentRuns bounds warm (yielded but activated) guest instances;
+	MaxConcurrentProcesses int
+	// MaxResidentProcesses bounds warm (yielded but activated) guest instances;
 	// least-recently-used instances are deactivated past it and reactivate by
 	// journal replay (0 = a default of 64).
-	MaxResidentRuns int
+	MaxResidentProcesses int
 	// QuotaOf reports a tenant's scheduling quota. Nil means unlimited.
 	QuotaOf func(tenant string) sched.Quota
 }
 
 type Runtime struct {
 	mu           sync.Mutex
-	kernels      map[string]*capcompute.Kernel[string, RunContext]
+	kernels      map[string]*capcompute.Kernel[string, ProcessContext]
 	programs     *loadedPrograms
-	processTable capcompute.ProcessTable[string, RunContext]
-	scheduler    *sched.Scheduler[string, RunContext]
+	processTable capcompute.ProcessTable[string, ProcessContext]
+	scheduler    *sched.Scheduler[string, ProcessContext]
 	taints       *capcompute.Taints[string]
 	log          eventlog.Log
 	leases       Leases
 	tasks        *eventTaskStore
 	tenantID     string
 	sessions     map[string]*sessionState
-	runs         map[string]*runState
+	processes    map[string]*processState
 	subscribers  map[string]map[uint64]chan Event
 	nextSubID    uint64
 	idSource     func(string) (string, error)
@@ -102,28 +102,28 @@ type Runtime struct {
 	instanceID   string
 	leaseTTL     time.Duration
 	dispatchers  DispatcherProvider
-	factory      internalhost.Factory[string, RunContext]
+	factory      internalhost.Factory[string, ProcessContext]
 	wg           sync.WaitGroup
 	closed       bool
 }
 
 type sessionState struct {
-	id          string
-	title       string
-	createdAt   time.Time
-	updatedAt   time.Time
-	history     []HistoryMessage
-	runIDs      []string
-	activeRunID string
-	tags        map[string]string
+	id              string
+	title           string
+	createdAt       time.Time
+	updatedAt       time.Time
+	history         []HistoryMessage
+	processIDs      []string
+	activeProcessID string
+	tags            map[string]string
 }
 
-type runState struct {
+type processState struct {
 	id          string
 	sessionID   string
 	message     string
 	history     []HistoryMessage
-	status      RunStatus
+	status      ProcessStatus
 	attempt     int
 	createdAt   time.Time
 	updatedAt   time.Time
@@ -132,19 +132,19 @@ type runState struct {
 	answer      string
 	err         string
 	journal     *logJournal
-	// stop aborts the run's in-flight quantum: the scheduler submission for a
-	// root run, the direct resume handle for a delegated child. Nil when no
+	// stop aborts the process's in-flight quantum: the scheduler submission for a
+	// root process, the direct resume handle for a delegated child. Nil when no
 	// quantum is in flight.
 	stop          func()
 	stopRequested bool
 	manifest      Manifest
 	revision      uint64
 	programDigest string
-	// parentRunID and childRunIDs make delegated runs addressable: a child knows
-	// the run that spawned it, and a parent records its children in spawn order.
-	parentRunID string
-	childRunIDs []string
-	// childSpawnOffsets records, parallel to childRunIDs, the journal length at
+	// parentProcessID and childProcessIDs make delegated processes addressable: a child knows
+	// the process that spawned it, and a parent records its children in spawn order.
+	parentProcessID string
+	childProcessIDs []string
+	// childSpawnOffsets records, parallel to childProcessIDs, the journal length at
 	// the moment each child was spawned (one past the delegation intent). It
 	// lets a fork-from-offset retry start the cascade cursor past children whose
 	// delegation call is replayed from the shared prefix, so only re-executed
@@ -155,7 +155,7 @@ type runState struct {
 	// revision that was forked but crashed before logging any record can be
 	// reconstructed on restore.
 	forkOffset int
-	// cascade re-execution state: when a run is restarted, cascade is set so the
+	// cascade re-execution state: when a process is restarted, cascade is set so the
 	// delegation router reuses (retries) the existing children at cascadeCursor in
 	// spawn order rather than spawning fresh ones. cascadeMode records whether the
 	// parent was resumed or restarted so children inherit the right retry mode.
@@ -171,23 +171,23 @@ type runState struct {
 	failure error
 }
 
-// RunContext is the host-side credential for one run revision: the syscall
-// triad's "who". The kernel keys processes by PID(); two revisions of one run
+// ProcessContext is the host-side credential for one process revision: the syscall
+// triad's "who". The kernel keys instances by PID(); two revisions of one process
 // are distinct processes, so a forked retry can never resume a stale instance.
-type RunContext struct {
+type ProcessContext struct {
 	TenantID  string `json:"tenant_id"`
 	SessionID string `json:"session_id"`
-	RunID     string `json:"run_id"`
+	ProcessID string `json:"process_id"`
 	Revision  uint64 `json:"revision"`
 }
 
-func (r RunContext) PID() string {
-	return runPID(r.RunID, r.Revision)
+func (r ProcessContext) PID() string {
+	return processPID(r.ProcessID, r.Revision)
 }
 
-// runPID derives the kernel process identity for one run revision.
-func runPID(runID string, revision uint64) string {
-	return fmt.Sprintf("%s@%d", runID, revision)
+// processPID derives the kernel process identity for one process revision.
+func processPID(processID string, revision uint64) string {
+	return fmt.Sprintf("%s@%d", processID, revision)
 }
 
 type agentInput struct {
@@ -198,42 +198,42 @@ type agentInput struct {
 }
 
 type SessionSummary struct {
-	ID          string            `json:"id"`
-	Title       string            `json:"title"`
-	CreatedAt   time.Time         `json:"created_at"`
-	UpdatedAt   time.Time         `json:"updated_at"`
-	RunCount    int               `json:"run_count"`
-	ActiveRunID string            `json:"active_run_id,omitempty"`
-	Tags        map[string]string `json:"tags,omitempty"`
+	ID              string            `json:"id"`
+	Title           string            `json:"title"`
+	CreatedAt       time.Time         `json:"created_at"`
+	UpdatedAt       time.Time         `json:"updated_at"`
+	ProcessCount    int               `json:"process_count"`
+	ActiveProcessID string            `json:"active_process_id,omitempty"`
+	Tags            map[string]string `json:"tags,omitempty"`
 }
 
 type SessionSnapshot struct {
 	SessionSummary
-	History []HistoryMessage `json:"history"`
-	Runs    []RunSnapshot    `json:"runs"`
+	History   []HistoryMessage  `json:"history"`
+	Processes []ProcessSnapshot `json:"processes"`
 }
 
-type RunSnapshot struct {
-	ID            string     `json:"id"`
-	SessionID     string     `json:"session_id"`
-	Message       string     `json:"message"`
-	Status        RunStatus  `json:"status"`
-	Attempt       int        `json:"attempt"`
-	Revision      uint64     `json:"revision"`
-	Answer        string     `json:"answer,omitempty"`
-	Error         string     `json:"error,omitempty"`
-	JournalLength int        `json:"journal_length"`
-	CreatedAt     time.Time  `json:"created_at"`
-	UpdatedAt     time.Time  `json:"updated_at"`
-	StartedAt     *time.Time `json:"started_at,omitempty"`
-	CompletedAt   *time.Time `json:"completed_at,omitempty"`
-	Manifest      Manifest   `json:"manifest"`
-	ProgramDigest string     `json:"program_digest"`
+type ProcessSnapshot struct {
+	ID            string        `json:"id"`
+	SessionID     string        `json:"session_id"`
+	Message       string        `json:"message"`
+	Status        ProcessStatus `json:"status"`
+	Attempt       int           `json:"attempt"`
+	Revision      uint64        `json:"revision"`
+	Answer        string        `json:"answer,omitempty"`
+	Error         string        `json:"error,omitempty"`
+	JournalLength int           `json:"journal_length"`
+	CreatedAt     time.Time     `json:"created_at"`
+	UpdatedAt     time.Time     `json:"updated_at"`
+	StartedAt     *time.Time    `json:"started_at,omitempty"`
+	CompletedAt   *time.Time    `json:"completed_at,omitempty"`
+	Manifest      Manifest      `json:"manifest"`
+	ProgramDigest string        `json:"program_digest"`
 }
 
 type TaskSnapshot struct {
 	ID              string          `json:"id"`
-	RunID           string          `json:"run_id"`
+	ProcessID       string          `json:"process_id"`
 	Revision        uint64          `json:"revision"`
 	JournalPosition int             `json:"journal_position"`
 	Syscall         sys.Syscall     `json:"syscall"`
@@ -250,7 +250,7 @@ type TaskSnapshot struct {
 	ResolutionToken string `json:"resolution_token"`
 }
 
-// JournalEntry is one syscall of a run's journal: the intent (its position in
+// JournalEntry is one syscall of a process's journal: the intent (its position in
 // the hash-chained record sequence and the syscall itself) folded together
 // with its completion. An entry whose completion has not been journaled yet —
 // an in-flight syscall or a pending external task — carries a yield outcome.
@@ -278,7 +278,7 @@ type Event struct {
 }
 
 type JournalEvent struct {
-	RunID         string            `json:"run_id"`
+	ProcessID     string            `json:"process_id"`
 	Position      int               `json:"position"`
 	Revision      uint64            `json:"revision"`
 	Kind          journaled.Kind    `json:"kind"`

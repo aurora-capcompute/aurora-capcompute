@@ -1,4 +1,4 @@
-// Package agent is the runtime: it owns session and run lifecycle, the
+// Package agent is the runtime: it owns session and process lifecycle, the
 // scheduler-driven quanta that resume Wasm programs on the capcompute kernel,
 // durable approval tasks, retries, event subscriptions, and the read
 // projections (snapshots, journal, call graph) the public API exposes. All
@@ -34,8 +34,8 @@ import (
 )
 
 const (
-	defaultMaxConcurrentRuns = 16
-	defaultMaxResidentRuns   = 64
+	defaultMaxConcurrentProcesses = 16
+	defaultMaxResidentProcesses   = 64
 )
 
 func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
@@ -59,7 +59,7 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		return nil, err
 	}
 	runtime := &Runtime{
-		kernels:      make(map[string]*capcompute.Kernel[string, RunContext]),
+		kernels:      make(map[string]*capcompute.Kernel[string, ProcessContext]),
 		programs:     programs,
 		processTable: config.ProcessTable,
 		taints:       capcompute.NewTaints[string](),
@@ -67,7 +67,7 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		leases:       config.Leases,
 		tenantID:     strings.TrimSpace(config.TenantID),
 		sessions:     make(map[string]*sessionState),
-		runs:         make(map[string]*runState),
+		processes:    make(map[string]*processState),
 		subscribers:  make(map[string]map[uint64]chan Event),
 		idSource:     config.IDSource,
 		now:          config.Now,
@@ -108,8 +108,8 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		return nil, fmt.Errorf("restore runtime: %w", err)
 	}
 
-	runtime.factory = internalhost.Factory[string, RunContext]{
-		Drivers:    runtime.runDrivers,
+	runtime.factory = internalhost.Factory[string, ProcessContext]{
+		Drivers:    runtime.processDrivers,
 		Wrap:       runtime.wrapProtocol,
 		NewJournal: runtime.journalFor,
 		Header:     runtime.headerFor,
@@ -117,11 +117,11 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		Tasks:      runtime.tasks,
 		TaskSecret: runtime.taskSecret,
 		TaskTTL:    runtime.taskTTL,
-		TaskScope: func(cred RunContext) task.Scope {
+		TaskScope: func(cred ProcessContext) task.Scope {
 			return task.Scope{
 				TenantID:  cred.TenantID,
 				SessionID: cred.SessionID,
-				RunID:     cred.RunID,
+				ProcessID: cred.ProcessID,
 				Revision:  cred.Revision,
 			}
 		},
@@ -133,18 +133,18 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		},
 	}
 
-	maxConcurrent := config.MaxConcurrentRuns
+	maxConcurrent := config.MaxConcurrentProcesses
 	if maxConcurrent <= 0 {
-		maxConcurrent = defaultMaxConcurrentRuns
+		maxConcurrent = defaultMaxConcurrentProcesses
 	}
-	maxResident := config.MaxResidentRuns
+	maxResident := config.MaxResidentProcesses
 	if maxResident <= 0 {
-		maxResident = defaultMaxResidentRuns
+		maxResident = defaultMaxResidentProcesses
 	}
-	runtime.scheduler, err = sched.New(sched.Config[string, RunContext]{
+	runtime.scheduler, err = sched.New(sched.Config[string, ProcessContext]{
 		Activate: runtime.activateProcess,
 		Resume:   runtime.resumeProcess,
-		Deactivate: func(pid string, process *capcompute.Process[RunContext]) {
+		Deactivate: func(pid string, process *capcompute.Process[ProcessContext]) {
 			_ = process.Close(context.Background())
 		},
 		QuotaOf:       config.QuotaOf,
@@ -172,24 +172,24 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 	return runtime, nil
 }
 
-// runDrivers builds the driver chain below the task layer for one run: the
+// processDrivers builds the driver chain below the task layer for one process: the
 // application's capability dispatcher wrapped with progress reporting.
-func (r *Runtime) runDrivers(resolveCtx context.Context, cred RunContext) (sys.Dispatcher[RunContext], error) {
+func (r *Runtime) processDrivers(resolveCtx context.Context, cred ProcessContext) (sys.Dispatcher[ProcessContext], error) {
 	r.mu.Lock()
-	run := r.runs[cred.RunID]
+	proc := r.processes[cred.ProcessID]
 	var manifest Manifest
-	if run != nil {
-		manifest = cloneManifest(run.manifest)
+	if proc != nil {
+		manifest = cloneManifest(proc.manifest)
 	}
 	r.mu.Unlock()
-	if run == nil {
-		return nil, fmt.Errorf("%w: run %s", ErrNotFound, cred.RunID)
+	if proc == nil {
+		return nil, fmt.Errorf("%w: process %s", ErrNotFound, cred.ProcessID)
 	}
 	base, err := r.dispatchers.NewDispatcher(resolveCtx, cred, manifest)
 	if err != nil {
 		return nil, err
 	}
-	return newProgressDispatcher(base, r.publish, cred.SessionID, cred.RunID), nil
+	return newProgressDispatcher(base, r.publish, cred.SessionID, cred.ProcessID), nil
 }
 
 // wrapProtocol stacks the runtime's protocol layers above the task layer:
@@ -197,20 +197,20 @@ func (r *Runtime) runDrivers(resolveCtx context.Context, cred RunContext) (sys.D
 // the parent transparently instead of becoming a human-approvable task), then
 // the agent lifecycle outermost — its agent.input payload advertises every
 // capability beneath it, delegation tools included.
-func (r *Runtime) wrapProtocol(cred RunContext, next sys.Dispatcher[RunContext]) (sys.Dispatcher[RunContext], error) {
+func (r *Runtime) wrapProtocol(cred ProcessContext, next sys.Dispatcher[ProcessContext]) (sys.Dispatcher[ProcessContext], error) {
 	r.mu.Lock()
-	run := r.runs[cred.RunID]
+	proc := r.processes[cred.ProcessID]
 	var manifest Manifest
 	var message string
 	var history []HistoryMessage
-	if run != nil {
-		manifest = cloneManifest(run.manifest)
-		message = run.message
-		history = append([]HistoryMessage(nil), run.history...)
+	if proc != nil {
+		manifest = cloneManifest(proc.manifest)
+		message = proc.message
+		history = append([]HistoryMessage(nil), proc.history...)
 	}
 	r.mu.Unlock()
-	if run == nil {
-		return nil, fmt.Errorf("%w: run %s", ErrNotFound, cred.RunID)
+	if proc == nil {
+		return nil, fmt.Errorf("%w: process %s", ErrNotFound, cred.ProcessID)
 	}
 	if agents := manifest.agentTools(); len(agents) > 0 {
 		router, err := newAgentRouter(next, agents, r)
@@ -222,39 +222,40 @@ func (r *Runtime) wrapProtocol(cred RunContext, next sys.Dispatcher[RunContext])
 	return newLifecycleDispatcher(next, message, history, manifest), nil
 }
 
-// journalFor returns the run's live journal view.
-func (r *Runtime) journalFor(_ context.Context, cred RunContext) (journaled.Journal, error) {
+// journalFor returns the process's live journal view.
+func (r *Runtime) journalFor(_ context.Context, cred ProcessContext) (journaled.Journal, error) {
 	r.mu.Lock()
-	run := r.runs[cred.RunID]
+	proc := r.processes[cred.ProcessID]
 	r.mu.Unlock()
-	if run == nil || run.journal == nil {
-		return nil, fmt.Errorf("%w: run %s has no journal", ErrNotFound, cred.RunID)
+	if proc == nil || proc.journal == nil {
+		return nil, fmt.Errorf("%w: process %s has no journal", ErrNotFound, cred.ProcessID)
 	}
-	if run.journal.rev != cred.Revision {
-		return nil, fmt.Errorf("%w: run %s journal is at revision %d, not %d",
-			ErrConflict, cred.RunID, run.journal.rev, cred.Revision)
+	if proc.journal.rev != cred.Revision {
+		return nil, fmt.Errorf("%w: process %s journal is at revision %d, not %d",
+			ErrConflict, cred.ProcessID, proc.journal.rev, cred.Revision)
 	}
-	return run.journal, nil
+	return proc.journal, nil
 }
 
-// headerFor is the journal writer identity for one run revision: the syscall
-// ABI, the program digest as the program, and the run id. The tape refuses to
+// headerFor is the journal writer identity for one process revision: the
+// syscall ABI, the program digest as the program, and the process id. The
+// tape refuses to
 // replay a journal whose recorded header differs — the versioned-replay law.
-func (r *Runtime) headerFor(cred RunContext) journaled.Header {
+func (r *Runtime) headerFor(cred ProcessContext) journaled.Header {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	program := ""
-	if run := r.runs[cred.RunID]; run != nil {
-		program = run.programDigest
+	if proc := r.processes[cred.ProcessID]; proc != nil {
+		program = proc.programDigest
 	}
-	return journaled.Header{ABI: sys.ABIVersion, Program: program, Run: cred.RunID}
+	return journaled.Header{ABI: sys.ABIVersion, Program: program, Process: cred.ProcessID}
 }
 
 // compileProgram compiles a program's wasm into a kernel. It is pure with respect
 // to runtime state, so it can be called outside the runtime mutex while
 // preparing a SetPrograms swap.
-func (r *Runtime) compileProgram(ctx context.Context, id string, wasm []byte, digest string) (*capcompute.Kernel[string, RunContext], error) {
-	kernel, err := capcompute.NewKernel(ctx, capcompute.Config[string, RunContext]{
+func (r *Runtime) compileProgram(ctx context.Context, id string, wasm []byte, digest string) (*capcompute.Kernel[string, ProcessContext], error) {
+	kernel, err := capcompute.NewKernel(ctx, capcompute.Config[string, ProcessContext]{
 		Image: extism.Manifest{
 			Wasm: []extism.Wasm{extism.WasmData{Data: wasm, Hash: digest, Name: id}},
 		},
@@ -273,8 +274,8 @@ func (r *Runtime) compileProgram(ctx context.Context, id string, wasm []byte, di
 // time; the control plane uses it to hot-load programs from Program CRDs without a
 // restart. Compilation happens outside the runtime mutex so dispatch is only
 // briefly paused for the swap. If any program fails to compile, no change is
-// applied. Removing a program that an in-flight run is using is best-effort: that
-// run fails on its next step.
+// applied. Removing a program that an in-flight process is using is best-effort:
+// that process fails on its next step.
 func (r *Runtime) SetPrograms(ctx context.Context, sources []ProgramSource) error {
 	current := r.programs.digests()
 	desired := make(map[string]struct{}, len(sources))
@@ -284,7 +285,7 @@ func (r *Runtime) SetPrograms(ctx context.Context, sources []ProgramSource) erro
 		id     string
 		wasm   []byte
 		digest string
-		kernel *capcompute.Kernel[string, RunContext]
+		kernel *capcompute.Kernel[string, ProcessContext]
 	}
 	var fresh []compiled
 	for _, src := range sources {
@@ -322,7 +323,7 @@ func (r *Runtime) SetPrograms(ctx context.Context, sources []ProgramSource) erro
 		}
 		return fmt.Errorf("%w: runtime is closed", ErrConflict)
 	}
-	var retired []*capcompute.Kernel[string, RunContext]
+	var retired []*capcompute.Kernel[string, ProcessContext]
 	for _, c := range fresh {
 		if old := r.kernels[c.id]; old != nil {
 			retired = append(retired, old)
@@ -389,47 +390,47 @@ func (r *Runtime) GetSession(sessionID string) (SessionSnapshot, error) {
 	return r.sessionSnapshotLocked(session), nil
 }
 
-func (r *Runtime) CreateRun(sessionID string, message string, manifest Manifest) (RunSnapshot, error) {
+func (r *Runtime) CreateProcess(sessionID string, message string, manifest Manifest) (ProcessSnapshot, error) {
 	if message == "" {
-		return RunSnapshot{}, fmt.Errorf("%w: message is required", ErrInvalid)
+		return ProcessSnapshot{}, fmt.Errorf("%w: message is required", ErrInvalid)
 	}
 	if strings.TrimSpace(manifest.Program) == "" {
 		manifest.Program = r.programs.DefaultID()
 	}
 	manifest, err := ValidateManifest(manifest, r.dispatchers)
 	if err != nil {
-		return RunSnapshot{}, err
+		return ProcessSnapshot{}, err
 	}
 	program, err := r.programs.Resolve(manifest.Program)
 	if err != nil {
-		return RunSnapshot{}, err
+		return ProcessSnapshot{}, err
 	}
-	runID, err := r.idSource("run_")
+	processID, err := r.idSource("proc_")
 	if err != nil {
-		return RunSnapshot{}, err
+		return ProcessSnapshot{}, err
 	}
 	now := r.now().UTC()
 
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
-		return RunSnapshot{}, fmt.Errorf("%w: runtime is closed", ErrConflict)
+		return ProcessSnapshot{}, fmt.Errorf("%w: runtime is closed", ErrConflict)
 	}
 	session := r.sessions[sessionID]
 	if session == nil {
 		r.mu.Unlock()
-		return RunSnapshot{}, fmt.Errorf("%w: session %s", ErrNotFound, sessionID)
+		return ProcessSnapshot{}, fmt.Errorf("%w: session %s", ErrNotFound, sessionID)
 	}
-	if session.activeRunID != "" {
+	if session.activeProcessID != "" {
 		r.mu.Unlock()
-		return RunSnapshot{}, fmt.Errorf("%w: session already has active run %s", ErrConflict, session.activeRunID)
+		return ProcessSnapshot{}, fmt.Errorf("%w: session already has active process %s", ErrConflict, session.activeProcessID)
 	}
-	run := &runState{
-		id:            runID,
+	proc := &processState{
+		id:            processID,
 		sessionID:     sessionID,
 		message:       message,
 		history:       append([]HistoryMessage(nil), session.history...),
-		status:        RunQueued,
+		status:        ProcessQueued,
 		attempt:       1,
 		createdAt:     now,
 		updatedAt:     now,
@@ -437,78 +438,78 @@ func (r *Runtime) CreateRun(sessionID string, message string, manifest Manifest)
 		revision:      1,
 		programDigest: program.Digest,
 	}
-	run.journal = r.newJournal(run, newRunHistory(), 0)
-	r.runs[runID] = run
-	session.runIDs = append(session.runIDs, runID)
-	if len(session.runIDs) == 1 {
+	proc.journal = r.newJournal(proc, newProcessHistory(), 0)
+	r.processes[processID] = proc
+	session.processIDs = append(session.processIDs, processID)
+	if len(session.processIDs) == 1 {
 		session.title = sessionTitle(message)
 	}
-	session.activeRunID = runID
+	session.activeProcessID = processID
 	session.updatedAt = now
-	if err := r.appendRun(run); err != nil {
-		delete(r.runs, runID)
-		session.runIDs = session.runIDs[:len(session.runIDs)-1]
-		session.activeRunID = ""
+	if err := r.appendProcess(proc); err != nil {
+		delete(r.processes, processID)
+		session.processIDs = session.processIDs[:len(session.processIDs)-1]
+		session.activeProcessID = ""
 		r.mu.Unlock()
-		return RunSnapshot{}, err
+		return ProcessSnapshot{}, err
 	}
-	snapshot := r.runSnapshotLocked(run)
+	snapshot := r.processSnapshotLocked(proc)
 	r.mu.Unlock()
 
-	r.publish(sessionID, Event{Type: "run.updated", Data: snapshot})
+	r.publish(sessionID, Event{Type: "process.updated", Data: snapshot})
 	r.wg.Add(1)
-	go r.execute(runID)
+	go r.execute(processID)
 	return snapshot, nil
 }
 
-func (r *Runtime) GetRun(runID string) (RunSnapshot, error) {
+func (r *Runtime) GetProcess(processID string) (ProcessSnapshot, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	run := r.runs[runID]
-	if run == nil {
-		return RunSnapshot{}, fmt.Errorf("%w: run %s", ErrNotFound, runID)
+	proc := r.processes[processID]
+	if proc == nil {
+		return ProcessSnapshot{}, fmt.Errorf("%w: process %s", ErrNotFound, processID)
 	}
-	return r.runSnapshotLocked(run), nil
+	return r.processSnapshotLocked(proc), nil
 }
 
-// Journal returns the run's current-revision journal as per-syscall entries:
+// Journal returns the process's current-revision journal as per-syscall entries:
 // each intent folded together with its completion, open intents rendered as
 // in-flight. Entry positions are intent-record positions in the hash-chained
 // journal.
-func (r *Runtime) Journal(runID string) ([]JournalEntry, error) {
+func (r *Runtime) Journal(processID string) ([]JournalEntry, error) {
 	r.mu.Lock()
-	run := r.runs[runID]
+	proc := r.processes[processID]
 	r.mu.Unlock()
-	if run == nil {
-		return nil, fmt.Errorf("%w: run %s", ErrNotFound, runID)
+	if proc == nil {
+		return nil, fmt.Errorf("%w: process %s", ErrNotFound, processID)
 	}
-	if run.journal == nil {
-		return nil, fmt.Errorf("%w: run %s has no readable journal", ErrNotFound, runID)
+	if proc.journal == nil {
+		return nil, fmt.Errorf("%w: process %s has no readable journal", ErrNotFound, processID)
 	}
-	return run.journal.entries()
+	return proc.journal.entries()
 }
 
-// JournalRevisions returns a per-revision snapshot of the run's journal.
+// JournalRevisions returns a per-revision snapshot of the process's journal.
 // For each revision r the snapshot contains, at every position, the record with
-// the highest revision ≤ r — i.e. the effective state of the run at that point.
+// the highest revision ≤ r — i.e. the effective state of the process at that point.
 // Each entry's Revision field reflects when it was first written, so callers can
 // distinguish steps carried forward from earlier revisions versus steps first
 // executed at revision r.
-func (r *Runtime) JournalRevisions(runID string) (map[uint64][]JournalEntry, error) {
+func (r *Runtime) JournalRevisions(processID string) (map[uint64][]JournalEntry, error) {
 	r.mu.Lock()
-	run := r.runs[runID]
+	proc := r.processes[processID]
 	r.mu.Unlock()
-	if run == nil {
-		return nil, fmt.Errorf("%w: run %s", ErrNotFound, runID)
+	if proc == nil {
+		return nil, fmt.Errorf("%w: process %s", ErrNotFound, processID)
 	}
-	if run.journal == nil {
-		return nil, fmt.Errorf("%w: run %s has no readable journal", ErrNotFound, runID)
+	if proc.journal == nil {
+		return nil, fmt.Errorf("%w: process %s has no readable journal", ErrNotFound, processID)
 	}
-	journal := run.journal
+	journal := proc.journal
 	revs := journal.history.allRevisions()
 	result := make(map[uint64][]JournalEntry, len(revs))
 	for _, rev := range revs {
-		view := newLogJournal(journal.log, journal.scope, journal.run, rev,
+		view := newLogJournal(journal.log, journal.scope, journal.proc, rev,
 			journal.history, journal.history.lengthAt(rev), journal.now, nil)
 		entries, err := view.entries()
 		if err != nil {
@@ -519,14 +520,14 @@ func (r *Runtime) JournalRevisions(runID string) (map[uint64][]JournalEntry, err
 	return result, nil
 }
 
-func (r *Runtime) Tasks(runID string) ([]TaskSnapshot, error) {
+func (r *Runtime) Tasks(processID string) ([]TaskSnapshot, error) {
 	r.mu.Lock()
-	run := r.runs[runID]
+	proc := r.processes[processID]
 	r.mu.Unlock()
-	if run == nil {
-		return nil, fmt.Errorf("%w: run %s", ErrNotFound, runID)
+	if proc == nil {
+		return nil, fmt.Errorf("%w: process %s", ErrNotFound, processID)
 	}
-	records, err := r.tasks.List(context.Background(), r.tenantID, runID)
+	records, err := r.tasks.List(context.Background(), r.tenantID, processID)
 	if err != nil {
 		return nil, err
 	}
@@ -568,175 +569,175 @@ func (r *Runtime) ResolveTask(taskID, token string, resolution task.Resolution) 
 	r.publish(record.Scope.SessionID, Event{Type: "task.updated", Data: r.taskSnapshot(record)})
 
 	r.mu.Lock()
-	run := r.runs[record.Scope.RunID]
-	shouldResume := run != nil && run.status == RunWaitingTask
+	proc := r.processes[record.Scope.ProcessID]
+	shouldResume := proc != nil && proc.status == ProcessWaitingTask
 	r.mu.Unlock()
 	if shouldResume {
-		if _, retryErr := r.Retry(record.Scope.RunID, RetryResume); retryErr != nil {
+		if _, retryErr := r.Retry(record.Scope.ProcessID, RetryResume); retryErr != nil {
 			return TaskSnapshot{}, retryErr
 		}
 	}
 	return r.taskSnapshot(record), nil
 }
 
-func (r *Runtime) Stop(runID string) (RunSnapshot, error) {
+func (r *Runtime) Stop(processID string) (ProcessSnapshot, error) {
 	r.mu.Lock()
-	run := r.runs[runID]
-	if run == nil {
+	proc := r.processes[processID]
+	if proc == nil {
 		r.mu.Unlock()
-		return RunSnapshot{}, fmt.Errorf("%w: run %s", ErrNotFound, runID)
+		return ProcessSnapshot{}, fmt.Errorf("%w: process %s", ErrNotFound, processID)
 	}
-	switch run.status {
-	case RunQueued:
-		run.stopRequested = true
-		run.status = RunStopping
-		run.updatedAt = r.now().UTC()
-		if run.stop != nil {
-			run.stop()
+	switch proc.status {
+	case ProcessQueued:
+		proc.stopRequested = true
+		proc.status = ProcessStopping
+		proc.updatedAt = r.now().UTC()
+		if proc.stop != nil {
+			proc.stop()
 		}
-	case RunRunning:
-		run.stopRequested = true
-		run.status = RunStopping
-		run.updatedAt = r.now().UTC()
-		if run.stop != nil {
-			run.stop()
+	case ProcessRunning:
+		proc.stopRequested = true
+		proc.status = ProcessStopping
+		proc.updatedAt = r.now().UTC()
+		if proc.stop != nil {
+			proc.stop()
 		}
-	case RunYielded, RunWaitingTask:
-		r.finishLocked(run, RunStopped, "", context.Canceled)
-	case RunStopping, RunStopped:
+	case ProcessYielded, ProcessWaitingTask:
+		r.finishLocked(proc, ProcessStopped, "", context.Canceled)
+	case ProcessStopping, ProcessStopped:
 	default:
 		r.mu.Unlock()
-		return RunSnapshot{}, fmt.Errorf("%w: run %s cannot be stopped from %s", ErrConflict, runID, run.status)
+		return ProcessSnapshot{}, fmt.Errorf("%w: process %s cannot be stopped from %s", ErrConflict, processID, proc.status)
 	}
-	snapshot := r.runSnapshotLocked(run)
-	_ = r.appendRun(run)
+	snapshot := r.processSnapshotLocked(proc)
+	_ = r.appendProcess(proc)
 	r.mu.Unlock()
-	r.publish(run.sessionID, Event{Type: "run.updated", Data: snapshot})
+	r.publish(proc.sessionID, Event{Type: "process.updated", Data: snapshot})
 	return snapshot, nil
 }
 
-func (r *Runtime) Retry(runID string, mode RetryMode) (RunSnapshot, error) {
+func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, error) {
 	if mode != RetryResume && mode != RetryRestart {
-		return RunSnapshot{}, fmt.Errorf("%w: retry mode must be resume or restart", ErrInvalid)
+		return ProcessSnapshot{}, fmt.Errorf("%w: retry mode must be resume or restart", ErrInvalid)
 	}
 
 	r.mu.Lock()
-	run := r.runs[runID]
-	if run == nil {
+	proc := r.processes[processID]
+	if proc == nil {
 		r.mu.Unlock()
-		return RunSnapshot{}, fmt.Errorf("%w: run %s", ErrNotFound, runID)
+		return ProcessSnapshot{}, fmt.Errorf("%w: process %s", ErrNotFound, processID)
 	}
-	switch run.status {
-	case RunYielded, RunWaitingTask, RunStopped, RunFailed, RunInterrupted:
-	case RunCompleted:
-		// A completed run has nothing to resume, but it can be restarted from
+	switch proc.status {
+	case ProcessYielded, ProcessWaitingTask, ProcessStopped, ProcessFailed, ProcessInterrupted:
+	case ProcessCompleted:
+		// A completed process has nothing to resume, but it can be restarted from
 		// scratch (re-run as a new copy-on-write revision). This also lets a
 		// parent restart cascade into already-completed children.
 		if mode != RetryRestart {
 			r.mu.Unlock()
-			return RunSnapshot{}, fmt.Errorf("%w: completed run %s can only be restarted, not resumed", ErrConflict, runID)
+			return ProcessSnapshot{}, fmt.Errorf("%w: completed process %s can only be restarted, not resumed", ErrConflict, processID)
 		}
 	default:
 		r.mu.Unlock()
-		return RunSnapshot{}, fmt.Errorf("%w: run %s cannot retry from %s", ErrConflict, runID, run.status)
+		return ProcessSnapshot{}, fmt.Errorf("%w: process %s cannot retry from %s", ErrConflict, processID, proc.status)
 	}
-	session := r.sessions[run.sessionID]
-	if run.parentRunID == "" {
-		// Root runs may only be retried if no later user-initiated run has arrived.
-		// Child runs that were added to the same session by delegation do not count.
+	session := r.sessions[proc.sessionID]
+	if proc.parentProcessID == "" {
+		// Root processes may only be retried if no later user-initiated process has arrived.
+		// Child processes that were added to the same session by delegation do not count.
 		lastRootID := ""
-		for i := len(session.runIDs) - 1; i >= 0; i-- {
-			if r.runs[session.runIDs[i]] != nil && r.runs[session.runIDs[i]].parentRunID == "" {
-				lastRootID = session.runIDs[i]
+		for i := len(session.processIDs) - 1; i >= 0; i-- {
+			if r.processes[session.processIDs[i]] != nil && r.processes[session.processIDs[i]].parentProcessID == "" {
+				lastRootID = session.processIDs[i]
 				break
 			}
 		}
-		if lastRootID == "" || lastRootID != run.id {
+		if lastRootID == "" || lastRootID != proc.id {
 			r.mu.Unlock()
-			return RunSnapshot{}, fmt.Errorf("%w: only the latest session run can be retried", ErrConflict)
+			return ProcessSnapshot{}, fmt.Errorf("%w: only the latest session process can be retried", ErrConflict)
 		}
 	}
-	// Allow cascade retry of a child while its parent holds activeRunID.
-	if session.activeRunID != "" && session.activeRunID != run.id &&
-		(run.parentRunID == "" || session.activeRunID != run.parentRunID) {
+	// Allow cascade retry of a child while its parent holds activeProcessID.
+	if session.activeProcessID != "" && session.activeProcessID != proc.id &&
+		(proc.parentProcessID == "" || session.activeProcessID != proc.parentProcessID) {
 		r.mu.Unlock()
-		return RunSnapshot{}, fmt.Errorf("%w: session already has active run %s", ErrConflict, session.activeRunID)
+		return ProcessSnapshot{}, fmt.Errorf("%w: session already has active process %s", ErrConflict, session.activeProcessID)
 	}
 
 	if mode == RetryRestart {
 		// Hard restart: always fork from the beginning (the agent.input step),
 		// giving the program a completely fresh revision with no shared prefix.
-		r.forkJournalLocked(run, 0, RetryRestart)
-	} else if run.status == RunYielded || run.status == RunWaitingTask {
+		r.forkJournalLocked(proc, 0, RetryRestart)
+	} else if proc.status == ProcessYielded || proc.status == ProcessWaitingTask {
 		// Resume from a park: no fork. The journal's open intent at the tail is
 		// re-driven by replay under its original idempotency key; a resolved
 		// task's stored authorization is injected by the task layer. When the
 		// park was a delegated child's approval, enable cascade reconnection so
 		// the re-executed delegation call reuses the now-finished child.
-		if run.reconnectChildren {
-			run.cascade = true
-			run.cascadeMode = RetryResume
-			run.cascadeCursor = childrenBefore(run.childSpawnOffsets, run.journal.Length())
+		if proc.reconnectChildren {
+			proc.cascade = true
+			proc.cascadeMode = RetryResume
+			proc.cascadeCursor = childrenBefore(proc.childSpawnOffsets, proc.journal.Length())
 		} else {
-			run.cascade = false
+			proc.cascade = false
 		}
 	} else {
 		// Failed/stopped/interrupted resume: fork at the end of the journal and
 		// let the program continue, replaying every recorded outcome including
-		// soft failures. A failed run only forks earlier when the program
+		// soft failures. A failed process only forks earlier when the program
 		// explicitly left a savepoint open: we fork right after the outermost
 		// still-open sys.begin so its whole body re-executes live under the
 		// bumped revision.
-		forkOffset := run.journal.Length()
-		if run.status == RunFailed {
-			if off, ok := run.journal.outermostOpenBegin(); ok {
+		forkOffset := proc.journal.Length()
+		if proc.status == ProcessFailed {
+			if off, ok := proc.journal.outermostOpenBegin(); ok {
 				forkOffset = off
 			}
 		}
-		r.forkJournalLocked(run, forkOffset, RetryResume)
+		r.forkJournalLocked(proc, forkOffset, RetryResume)
 	}
-	run.status = RunQueued
-	run.attempt++
-	run.answer = ""
-	run.err = ""
-	run.failure = nil
-	run.stopRequested = false
-	run.startedAt = nil
-	run.completedAt = nil
-	run.updatedAt = r.now().UTC()
-	session.activeRunID = run.id
-	session.updatedAt = run.updatedAt
-	if err := r.appendRun(run); err != nil {
+	proc.status = ProcessQueued
+	proc.attempt++
+	proc.answer = ""
+	proc.err = ""
+	proc.failure = nil
+	proc.stopRequested = false
+	proc.startedAt = nil
+	proc.completedAt = nil
+	proc.updatedAt = r.now().UTC()
+	session.activeProcessID = proc.id
+	session.updatedAt = proc.updatedAt
+	if err := r.appendProcess(proc); err != nil {
 		r.mu.Unlock()
-		return RunSnapshot{}, err
+		return ProcessSnapshot{}, err
 	}
-	snapshot := r.runSnapshotLocked(run)
+	snapshot := r.processSnapshotLocked(proc)
 	r.mu.Unlock()
 
-	r.publish(run.sessionID, Event{Type: "run.updated", Data: snapshot})
+	r.publish(proc.sessionID, Event{Type: "process.updated", Data: snapshot})
 	r.wg.Add(1)
-	go r.execute(runID)
+	go r.execute(processID)
 	return snapshot, nil
 }
 
-// forkJournalLocked re-forks run's journal at forkOffset as a new revision,
+// forkJournalLocked re-forks process's journal at forkOffset as a new revision,
 // records the retry mode for downstream cascade children, and positions the
 // cascade cursor. Must be called with the runtime mutex held.
-func (r *Runtime) forkJournalLocked(run *runState, forkOffset int, mode RetryMode) {
-	parent := run.journal
-	run.revision++
-	run.forkOffset = forkOffset
-	run.journal = newLogJournal(
-		parent.log, parent.scope, parent.run, run.revision,
+func (r *Runtime) forkJournalLocked(proc *processState, forkOffset int, mode RetryMode) {
+	parent := proc.journal
+	proc.revision++
+	proc.forkOffset = forkOffset
+	proc.journal = newLogJournal(
+		parent.log, parent.scope, parent.proc, proc.revision,
 		parent.history, forkOffset,
 		parent.now, parent.onAppend,
 	)
 	// Reuse the existing child subtree in spawn order (deep cascade resume).
 	// Children whose delegation call is replayed from the shared prefix are
 	// skipped; the cursor starts at the first child re-executed past the fork.
-	run.cascade = true
-	run.cascadeMode = mode
-	run.cascadeCursor = childrenBefore(run.childSpawnOffsets, forkOffset)
+	proc.cascade = true
+	proc.cascadeMode = mode
+	proc.cascadeCursor = childrenBefore(proc.childSpawnOffsets, forkOffset)
 }
 
 // childrenBefore counts the children whose delegation completion sits inside
@@ -791,9 +792,9 @@ func (r *Runtime) Close(ctx context.Context) error {
 	}
 	r.closed = true
 	stops := make([]func(), 0)
-	for _, run := range r.runs {
-		if run.stop != nil && (run.status == RunRunning || run.status == RunStopping || run.status == RunQueued) {
-			stops = append(stops, run.stop)
+	for _, proc := range r.processes {
+		if proc.stop != nil && (proc.status == ProcessRunning || proc.status == ProcessStopping || proc.status == ProcessQueued) {
+			stops = append(stops, proc.stop)
 		}
 	}
 	r.mu.Unlock()

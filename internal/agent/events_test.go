@@ -23,15 +23,15 @@ func TestFoldReconstructsLatestRunAndSessionState(t *testing.T) {
 	now := time.Unix(0, 0).UTC()
 
 	// Run goes running → completed; session state is derived from runs.
-	r1, _ := runStateEvent(now, StoredRun{
+	r1, _ := processStateEvent(now, StoredProcess{
 		TenantID: "t", ID: "run1", SessionID: "th1", Revision: 1,
-		Message: "hello", Status: RunRunning,
+		Message: "hello", Status: ProcessRunning,
 		CreatedAt: now, UpdatedAt: now,
 		Tags: map[string]string{"binding_ref": "ops"},
 	})
-	r2, _ := runStateEvent(now.Add(time.Second), StoredRun{
+	r2, _ := processStateEvent(now.Add(time.Second), StoredProcess{
 		TenantID: "t", ID: "run1", SessionID: "th1", Revision: 1,
-		Message: "hello", Status: RunCompleted, Answer: "done",
+		Message: "hello", Status: ProcessCompleted, Answer: "done",
 		CreatedAt: now, UpdatedAt: now.Add(time.Second),
 		Tags: map[string]string{"binding_ref": "ops"},
 	})
@@ -43,16 +43,16 @@ func TestFoldReconstructsLatestRunAndSessionState(t *testing.T) {
 		t.Fatalf("fold: %v", err)
 	}
 	// Completed run is terminal: no active run on the session.
-	if proj.Session.ActiveRunID != "" {
-		t.Fatalf("session active run = %q, want cleared (completed run is not active)", proj.Session.ActiveRunID)
+	if proj.Session.ActiveProcessID != "" {
+		t.Fatalf("session active proc = %q, want cleared (completed run is not active)", proj.Session.ActiveProcessID)
 	}
-	// Session identity and tags are derived from the run.
+	// Session identity and tags are derived from the proc.
 	if proj.Session.ID != "th1" || proj.Session.Tags["binding_ref"] != "ops" {
 		t.Fatalf("session = %+v, want id=th1 binding_ref=ops", proj.Session)
 	}
-	run := proj.Runs["run1"]
-	if run.Status != RunCompleted || run.Answer != "done" {
-		t.Fatalf("run folded to %+v, want completed/done", run)
+	proc := proj.Processes["run1"]
+	if proc.Status != ProcessCompleted || proc.Answer != "done" {
+		t.Fatalf("run folded to %+v, want completed/done", proc)
 	}
 }
 
@@ -61,7 +61,7 @@ func TestFoldTaskLifecycle(t *testing.T) {
 	scope := eventlog.Scope{TenantID: "t", SessionID: "th1"}
 	now := time.Unix(0, 0).UTC()
 	rec := task.Record{
-		Scope:     task.Scope{TenantID: "t", SessionID: "th1", RunID: "run1", Revision: 1},
+		Scope:     task.Scope{TenantID: "t", SessionID: "th1", ProcessID: "run1", Revision: 1},
 		ID:        "task1",
 		State:     task.StatePending,
 		TokenHash: []byte{1, 2, 3},

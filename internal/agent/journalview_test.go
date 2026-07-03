@@ -37,7 +37,7 @@ func TestLogJournalLinearRoundTrip(t *testing.T) {
 	log := newMemLog()
 	scope := eventlog.Scope{TenantID: "t", SessionID: "th"}
 	now := func() time.Time { return time.Unix(0, 0).UTC() }
-	j := newLogJournal(log, scope, "run1", 1, newRunHistory(), 0, now, nil)
+	j := newLogJournal(log, scope, "run1", 1, newProcessHistory(), 0, now, nil)
 
 	for _, n := range []string{"a", "b", "c"} {
 		syscall, result := pair(n, n)
@@ -74,7 +74,7 @@ func TestLogJournalForkSharesPrefixThenDiverges(t *testing.T) {
 	log := newMemLog()
 	scope := eventlog.Scope{TenantID: "t", SessionID: "th"}
 	now := func() time.Time { return time.Unix(0, 0).UTC() }
-	history := newRunHistory()
+	history := newProcessHistory()
 
 	base := newLogJournal(log, scope, "run1", 1, history, 0, now, nil)
 	for _, n := range []string{"a", "b", "c"} {
@@ -126,7 +126,7 @@ func TestLogJournalBacksTheKernelTape(t *testing.T) {
 	log := newMemLog()
 	scope := eventlog.Scope{TenantID: "t", SessionID: "th"}
 	now := func() time.Time { return time.Unix(0, 0).UTC() }
-	j := newLogJournal(log, scope, "run1", 1, newRunHistory(), 0, now, nil)
+	j := newLogJournal(log, scope, "run1", 1, newProcessHistory(), 0, now, nil)
 
 	tape, err := journaled.NewTape(j, testHeader())
 	if err != nil {
@@ -157,7 +157,7 @@ func TestLogJournalBacksTheKernelTape(t *testing.T) {
 	}
 
 	// A different program identity is refused up front.
-	if _, err := journaled.NewTape(j, journaled.Header{ABI: sys.ABIVersion, Program: "other", Run: "run1"}); err == nil {
+	if _, err := journaled.NewTape(j, journaled.Header{ABI: sys.ABIVersion, Program: "other", Process: "proc1"}); err == nil {
 		t.Fatal("expected ReplayIncompatibleError for a different program")
 	}
 }
@@ -168,7 +168,7 @@ func TestLogJournalOpenIntentEntry(t *testing.T) {
 	log := newMemLog()
 	scope := eventlog.Scope{TenantID: "t", SessionID: "th"}
 	now := func() time.Time { return time.Unix(0, 0).UTC() }
-	j := newLogJournal(log, scope, "run1", 1, newRunHistory(), 0, now, nil)
+	j := newLogJournal(log, scope, "run1", 1, newProcessHistory(), 0, now, nil)
 
 	syscall, result := pair("a", "a")
 	appendPair(t, j, syscall, result)

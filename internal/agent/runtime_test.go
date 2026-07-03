@@ -31,7 +31,7 @@ func (*runtimeDispatchers) Normalize(_ string, settings json.RawMessage) (json.R
 	return append(json.RawMessage(nil), settings...), nil
 }
 
-func (p *runtimeDispatchers) NewDispatcher(_ context.Context, _ RunContext, manifest Manifest) (sys.Dispatcher[RunContext], error) {
+func (p *runtimeDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, manifest Manifest) (sys.Dispatcher[ProcessContext], error) {
 	p.mu.Lock()
 	p.manifests = append(p.manifests, cloneManifest(manifest))
 	p.mu.Unlock()
@@ -49,7 +49,7 @@ type finalDispatcher struct{}
 
 func (finalDispatcher) Capabilities() []sys.Capability { return []sys.Capability{llmCapability()} }
 
-func (finalDispatcher) Dispatch(_ context.Context, _ RunContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
+func (finalDispatcher) Dispatch(_ context.Context, _ ProcessContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
 	if syscall.Name != "openai.chat" {
 		return sys.Fail("unsupported call: " + syscall.Name), nil
 	}
@@ -89,25 +89,25 @@ func (s *runtimeStore) Release(_ context.Context, tenant, kind, resource, holder
 	return nil
 }
 
-// seed appends run.state events so the runtime folds them on restore.
+// seed appends proc.state events so the runtime folds them on restore.
 // Session state is derived from the runs; no separate session event is needed.
-func (s *runtimeStore) seed(runs ...StoredRun) {
+func (s *runtimeStore) seed(runs ...StoredProcess) {
 	now := time.Now().UTC()
 	for _, r := range runs {
-		ev, _ := runStateEvent(now, r)
+		ev, _ := processStateEvent(now, r)
 		_, _ = s.log.Append(context.Background(), eventlog.Scope{TenantID: r.TenantID, SessionID: r.SessionID}, ev)
 	}
 }
 
 // minRev2Index returns the lowest journal record position that has a
 // revision-2 record, or -1 if none.
-func (s *runtimeStore) minRev2Index(runID string) int {
+func (s *runtimeStore) minRev2Index(processID string) int {
 	streams, _ := s.log.Streams(context.Background(), "local")
 	min := -1
 	for _, scope := range streams {
 		events, _ := s.log.Read(context.Background(), scope, 0)
 		for _, ev := range events {
-			if ev.Kind != evSyscall || ev.Run != runID || ev.Rev != 2 {
+			if ev.Kind != evSyscall || ev.Proc != processID || ev.Rev != 2 {
 				continue
 			}
 			var sd syscallRecordData
@@ -151,9 +151,9 @@ func TestNewRuntimeRequiresImplementationDependencies(t *testing.T) {
 }
 
 // journalNames projects a run's journal into its syscall names.
-func journalNames(t *testing.T, runtime *Runtime, runID string) []string {
+func journalNames(t *testing.T, runtime *Runtime, processID string) []string {
 	t.Helper()
-	entries, err := runtime.Journal(runID)
+	entries, err := runtime.Journal(processID)
 	if err != nil {
 		t.Fatalf("load journal: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestRuntimePassesManifestToDispatcherProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	run, err := runtime.CreateRun(session.ID, "finish", Manifest{
+	proc, err := runtime.CreateProcess(session.ID, "finish", Manifest{
 		Version: ManifestVersion,
 		Tools: []Tool{{
 			Name: "custom.call", Type: "core.custom", Settings: json.RawMessage(`{"value":2}`),
@@ -202,10 +202,10 @@ func TestRuntimePassesManifestToDispatcherProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
-	waitForStatus(t, runtime, run.ID, RunCompleted)
+	waitForStatus(t, runtime, proc.ID, ProcessCompleted)
 	// The program brackets its one turn in a sys.begin/sys.commit savepoint, so
 	// the journal narrative is input → begin → chat → commit → finish.
-	names := journalNames(t, runtime, run.ID)
+	names := journalNames(t, runtime, proc.ID)
 	want := []string{callAgentInput, sys.SyscallBegin, "openai.chat", sys.SyscallCommit, callAgentFinish}
 	if len(names) != len(want) {
 		t.Fatalf("journal = %v, want %v", names, want)
@@ -258,7 +258,7 @@ func TestRuntimeSetProgramsLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session (no programs): %v", err)
 	}
-	if _, err := runtime.CreateRun(emptyTh.ID, "task", Manifest{Version: ManifestVersion}); err == nil {
+	if _, err := runtime.CreateProcess(emptyTh.ID, "task", Manifest{Version: ManifestVersion}); err == nil {
 		t.Fatal("creating a run with no registered program should fail")
 	}
 
@@ -275,14 +275,14 @@ func TestRuntimeSetProgramsLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	run, err := runtime.CreateRun(session.ID, "finish", Manifest{
+	proc, err := runtime.CreateProcess(session.ID, "finish", Manifest{
 		Version: ManifestVersion,
 		Tools:   []Tool{{Name: "custom.call", Type: "core.custom", Settings: json.RawMessage(`{"value":1}`)}},
 	})
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
-	waitForStatus(t, runtime, run.ID, RunCompleted)
+	waitForStatus(t, runtime, proc.ID, ProcessCompleted)
 
 	// Re-applying the same set is a no-op; removing it leaves an empty registry.
 	if err := runtime.SetPrograms(context.Background(), []ProgramSource{{ID: "program@1", Wasm: wasm}}); err != nil {
@@ -317,24 +317,24 @@ func TestNewRuntimeRejectsInvalidProgramWasm(t *testing.T) {
 	}
 }
 
-func waitForStatus(t *testing.T, runtime *Runtime, runID string, want RunStatus) RunSnapshot {
+func waitForStatus(t *testing.T, runtime *Runtime, processID string, want ProcessStatus) ProcessSnapshot {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
-		run, err := runtime.GetRun(runID)
+		proc, err := runtime.GetProcess(processID)
 		if err != nil {
 			t.Fatalf("get run: %v", err)
 		}
-		if run.Status == want {
-			return run
+		if proc.Status == want {
+			return proc
 		}
-		if run.Status == RunFailed {
-			t.Fatalf("run failed: %s", run.Error)
+		if proc.Status == ProcessFailed {
+			t.Fatalf("run failed: %s", proc.Error)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("run did not reach %s", want)
-	return RunSnapshot{}
+	return ProcessSnapshot{}
 }
 
 func sequentialIDs() func(string) (string, error) {
@@ -399,7 +399,7 @@ func (cascadeDispatchers) Normalize(_ string, settings json.RawMessage) (json.Ra
 	return append(json.RawMessage(nil), settings...), nil
 }
 
-func (cascadeDispatchers) NewDispatcher(_ context.Context, _ RunContext, _ Manifest) (sys.Dispatcher[RunContext], error) {
+func (cascadeDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ Manifest) (sys.Dispatcher[ProcessContext], error) {
 	return cascadeDispatcher{}, nil
 }
 
@@ -414,7 +414,7 @@ func chatActions(actions string) sys.SyscallResult {
 	return sys.Result(payload)
 }
 
-func (cascadeDispatcher) Dispatch(_ context.Context, _ RunContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
+func (cascadeDispatcher) Dispatch(_ context.Context, _ ProcessContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
 	if syscall.Name != "openai.chat" {
 		return sys.Fail("unsupported call: " + syscall.Name), nil
 	}
@@ -466,29 +466,29 @@ func onlyChildRun(t *testing.T, r *Runtime, parentID string) string {
 	t.Helper()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	parent := r.runs[parentID]
-	if parent == nil || len(parent.childRunIDs) != 1 {
-		t.Fatalf("parent %q childRunIDs = %v, want exactly one", parentID, parentChildIDs(parent))
+	parent := r.processes[parentID]
+	if parent == nil || len(parent.childProcessIDs) != 1 {
+		t.Fatalf("parent %q childProcessIDs = %v, want exactly one", parentID, parentChildIDs(parent))
 	}
-	return parent.childRunIDs[0]
+	return parent.childProcessIDs[0]
 }
 
-func parentChildIDs(run *runState) []string {
-	if run == nil {
+func parentChildIDs(proc *processState) []string {
+	if proc == nil {
 		return nil
 	}
-	return run.childRunIDs
+	return proc.childProcessIDs
 }
 
-func runField(t *testing.T, r *Runtime, id string) (parentRunID string, attempt int) {
+func runField(t *testing.T, r *Runtime, id string) (parentProcessID string, attempt int) {
 	t.Helper()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	run := r.runs[id]
-	if run == nil {
+	proc := r.processes[id]
+	if proc == nil {
 		t.Fatalf("run %q not found", id)
 	}
-	return run.parentRunID, run.attempt
+	return proc.parentProcessID, proc.attempt
 }
 
 func TestRuntimeCascadeResumeReusesChildRun(t *testing.T) {
@@ -520,7 +520,7 @@ func TestRuntimeCascadeResumeReusesChildRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	run, err := runtime.CreateRun(session.ID, "parent task", Manifest{
+	proc, err := runtime.CreateProcess(session.ID, "parent task", Manifest{
 		Version: ManifestVersion,
 		Program: "program@1",
 		Tools:   []Tool{{Name: "child", Type: AgentToolType, Settings: json.RawMessage(`{"program":"program@1"}`)}},
@@ -528,40 +528,40 @@ func TestRuntimeCascadeResumeReusesChildRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
-	first := waitForStatus(t, runtime, run.ID, RunCompleted)
+	first := waitForStatus(t, runtime, proc.ID, ProcessCompleted)
 	if first.Answer != "parent-done" {
 		t.Fatalf("parent answer = %q, want parent-done", first.Answer)
 	}
 
 	// Addressability: the parent recorded exactly one child, and that child links
 	// back to the parent.
-	childID := onlyChildRun(t, runtime, run.ID)
+	childID := onlyChildRun(t, runtime, proc.ID)
 	childParent, childAttempt := runField(t, runtime, childID)
-	if childParent != run.ID {
-		t.Fatalf("child.parentRunID = %q, want %q", childParent, run.ID)
+	if childParent != proc.ID {
+		t.Fatalf("child.parentProcessID = %q, want %q", childParent, proc.ID)
 	}
 
 	// Call-graph projection: the parent run projects to a tree with the child
 	// beneath it, linked back to the parent.
-	graph, err := runtime.CallGraph(run.ID)
+	graph, err := runtime.CallGraph(proc.ID)
 	if err != nil {
 		t.Fatalf("call graph: %v", err)
 	}
-	if graph.RunID != run.ID || len(graph.Children) != 1 || graph.Children[0].RunID != childID {
-		t.Fatalf("call graph = %+v, want root %s with single child %s", graph, run.ID, childID)
+	if graph.ProcessID != proc.ID || len(graph.Children) != 1 || graph.Children[0].ProcessID != childID {
+		t.Fatalf("call graph = %+v, want root %s with single child %s", graph, proc.ID, childID)
 	}
-	if graph.Children[0].ParentID != run.ID {
-		t.Fatalf("child node ParentID = %q, want %q", graph.Children[0].ParentID, run.ID)
+	if graph.Children[0].ParentID != proc.ID {
+		t.Fatalf("child node ParentID = %q, want %q", graph.Children[0].ParentID, proc.ID)
 	}
 
 	// Deep cascade resume: restarting the parent must reuse and retry the same
 	// child run rather than spawning a fresh one.
-	if _, err := runtime.Retry(run.ID, RetryRestart); err != nil {
+	if _, err := runtime.Retry(proc.ID, RetryRestart); err != nil {
 		t.Fatalf("retry parent: %v", err)
 	}
-	waitForStatus(t, runtime, run.ID, RunCompleted)
+	waitForStatus(t, runtime, proc.ID, ProcessCompleted)
 
-	reusedChildID := onlyChildRun(t, runtime, run.ID)
+	reusedChildID := onlyChildRun(t, runtime, proc.ID)
 	if reusedChildID != childID {
 		t.Fatalf("cascade spawned a new child %q, want reuse of %q", reusedChildID, childID)
 	}
@@ -582,7 +582,7 @@ func (approvalDispatchers) Normalize(_ string, settings json.RawMessage) (json.R
 	return append(json.RawMessage(nil), settings...), nil
 }
 
-func (approvalDispatchers) NewDispatcher(_ context.Context, _ RunContext, _ Manifest) (sys.Dispatcher[RunContext], error) {
+func (approvalDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ Manifest) (sys.Dispatcher[ProcessContext], error) {
 	return approvalToolDispatcher{}, nil
 }
 
@@ -595,7 +595,7 @@ func (approvalToolDispatcher) Capabilities() []sys.Capability {
 	}
 }
 
-func (approvalToolDispatcher) Dispatch(_ context.Context, _ RunContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
+func (approvalToolDispatcher) Dispatch(_ context.Context, _ ProcessContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	switch syscall.Name {
 	case "tool.y":
 		if auth.Decision != sys.Approved {
@@ -622,7 +622,7 @@ func (approvalToolDispatcher) Dispatch(_ context.Context, _ RunContext, syscall 
 // TestRuntimeApprovalCycle drives the whole human-in-the-loop machinery end to
 // end: a guarded syscall yields, the run parks as waiting_for_task with a
 // durable task whose identity is the open journal intent, resolving the task
-// auto-resumes the run, replay re-drives the open intent with the stored
+// auto-resumes the proc, replay re-drives the open intent with the stored
 // resolution as its Authorization, and the run completes. A second identical
 // journal position is never re-executed — the completion replays from tape.
 func TestRuntimeApprovalCycle(t *testing.T) {
@@ -654,7 +654,7 @@ func TestRuntimeApprovalCycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	run, err := runtime.CreateRun(session.ID, "do the guarded thing", Manifest{
+	proc, err := runtime.CreateProcess(session.ID, "do the guarded thing", Manifest{
 		Version: ManifestVersion,
 		Program: "program@1",
 		Tools:   []Tool{{Name: "tool.y", Type: "core.custom"}},
@@ -663,8 +663,8 @@ func TestRuntimeApprovalCycle(t *testing.T) {
 		t.Fatalf("create run: %v", err)
 	}
 
-	waitForStatus(t, runtime, run.ID, RunWaitingTask)
-	tasks, err := runtime.Tasks(run.ID)
+	waitForStatus(t, runtime, proc.ID, ProcessWaitingTask)
+	tasks, err := runtime.Tasks(proc.ID)
 	if err != nil || len(tasks) != 1 {
 		t.Fatalf("tasks = %+v, err=%v", tasks, err)
 	}
@@ -683,19 +683,19 @@ func TestRuntimeApprovalCycle(t *testing.T) {
 		t.Fatalf("resolve: %v", err)
 	}
 
-	completed := waitForStatus(t, runtime, run.ID, RunCompleted)
+	completed := waitForStatus(t, runtime, proc.ID, ProcessCompleted)
 	if completed.Answer != "approved-done" {
 		t.Fatalf("answer = %q, want approved-done", completed.Answer)
 	}
 	// The approved execution was journaled once and marked executed.
-	tasks, _ = runtime.Tasks(run.ID)
+	tasks, _ = runtime.Tasks(proc.ID)
 	if len(tasks) != 1 || tasks[0].State != "executed" {
 		t.Fatalf("final task state = %+v", tasks)
 	}
 }
 
 // failingChildDispatchers makes a parent delegate once to a child whose program
-// then requests an unavailable capability, failing the child run.
+// then requests an unavailable capability, failing the child proc.
 type failingChildDispatchers struct{}
 
 func (failingChildDispatchers) Normalize(_ string, settings json.RawMessage) (json.RawMessage, error) {
@@ -705,7 +705,7 @@ func (failingChildDispatchers) Normalize(_ string, settings json.RawMessage) (js
 	return append(json.RawMessage(nil), settings...), nil
 }
 
-func (failingChildDispatchers) NewDispatcher(_ context.Context, _ RunContext, _ Manifest) (sys.Dispatcher[RunContext], error) {
+func (failingChildDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ Manifest) (sys.Dispatcher[ProcessContext], error) {
 	return failingChildDispatcher{}, nil
 }
 
@@ -715,7 +715,7 @@ func (failingChildDispatcher) Capabilities() []sys.Capability {
 	return []sys.Capability{llmCapability()}
 }
 
-func (failingChildDispatcher) Dispatch(_ context.Context, _ RunContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
+func (failingChildDispatcher) Dispatch(_ context.Context, _ ProcessContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
 	if syscall.Name != "openai.chat" {
 		return sys.Fail("unsupported call: " + syscall.Name), nil
 	}
@@ -765,7 +765,7 @@ func TestRuntimeChildFailurePropagatesToParent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	run, err := runtime.CreateRun(session.ID, "parent task", Manifest{
+	proc, err := runtime.CreateProcess(session.ID, "parent task", Manifest{
 		Version: ManifestVersion,
 		Program: "program@1",
 		Tools: []Tool{{
@@ -779,24 +779,24 @@ func TestRuntimeChildFailurePropagatesToParent(t *testing.T) {
 
 	// With OnFailurePropagate, the failed child fails the parent run rather than
 	// surfacing as a recoverable observation.
-	failed := waitForRunFailed(t, runtime, run.ID)
+	failed := waitForRunFailed(t, runtime, proc.ID)
 	if !strings.Contains(failed.Error, "child") {
 		t.Fatalf("parent error = %q, want it to mention the failed child", failed.Error)
 	}
-	// The failure came from a real delegated child run, not from the parent
+	// The failure came from a real delegated child proc, not from the parent
 	// program merely failing to see the delegation tool.
-	childID := onlyChildRun(t, runtime, run.ID)
-	child, err := runtime.GetRun(childID)
+	childID := onlyChildRun(t, runtime, proc.ID)
+	child, err := runtime.GetProcess(childID)
 	if err != nil {
 		t.Fatalf("get child: %v", err)
 	}
-	if child.Status != RunFailed {
+	if child.Status != ProcessFailed {
 		t.Fatalf("child status = %s, want failed", child.Status)
 	}
 }
 
 // failThenSucceedDispatchers drives a run that does a tool call, then on its
-// second turn requests an unavailable capability (failing the run) on the first
+// second turn requests an unavailable capability (failing the proc) on the first
 // attempt and finishes on the second. The shared counter persists across the
 // run's attempts.
 type failThenSucceedDispatchers struct {
@@ -811,7 +811,7 @@ func (*failThenSucceedDispatchers) Normalize(_ string, settings json.RawMessage)
 	return append(json.RawMessage(nil), settings...), nil
 }
 
-func (d *failThenSucceedDispatchers) NewDispatcher(_ context.Context, _ RunContext, _ Manifest) (sys.Dispatcher[RunContext], error) {
+func (d *failThenSucceedDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ Manifest) (sys.Dispatcher[ProcessContext], error) {
 	return &failThenSucceedDispatcher{parent: d}, nil
 }
 
@@ -828,7 +828,7 @@ func (d *failThenSucceedDispatcher) Capabilities() []sys.Capability {
 	}
 }
 
-func (d *failThenSucceedDispatcher) Dispatch(_ context.Context, _ RunContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
+func (d *failThenSucceedDispatcher) Dispatch(_ context.Context, _ ProcessContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
 	switch syscall.Name {
 	case "tool.x":
 		return sys.Result(json.RawMessage(`{"ok":true}`)), nil
@@ -861,26 +861,26 @@ func (d *failThenSucceedDispatcher) Dispatch(_ context.Context, _ RunContext, sy
 	}
 }
 
-// waitForRunFailed polls until the run reaches RunFailed, fataling if it
+// waitForRunFailed polls until the run reaches ProcessFailed, fataling if it
 // reaches any other terminal state first.
-func waitForRunFailed(t *testing.T, runtime *Runtime, runID string) RunSnapshot {
+func waitForRunFailed(t *testing.T, runtime *Runtime, processID string) ProcessSnapshot {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
-		snap, err := runtime.GetRun(runID)
+		snap, err := runtime.GetProcess(processID)
 		if err != nil {
 			t.Fatalf("get run: %v", err)
 		}
 		switch snap.Status {
-		case RunFailed:
+		case ProcessFailed:
 			return snap
-		case RunCompleted, RunStopped:
-			t.Fatalf("run reached %s, expected RunFailed", snap.Status)
+		case ProcessCompleted, ProcessStopped:
+			t.Fatalf("run reached %s, expected ProcessFailed", snap.Status)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("run did not reach RunFailed within timeout")
-	return RunSnapshot{}
+	t.Fatal("run did not reach ProcessFailed within timeout")
+	return ProcessSnapshot{}
 }
 
 // cascadeResumeDispatchers drives a parent that delegates to a child with
@@ -901,7 +901,7 @@ func (*cascadeResumeDispatchers) Normalize(_ string, settings json.RawMessage) (
 	return append(json.RawMessage(nil), settings...), nil
 }
 
-func (d *cascadeResumeDispatchers) NewDispatcher(_ context.Context, _ RunContext, _ Manifest) (sys.Dispatcher[RunContext], error) {
+func (d *cascadeResumeDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ Manifest) (sys.Dispatcher[ProcessContext], error) {
 	return &cascadeResumeDispatcherImpl{parent: d}, nil
 }
 
@@ -918,7 +918,7 @@ func (d *cascadeResumeDispatcherImpl) Capabilities() []sys.Capability {
 	}
 }
 
-func (d *cascadeResumeDispatcherImpl) Dispatch(_ context.Context, _ RunContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
+func (d *cascadeResumeDispatcherImpl) Dispatch(_ context.Context, _ ProcessContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
 	switch syscall.Name {
 	case "tool.x":
 		return sys.Result(json.RawMessage(`{"ok":true}`)), nil
@@ -986,7 +986,7 @@ func TestRuntimeCascadeResumeUsesResumeModeForFailedChild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	run, err := runtime.CreateRun(session.ID, "parent task", Manifest{
+	proc, err := runtime.CreateProcess(session.ID, "parent task", Manifest{
 		Version: ManifestVersion,
 		Program: "program@1",
 		Tools: []Tool{{
@@ -1001,15 +1001,15 @@ func TestRuntimeCascadeResumeUsesResumeModeForFailedChild(t *testing.T) {
 	}
 
 	// Attempt 1: child fails → parent fails via OnFailurePropagate.
-	waitForRunFailed(t, runtime, run.ID)
-	childID := onlyChildRun(t, runtime, run.ID)
+	waitForRunFailed(t, runtime, proc.ID)
+	childID := onlyChildRun(t, runtime, proc.ID)
 
 	// Resume parent: the cascade must propagate RetryResume to the child so the
 	// child replays its shared prefix rather than restarting from scratch.
-	if _, err := runtime.Retry(run.ID, RetryResume); err != nil {
+	if _, err := runtime.Retry(proc.ID, RetryResume); err != nil {
 		t.Fatalf("retry parent: %v", err)
 	}
-	completed := waitForStatus(t, runtime, run.ID, RunCompleted)
+	completed := waitForStatus(t, runtime, proc.ID, ProcessCompleted)
 	if completed.Answer != "parent-done" {
 		t.Fatalf("parent answer = %q, want parent-done", completed.Answer)
 	}
@@ -1054,7 +1054,7 @@ func TestRuntimeHardRetryForksFromBeginning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	run, err := runtime.CreateRun(session.ID, "task", Manifest{
+	proc, err := runtime.CreateProcess(session.ID, "task", Manifest{
 		Version: ManifestVersion,
 		Program: "program@1",
 		Tools:   []Tool{{Name: "tool.x", Type: "core.custom"}},
@@ -1062,16 +1062,16 @@ func TestRuntimeHardRetryForksFromBeginning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
-	failed := waitForRunFailed(t, runtime, run.ID)
+	failed := waitForRunFailed(t, runtime, proc.ID)
 	if failed.Error == "" {
 		t.Fatal("expected a failure error")
 	}
 
 	// Hard retry always forks from the beginning (agent.input step, no shared prefix).
-	if _, err := runtime.Retry(run.ID, RetryRestart); err != nil {
+	if _, err := runtime.Retry(proc.ID, RetryRestart); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
-	recovered := waitForStatus(t, runtime, run.ID, RunCompleted)
+	recovered := waitForStatus(t, runtime, proc.ID, ProcessCompleted)
 	if recovered.Answer != "recovered" {
 		t.Fatalf("answer = %q, want recovered", recovered.Answer)
 	}
@@ -1081,18 +1081,18 @@ func TestRuntimeHardRetryForksFromBeginning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("session graph: %v", err)
 	}
-	if len(graph.Runs) != 1 {
-		t.Fatalf("graph runs = %d, want 1", len(graph.Runs))
+	if len(graph.Processes) != 1 {
+		t.Fatalf("graph runs = %d, want 1", len(graph.Processes))
 	}
-	gr := graph.Runs[0]
+	gr := graph.Processes[0]
 	if gr.CurrentRevision != 2 {
 		t.Fatalf("current revision = %d, want 2", gr.CurrentRevision)
 	}
-	forkIdx := store.minRev2Index(gr.RunID)
+	forkIdx := store.minRev2Index(gr.ProcessID)
 	if forkIdx != 0 {
 		t.Fatalf("fork index = %d, want 0 (hard retry always restarts from the beginning)", forkIdx)
 	}
-	// Both revisions should have entries (old run is preserved in the log; new run
+	// Both revisions should have entries (old revision is preserved in the log; new process
 	// re-ran everything from scratch).
 	var rev1Count, rev2Count int
 	for _, e := range gr.Entries {

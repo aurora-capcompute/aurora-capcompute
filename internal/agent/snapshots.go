@@ -1,6 +1,6 @@
 package agent
 
-// Read projections: the *Locked helpers that fold in-memory session and run state
+// Read projections: the *Locked helpers that fold in-memory session and process state
 // into the immutable snapshots the public API returns, plus the small pure
 // helpers (titles, visible capabilities, defensive copies) they lean on.
 
@@ -17,13 +17,13 @@ import (
 
 func (r *Runtime) sessionSummaryLocked(session *sessionState) SessionSummary {
 	return SessionSummary{
-		ID:          session.id,
-		Title:       session.title,
-		CreatedAt:   session.createdAt,
-		UpdatedAt:   session.updatedAt,
-		RunCount:    len(session.runIDs),
-		ActiveRunID: session.activeRunID,
-		Tags:        cloneTags(session.tags),
+		ID:              session.id,
+		Title:           session.title,
+		CreatedAt:       session.createdAt,
+		UpdatedAt:       session.updatedAt,
+		ProcessCount:    len(session.processIDs),
+		ActiveProcessID: session.activeProcessID,
+		Tags:            cloneTags(session.tags),
 	}
 }
 
@@ -41,47 +41,47 @@ func sessionTitle(message string) string {
 }
 
 func (r *Runtime) sessionSnapshotLocked(session *sessionState) SessionSnapshot {
-	runs := make([]RunSnapshot, 0, len(session.runIDs))
-	for _, runID := range session.runIDs {
-		if run := r.runs[runID]; run != nil {
-			runs = append(runs, r.runSnapshotLocked(run))
+	procs := make([]ProcessSnapshot, 0, len(session.processIDs))
+	for _, processID := range session.processIDs {
+		if proc := r.processes[processID]; proc != nil {
+			procs = append(procs, r.processSnapshotLocked(proc))
 		}
 	}
 	return SessionSnapshot{
 		SessionSummary: r.sessionSummaryLocked(session),
 		History:        append([]HistoryMessage(nil), session.history...),
-		Runs:           runs,
+		Processes:      procs,
 	}
 }
 
-func (r *Runtime) runSnapshotLocked(run *runState) RunSnapshot {
+func (r *Runtime) processSnapshotLocked(proc *processState) ProcessSnapshot {
 	journalLength := 0
-	if run.journal != nil {
-		journalLength = run.journal.Length()
+	if proc.journal != nil {
+		journalLength = proc.journal.Length()
 	}
-	return RunSnapshot{
-		ID:            run.id,
-		SessionID:     run.sessionID,
-		Message:       run.message,
-		Status:        run.status,
-		Attempt:       run.attempt,
-		Revision:      run.revision,
-		Answer:        run.answer,
-		Error:         run.err,
+	return ProcessSnapshot{
+		ID:            proc.id,
+		SessionID:     proc.sessionID,
+		Message:       proc.message,
+		Status:        proc.status,
+		Attempt:       proc.attempt,
+		Revision:      proc.revision,
+		Answer:        proc.answer,
+		Error:         proc.err,
 		JournalLength: journalLength,
-		CreatedAt:     run.createdAt,
-		UpdatedAt:     run.updatedAt,
-		StartedAt:     copyTime(run.startedAt),
-		CompletedAt:   copyTime(run.completedAt),
-		Manifest:      cloneManifest(run.manifest),
-		ProgramDigest: run.programDigest,
+		CreatedAt:     proc.createdAt,
+		UpdatedAt:     proc.updatedAt,
+		StartedAt:     copyTime(proc.startedAt),
+		CompletedAt:   copyTime(proc.completedAt),
+		Manifest:      cloneManifest(proc.manifest),
+		ProgramDigest: proc.programDigest,
 	}
 }
 
 func (r *Runtime) taskSnapshot(record task.Record) TaskSnapshot {
 	return TaskSnapshot{
 		ID:              record.ID,
-		RunID:           record.Scope.RunID,
+		ProcessID:       record.Scope.ProcessID,
 		Revision:        record.Scope.Revision,
 		JournalPosition: record.JournalPosition,
 		Syscall:         record.Syscall.Copy(),
@@ -126,47 +126,47 @@ func visibleCapabilities(caps []sys.Capability) []sys.Capability {
 	return visible
 }
 
-func (r *Runtime) runContext(run *runState) RunContext {
+func (r *Runtime) processContext(proc *processState) ProcessContext {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.runContextLocked(run)
+	return r.processContextLocked(proc)
 }
 
-func (r *Runtime) runContextLocked(run *runState) RunContext {
-	return RunContext{
+func (r *Runtime) processContextLocked(proc *processState) ProcessContext {
+	return ProcessContext{
 		TenantID:  r.tenantID,
-		SessionID: run.sessionID,
-		RunID:     run.id,
-		Revision:  run.revision,
+		SessionID: proc.sessionID,
+		ProcessID: proc.id,
+		Revision:  proc.revision,
 	}
 }
 
-func (r *Runtime) storedRunLocked(run *runState) StoredRun {
+func (r *Runtime) storedProcessLocked(proc *processState) StoredProcess {
 	var tags map[string]string
-	if session := r.sessions[run.sessionID]; session != nil {
+	if session := r.sessions[proc.sessionID]; session != nil {
 		tags = cloneTags(session.tags)
 	}
-	return StoredRun{
+	return StoredProcess{
 		TenantID:          r.tenantID,
-		ID:                run.id,
-		SessionID:         run.sessionID,
-		Revision:          run.revision,
-		Message:           run.message,
-		Status:            run.status,
-		Attempt:           run.attempt,
-		CreatedAt:         run.createdAt,
-		UpdatedAt:         run.updatedAt,
-		StartedAt:         copyTime(run.startedAt),
-		CompletedAt:       copyTime(run.completedAt),
-		Answer:            run.answer,
-		Error:             run.err,
-		Manifest:          cloneManifest(run.manifest),
-		ProgramDigest:     run.programDigest,
+		ID:                proc.id,
+		SessionID:         proc.sessionID,
+		Revision:          proc.revision,
+		Message:           proc.message,
+		Status:            proc.status,
+		Attempt:           proc.attempt,
+		CreatedAt:         proc.createdAt,
+		UpdatedAt:         proc.updatedAt,
+		StartedAt:         copyTime(proc.startedAt),
+		CompletedAt:       copyTime(proc.completedAt),
+		Answer:            proc.answer,
+		Error:             proc.err,
+		Manifest:          cloneManifest(proc.manifest),
+		ProgramDigest:     proc.programDigest,
 		Tags:              tags,
-		ParentRunID:       run.parentRunID,
-		ChildRunIDs:       append([]string(nil), run.childRunIDs...),
-		ChildSpawnOffsets: append([]int(nil), run.childSpawnOffsets...),
-		ForkOffset:        run.forkOffset,
+		ParentProcessID:   proc.parentProcessID,
+		ChildProcessIDs:   append([]string(nil), proc.childProcessIDs...),
+		ChildSpawnOffsets: append([]int(nil), proc.childSpawnOffsets...),
+		ForkOffset:        proc.forkOffset,
 	}
 }
 

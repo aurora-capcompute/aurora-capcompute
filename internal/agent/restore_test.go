@@ -26,9 +26,9 @@ func TestRestoreQuarantinesStaleManifests(t *testing.T) {
 	store := newRuntimeStore()
 	now := time.Now().UTC().Add(-time.Hour)
 	store.seed(
-		StoredRun{
+		StoredProcess{
 			TenantID: "local", ID: "run_old", SessionID: "ses_old", Revision: 1,
-			Message: "old work", Status: RunFailed,
+			Message: "old work", Status: ProcessFailed,
 			CreatedAt: now, UpdatedAt: now,
 			Manifest: Manifest{
 				Version: ManifestVersion,
@@ -57,7 +57,7 @@ func TestRestoreQuarantinesStaleManifests(t *testing.T) {
 	})
 
 	// The quarantined run is visible with its manifest intact.
-	snap, err := runtime.GetRun("run_old")
+	snap, err := runtime.GetProcess("run_old")
 	if err != nil {
 		t.Fatalf("get quarantined run: %v", err)
 	}
@@ -67,8 +67,8 @@ func TestRestoreQuarantinesStaleManifests(t *testing.T) {
 
 	// Re-driving it fails at manifest/driver build, not silently.
 	if _, err := runtime.Retry("run_old", RetryRestart); err == nil {
-		run := waitForRunFailed(t, runtime, "run_old")
-		if run.Error == "" {
+		proc := waitForRunFailed(t, runtime, "run_old")
+		if proc.Error == "" {
 			t.Fatal("retried quarantined run finished without an error")
 		}
 	}
