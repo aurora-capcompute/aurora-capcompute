@@ -193,16 +193,25 @@ func (r *Runtime) hasAbortTail(processID string) bool {
 	return ok
 }
 
+// errRollbackParked marks a rollback suspended on a human: an inverse yielded,
+// its durable task is pending, and the open compensation intent at the journal
+// tail is the park. Resolving the task resumes settlement.
+var errRollbackParked = errors.New("rollback parked on an external task")
+
 // settleAbort drives an aborted process to its post-rollback state: it executes
 // the remaining registered compensations newest-first (resuming any compensation
 // a crash left open, under its original idempotency key), then applies the
 // abort's retry policy — re-run the section now, park on a durable retry timer,
-// or finish as compensated. A compensation that fails semantically stops the
-// rollback and fails the process with the rollback report: the remaining undos
-// need a human, and the journal is the remediation map. settleAbort is
-// idempotent — every step is journaled before it executes, so calling it again
-// (after a crash, or a manual retry of a failed rollback) continues where the
-// last attempt stopped.
+// or finish as compensated. Inverses dispatch through the task layer, so an
+// undo that needs sign-off yields into a durable task like any forward call:
+// the rollback parks, the human is the terminal compensator inside it, and the
+// resolution resumes settlement (approved executes the inverse; denied fails
+// the rollback). A compensation that fails semantically stops the rollback and
+// fails the process with the rollback report: the remaining undos need a
+// human, and the journal is the remediation map. settleAbort is idempotent —
+// every step is journaled before it executes, so calling it again (after a
+// crash, a resolution, or a manual retry of a failed rollback) continues where
+// the last attempt stopped.
 func (r *Runtime) settleAbort(processID string) {
 	r.mu.Lock()
 	proc := r.processes[processID]
@@ -229,6 +238,20 @@ func (r *Runtime) settleAbort(processID string) {
 		r.finish(processID, ProcessFailed, "", fmt.Errorf("rollback: %w", err))
 		return
 	}
+	// The task layer over the same journal: a yielding inverse becomes a
+	// durable task whose identity is the open compensation intent at the tail —
+	// the same position trick forward calls use, so approval composes for free.
+	chain := &task.Dispatcher[ProcessContext]{
+		Next:        drivers,
+		Store:       r.tasks,
+		Journal:     journal,
+		Scope:       ProcessContext.taskScope,
+		TokenSecret: append([]byte(nil), r.taskSecret...),
+		TaskTTL:     r.taskTTL,
+		OnTaskCreated: func(record task.Record) {
+			r.publish(record.Scope.SessionID, Event{Type: "task.created", Data: r.taskSnapshot(record)})
+		},
+	}
 	compensator, err := journaled.NewCompensator(journal)
 	if err != nil {
 		r.finish(processID, ProcessFailed, "", fmt.Errorf("rollback: %w", err))
@@ -246,11 +269,16 @@ func (r *Runtime) settleAbort(processID string) {
 
 	var undone []string
 	dispatchInverse := func(inverse sys.Syscall, key string) error {
-		result, err := drivers.Dispatch(sys.WithIdempotencyKey(ctx, key), cred, inverse, sys.Authorization{})
+		result, err := chain.Dispatch(sys.WithIdempotencyKey(ctx, key), cred, inverse, sys.Authorization{})
 		if err != nil {
 			// Infrastructure error: the intent stays open in the journal; a
 			// later settle resumes it under the same idempotency key.
 			return fmt.Errorf("%s: %w", inverse.Name, err)
+		}
+		if result.Status() == sys.StatusYield {
+			// The inverse needs a human: its durable task is pending and the
+			// compensation intent stays open — the park. Do not commit.
+			return errRollbackParked
 		}
 		if commitErr := compensator.Commit(result); commitErr != nil {
 			return fmt.Errorf("%s: record compensation: %w", inverse.Name, commitErr)
@@ -261,10 +289,17 @@ func (r *Runtime) settleAbort(processID string) {
 		undone = append(undone, inverse.Name)
 		return nil
 	}
+	settleStopped := func(err error) {
+		if errors.Is(err, errRollbackParked) {
+			r.finish(processID, ProcessWaitingTask, "", nil)
+			return
+		}
+		r.finish(processID, ProcessFailed, rollbackReport(state, undone), fmt.Errorf("rollback stopped: %w", err))
+	}
 
 	if state.Resume != nil {
 		if err := dispatchInverse(state.Resume.Syscall, state.Resume.Key); err != nil {
-			r.finish(processID, ProcessFailed, rollbackReport(state, undone), fmt.Errorf("rollback stopped: %w", err))
+			settleStopped(err)
 			return
 		}
 		state.Compensated[state.Resume.Compensates] = true
@@ -277,11 +312,11 @@ func (r *Runtime) settleAbort(processID string) {
 		inverse := sys.Syscall{Abi: sys.ABIVersion, Name: reg.Name, Args: reg.Args}
 		key, err := compensator.Begin(inverse, reg.Position)
 		if err != nil {
-			r.finish(processID, ProcessFailed, rollbackReport(state, undone), fmt.Errorf("rollback stopped: %w", err))
+			settleStopped(err)
 			return
 		}
 		if err := dispatchInverse(inverse, key); err != nil {
-			r.finish(processID, ProcessFailed, rollbackReport(state, undone), fmt.Errorf("rollback stopped: %w", err))
+			settleStopped(err)
 			return
 		}
 	}

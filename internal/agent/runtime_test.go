@@ -1134,6 +1134,9 @@ type compensationDispatcher struct {
 	abortContent string
 	// failRefundsOnce makes the first billing.refund dispatch fail semantically.
 	failRefundsOnce bool
+	// guardRefunds makes billing.refund yield until dispatched with an approved
+	// Authorization — the sign-off-gated undo.
+	guardRefunds bool
 
 	mu         sync.Mutex
 	charges    int
@@ -1149,7 +1152,7 @@ func (d *compensationDispatcher) Capabilities() []sys.Capability {
 	}
 }
 
-func (d *compensationDispatcher) Dispatch(_ context.Context, _ ProcessContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
+func (d *compensationDispatcher) Dispatch(_ context.Context, _ ProcessContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	switch syscall.Name {
 	case "billing.charge":
 		d.mu.Lock()
@@ -1158,6 +1161,10 @@ func (d *compensationDispatcher) Dispatch(_ context.Context, _ ProcessContext, s
 		return sys.Result(json.RawMessage(`{"charge_id":"c1"}`)), nil
 	case "billing.refund":
 		d.mu.Lock()
+		if d.guardRefunds && auth.Decision != sys.Approved {
+			d.mu.Unlock()
+			return sys.Yield("Approve the refund"), nil
+		}
 		if d.failRefundsOnce {
 			d.failRefundsOnce = false
 			d.mu.Unlock()
@@ -1385,5 +1392,90 @@ func TestFailedCompensationFailsThenResumes(t *testing.T) {
 	}
 	if !strings.Contains(final.Answer, "billing.refund") {
 		t.Fatalf("final report = %q", final.Answer)
+	}
+}
+
+// TestRollbackParksForApproval: an undo that needs sign-off yields into a
+// durable task mid-rollback; the rollback parks, approval executes the inverse
+// with the stored authorization, and settlement resumes to compensated — the
+// human as terminal compensator inside the rollback.
+func TestRollbackParksForApproval(t *testing.T) {
+	disp := &compensationDispatcher{
+		abortContent: `{"reason":"could not confirm the order"}`,
+		guardRefunds: true,
+	}
+	runtime := newCompensationRuntime(t, disp)
+	proc := startCompensationProcess(t, runtime)
+
+	waitForStatus(t, runtime, proc.ID, ProcessWaitingTask)
+	tasks, err := runtime.Tasks(proc.ID)
+	if err != nil {
+		t.Fatalf("tasks: %v", err)
+	}
+	var approval *TaskSnapshot
+	for i := range tasks {
+		if tasks[i].State == task.StatePending && tasks[i].Syscall.Name == "billing.refund" {
+			approval = &tasks[i]
+		}
+	}
+	if approval == nil {
+		t.Fatalf("no pending refund approval task: %+v", tasks)
+	}
+	if approval.Summary != "Approve the refund" {
+		t.Fatalf("task summary = %q", approval.Summary)
+	}
+
+	if _, err := runtime.ResolveTask(approval.ID, approval.ResolutionToken, task.Resolution{
+		Decision: task.StateApproved, Actor: "human",
+	}); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	final := waitForStatus(t, runtime, proc.ID, ProcessCompensated)
+
+	disp.mu.Lock()
+	refunds := disp.refunds
+	disp.mu.Unlock()
+	if refunds != 1 {
+		t.Fatalf("refunds = %d, want 1 (executed once, after approval)", refunds)
+	}
+	if !strings.Contains(final.Answer, "billing.refund") {
+		t.Fatalf("rollback report = %q", final.Answer)
+	}
+}
+
+// TestRollbackDeniedApprovalFails: denying the undo's sign-off stops the
+// rollback — the terminal compensator said no — and the process fails with the
+// report naming the outstanding undo.
+func TestRollbackDeniedApprovalFails(t *testing.T) {
+	disp := &compensationDispatcher{
+		abortContent: `{"reason":"could not confirm the order"}`,
+		guardRefunds: true,
+	}
+	runtime := newCompensationRuntime(t, disp)
+	proc := startCompensationProcess(t, runtime)
+
+	waitForStatus(t, runtime, proc.ID, ProcessWaitingTask)
+	tasks, err := runtime.Tasks(proc.ID)
+	if err != nil || len(tasks) == 0 {
+		t.Fatalf("tasks = %+v, err=%v", tasks, err)
+	}
+	pending := tasks[len(tasks)-1]
+	if _, err := runtime.ResolveTask(pending.ID, pending.ResolutionToken, task.Resolution{
+		Decision: task.StateDenied, Actor: "human", Reason: "keep the charge",
+	}); err != nil {
+		t.Fatalf("deny: %v", err)
+	}
+	failed := waitForStatus(t, runtime, proc.ID, ProcessFailed)
+	if !strings.Contains(failed.Error, "billing.refund") {
+		t.Fatalf("failure = %q, want the denied undo named", failed.Error)
+	}
+	if !strings.Contains(failed.Answer, "outstanding: billing.refund") {
+		t.Fatalf("report = %q", failed.Answer)
+	}
+	disp.mu.Lock()
+	refunds := disp.refunds
+	disp.mu.Unlock()
+	if refunds != 0 {
+		t.Fatalf("refunds = %d, want 0 (the human said no)", refunds)
 	}
 }
