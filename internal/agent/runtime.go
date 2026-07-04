@@ -121,14 +121,7 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		Tasks:      runtime.tasks,
 		TaskSecret: runtime.taskSecret,
 		TaskTTL:    runtime.taskTTL,
-		TaskScope: func(cred ProcessContext) task.Scope {
-			return task.Scope{
-				TenantID:  cred.TenantID,
-				SessionID: cred.SessionID,
-				ProcessID: cred.ProcessID,
-				Revision:  cred.Revision,
-			}
-		},
+		TaskScope:  ProcessContext.taskScope,
 		OnTaskCreated: func(record task.Record) {
 			runtime.publish(record.Scope.SessionID, Event{
 				Type: "task.created",
@@ -727,6 +720,13 @@ func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, erro
 		}
 		r.forkJournalLocked(proc, forkOffset, RetryResume)
 	}
+	return r.relaunchLocked(proc)
+}
+
+// relaunchLocked resets a process for a fresh quantum and starts it: queued,
+// attempt bumped, terminal fields cleared, its session made active, and the
+// transition appended and published. Called with r.mu held; unlocks it.
+func (r *Runtime) relaunchLocked(proc *processState) (ProcessSnapshot, error) {
 	proc.status = ProcessQueued
 	proc.attempt++
 	proc.answer = ""
@@ -736,16 +736,19 @@ func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, erro
 	proc.startedAt = nil
 	proc.completedAt = nil
 	proc.updatedAt = r.now().UTC()
-	session.activeProcessID = proc.id
-	session.updatedAt = proc.updatedAt
+	if session := r.sessions[proc.sessionID]; session != nil {
+		session.activeProcessID = proc.id
+		session.updatedAt = proc.updatedAt
+	}
 	if err := r.appendProcess(proc); err != nil {
 		r.mu.Unlock()
 		return ProcessSnapshot{}, err
 	}
 	snapshot := r.processSnapshotLocked(proc)
+	sessionID, processID := proc.sessionID, proc.id
 	r.mu.Unlock()
 
-	r.publish(proc.sessionID, Event{Type: "process.updated", Data: snapshot})
+	r.publish(sessionID, Event{Type: "process.updated", Data: snapshot})
 	r.wg.Add(1)
 	go r.execute(processID)
 	return snapshot, nil

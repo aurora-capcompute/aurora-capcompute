@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -236,12 +237,12 @@ func (r *Runtime) settleAbort(processID string) {
 	// Effects arms the compensator's pending state and surfaces a compensation
 	// a crash left open; the effect list itself is unused — the rollback plan is
 	// the guest's registrations, not the executed effects.
-	if _, resume, err := compensator.Effects(0); err != nil {
+	_, resume, err := compensator.Effects(0)
+	if err != nil {
 		r.finish(processID, ProcessFailed, "", fmt.Errorf("rollback: %w", err))
 		return
-	} else {
-		state.Resume = resume
 	}
+	state.Resume = resume
 
 	var undone []string
 	dispatchInverse := func(inverse sys.Syscall, key string) error {
@@ -331,27 +332,9 @@ func (r *Runtime) retrySection(processID string, forkOffset int) {
 		return
 	}
 	r.forkJournalLocked(proc, forkOffset, RetryResume)
-	proc.status = ProcessQueued
-	proc.attempt++
-	proc.answer = ""
-	proc.err = ""
-	proc.failure = nil
-	proc.stopRequested = false
-	proc.startedAt = nil
-	proc.completedAt = nil
-	proc.updatedAt = r.now().UTC()
-	if session := r.sessions[proc.sessionID]; session != nil {
-		session.activeProcessID = proc.id
-		session.updatedAt = proc.updatedAt
+	if _, err := r.relaunchLocked(proc); err != nil {
+		slog.Warn("abort retry relaunch", "process_id", processID, "error", err)
 	}
-	_ = r.appendProcess(proc)
-	snapshot := r.processSnapshotLocked(proc)
-	sessionID := proc.sessionID
-	r.mu.Unlock()
-
-	r.publish(sessionID, Event{Type: "process.updated", Data: snapshot})
-	r.wg.Add(1)
-	go r.execute(processID)
 }
 
 // parkForRetry authors the durable retry timer: a pending timer.set task whose
@@ -373,12 +356,7 @@ func (r *Runtime) parkForRetry(ctx context.Context, cred ProcessContext, state *
 	now := r.now().UTC()
 	expires := now.Add(delay + r.taskTTL)
 	record := task.Record{
-		Scope: task.Scope{
-			TenantID:  cred.TenantID,
-			SessionID: cred.SessionID,
-			ProcessID: cred.ProcessID,
-			Revision:  cred.Revision,
-		},
+		Scope:           cred.taskScope(),
 		ID:              taskID,
 		JournalPosition: state.Position,
 		Syscall:         sys.Syscall{Abi: sys.ABIVersion, Name: abortRetryCall, Args: args},

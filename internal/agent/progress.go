@@ -28,7 +28,7 @@ func newProgressDispatcher(next sys.Dispatcher[ProcessContext], publish func(str
 }
 
 func (d *progressDispatcher) Dispatch(ctx context.Context, cred ProcessContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
-	if syscall.Name == "sys.log" {
+	if syscall.Name == callSysLog {
 		var args progressArgs
 		if err := json.Unmarshal(syscall.Args, &args); err != nil {
 			return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode sys.log: %v", err)), nil
@@ -44,7 +44,7 @@ func (d *progressDispatcher) Dispatch(ctx context.Context, cred ProcessContext, 
 
 func (d *progressDispatcher) Capabilities() []sys.Capability {
 	return appendMissing(d.next.Capabilities(), sys.Capability{
-		Name:        "sys.log",
+		Name:        callSysLog,
 		Description: "report a short progress message to the user while working",
 		Hidden:      true,
 	})

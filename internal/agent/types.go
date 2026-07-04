@@ -193,6 +193,16 @@ func (r ProcessContext) PID() string {
 	return processPID(r.ProcessID, r.Revision)
 }
 
+// taskScope is the same credential in the task store's scope shape.
+func (r ProcessContext) taskScope() task.Scope {
+	return task.Scope{
+		TenantID:  r.TenantID,
+		SessionID: r.SessionID,
+		ProcessID: r.ProcessID,
+		Revision:  r.Revision,
+	}
+}
+
 // processPID derives the kernel process identity for one process revision.
 func processPID(processID string, revision uint64) string {
 	return fmt.Sprintf("%s@%d", processID, revision)

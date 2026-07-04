@@ -17,6 +17,9 @@ import (
 const (
 	callSysInput  = "sys.input"
 	callSysOutput = "sys.output"
+	// callSysLog is the side-effect-free progress report, served by the
+	// progress dispatcher below the task layer.
+	callSysLog = "sys.log"
 	// callSysCompensate registers an effect's undo: a deferred syscall the
 	// runtime journals (name + concrete guest-supplied args) but executes only
 	// if the critical section later aborts.
