@@ -134,34 +134,67 @@ func Fold(events []eventlog.Event) (Projection, error) {
 // - CreatedAt is the earliest process's CreatedAt
 // - UpdatedAt is the latest process's UpdatedAt
 // - ActiveProcessID is the ID of the one process (if any) that is not in a terminal state
-func deriveStoredSession(runs map[string]StoredProcess) StoredSession {
-	if len(runs) == 0 {
+func deriveStoredSession(processes map[string]StoredProcess) StoredSession {
+	if len(processes) == 0 {
 		return StoredSession{}
 	}
-	var first StoredProcess
-	for _, r := range runs {
-		if first.ID == "" || r.CreatedAt.Before(first.CreatedAt) {
-			first = r
+	ordered := make([]StoredProcess, 0, len(processes))
+	for _, proc := range processes {
+		ordered = append(ordered, proc)
+	}
+	// Deterministic order (creation time, then id) so nothing derived here —
+	// least of all ActiveProcessID — depends on Go's map iteration order.
+	sort.Slice(ordered, func(i, j int) bool {
+		if !ordered[i].CreatedAt.Equal(ordered[j].CreatedAt) {
+			return ordered[i].CreatedAt.Before(ordered[j].CreatedAt)
+		}
+		return ordered[i].ID < ordered[j].ID
+	})
+
+	session := StoredSession{
+		TenantID:  ordered[0].TenantID,
+		ID:        ordered[0].SessionID,
+		Title:     sessionTitle(ordered[0].Message),
+		CreatedAt: ordered[0].CreatedAt,
+		UpdatedAt: ordered[0].UpdatedAt,
+		Tags:      cloneTags(ordered[0].Tags),
+	}
+	for _, proc := range ordered {
+		if proc.UpdatedAt.After(session.UpdatedAt) {
+			session.UpdatedAt = proc.UpdatedAt
 		}
 	}
-	th := StoredSession{
-		TenantID:  first.TenantID,
-		ID:        first.SessionID,
-		Title:     sessionTitle(first.Message),
-		CreatedAt: first.CreatedAt,
-		UpdatedAt: first.UpdatedAt,
-		Tags:      cloneTags(first.Tags),
-	}
-	for _, r := range runs {
-		if r.UpdatedAt.After(th.UpdatedAt) {
-			th.UpdatedAt = r.UpdatedAt
-		}
-		switch r.Status {
-		case ProcessQueued, ProcessRunning, ProcessStopping, ProcessYielded, ProcessWaitingTask, ProcessInterrupted:
-			th.ActiveProcessID = r.ID
+	// ActiveProcessID is the session's foreground process: the earliest
+	// non-terminal top-level process. Preferring a root over a delegated child
+	// means a crash that leaves a running child and a waiting parent resolves to
+	// the parent — so restore never pins the session to a child that the
+	// parent's own retry would then collide with.
+	for _, proc := range ordered {
+		if isActiveStatus(proc.Status) && proc.ParentProcessID == "" {
+			session.ActiveProcessID = proc.ID
+			break
 		}
 	}
-	return th
+	if session.ActiveProcessID == "" {
+		for _, proc := range ordered {
+			if isActiveStatus(proc.Status) {
+				session.ActiveProcessID = proc.ID
+				break
+			}
+		}
+	}
+	return session
+}
+
+// isActiveStatus reports whether a process still occupies its session — it is
+// neither completed, failed, nor stopped, so it can still make progress.
+func isActiveStatus(status ProcessStatus) bool {
+	switch status {
+	case ProcessQueued, ProcessRunning, ProcessStopping, ProcessYielded, ProcessWaitingTask, ProcessInterrupted:
+		return true
+	default:
+		return false
+	}
 }
 
 // TaskList returns the projection's task records sorted by creation time, the

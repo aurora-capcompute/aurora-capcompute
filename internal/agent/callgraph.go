@@ -150,19 +150,19 @@ func (r *Runtime) SessionGraph(sessionID string) (SessionGraph, error) {
 	return graph, nil
 }
 
-// ProcessGraphNode is a node in the projected call graph: a run together with the
-// delegated child processes it spawned, in spawn order.
+// ProcessGraphNode is a node in the projected call graph: a process together with
+// the delegated child processes it spawned, in spawn order.
 type ProcessGraphNode struct {
-	ProcessID string             `json:"process_id"`
-	Name      string             `json:"name,omitempty"`
-	SessionID string             `json:"session_id"`
-	ParentID  string             `json:"parent_id,omitempty"`
-	Status    ProcessStatus      `json:"status"`
-	Attempt   int                `json:"attempt"`
-	Revision  uint64             `json:"revision"`
-	Answer    string             `json:"answer,omitempty"`
-	Error     string             `json:"error,omitempty"`
-	Children  []ProcessGraphNode `json:"children,omitempty"`
+	ProcessID       string             `json:"process_id"`
+	Name            string             `json:"name,omitempty"`
+	SessionID       string             `json:"session_id"`
+	ParentProcessID string             `json:"parent_process_id,omitempty"`
+	Status          ProcessStatus      `json:"status"`
+	Attempt         int                `json:"attempt"`
+	Revision        uint64             `json:"revision"`
+	Answer          string             `json:"answer,omitempty"`
+	Error           string             `json:"error,omitempty"`
+	Children        []ProcessGraphNode `json:"children,omitempty"`
 }
 
 // CallGraph projects a process and its delegated child processes (recursively) into a
@@ -183,15 +183,15 @@ func (r *Runtime) callGraphLocked(processID string, visited map[string]bool) Pro
 	}
 	visited[processID] = true
 	node := ProcessGraphNode{
-		ProcessID: proc.id,
-		Name:      proc.manifest.Name,
-		SessionID: proc.sessionID,
-		ParentID:  proc.parentProcessID,
-		Status:    proc.status,
-		Attempt:   proc.attempt,
-		Revision:  proc.revision,
-		Answer:    proc.answer,
-		Error:     proc.err,
+		ProcessID:       proc.id,
+		Name:            proc.manifest.Name,
+		SessionID:       proc.sessionID,
+		ParentProcessID: proc.parentProcessID,
+		Status:          proc.status,
+		Attempt:         proc.attempt,
+		Revision:        proc.revision,
+		Answer:          proc.answer,
+		Error:           proc.err,
 	}
 	// Build a program→name index from the parent's agent tools as a backfill: a
 	// child process with an empty Name can infer it from the parent's `core.agent`

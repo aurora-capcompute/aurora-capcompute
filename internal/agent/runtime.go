@@ -588,14 +588,7 @@ func (r *Runtime) Stop(processID string) (ProcessSnapshot, error) {
 		return ProcessSnapshot{}, fmt.Errorf("%w: process %s", ErrNotFound, processID)
 	}
 	switch proc.status {
-	case ProcessQueued:
-		proc.stopRequested = true
-		proc.status = ProcessStopping
-		proc.updatedAt = r.now().UTC()
-		if proc.stop != nil {
-			proc.stop()
-		}
-	case ProcessRunning:
+	case ProcessQueued, ProcessRunning:
 		proc.stopRequested = true
 		proc.status = ProcessStopping
 		proc.updatedAt = r.now().UTC()

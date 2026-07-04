@@ -229,6 +229,10 @@ type ProcessSnapshot struct {
 	CompletedAt   *time.Time    `json:"completed_at,omitempty"`
 	Manifest      Manifest      `json:"manifest"`
 	ProgramDigest string        `json:"program_digest"`
+	// Delegation lineage, so a single-process read shows the call tree the same
+	// way StoredProcess and the session graph do.
+	ParentProcessID string   `json:"parent_process_id,omitempty"`
+	ChildProcessIDs []string `json:"child_process_ids,omitempty"`
 }
 
 type TaskSnapshot struct {

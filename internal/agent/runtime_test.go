@@ -550,8 +550,8 @@ func TestRuntimeCascadeResumeReusesChildRun(t *testing.T) {
 	if graph.ProcessID != proc.ID || len(graph.Children) != 1 || graph.Children[0].ProcessID != childID {
 		t.Fatalf("call graph = %+v, want root %s with single child %s", graph, proc.ID, childID)
 	}
-	if graph.Children[0].ParentID != proc.ID {
-		t.Fatalf("child node ParentID = %q, want %q", graph.Children[0].ParentID, proc.ID)
+	if graph.Children[0].ParentProcessID != proc.ID {
+		t.Fatalf("child node ParentProcessID = %q, want %q", graph.Children[0].ParentProcessID, proc.ID)
 	}
 
 	// Deep cascade resume: restarting the parent must reuse and retry the same

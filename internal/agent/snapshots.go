@@ -60,21 +60,23 @@ func (r *Runtime) processSnapshotLocked(proc *processState) ProcessSnapshot {
 		journalLength = proc.journal.Length()
 	}
 	return ProcessSnapshot{
-		ID:            proc.id,
-		SessionID:     proc.sessionID,
-		Message:       proc.message,
-		Status:        proc.status,
-		Attempt:       proc.attempt,
-		Revision:      proc.revision,
-		Answer:        proc.answer,
-		Error:         proc.err,
-		JournalLength: journalLength,
-		CreatedAt:     proc.createdAt,
-		UpdatedAt:     proc.updatedAt,
-		StartedAt:     copyTime(proc.startedAt),
-		CompletedAt:   copyTime(proc.completedAt),
-		Manifest:      cloneManifest(proc.manifest),
-		ProgramDigest: proc.programDigest,
+		ID:              proc.id,
+		SessionID:       proc.sessionID,
+		Message:         proc.message,
+		Status:          proc.status,
+		Attempt:         proc.attempt,
+		Revision:        proc.revision,
+		Answer:          proc.answer,
+		Error:           proc.err,
+		JournalLength:   journalLength,
+		CreatedAt:       proc.createdAt,
+		UpdatedAt:       proc.updatedAt,
+		StartedAt:       copyTime(proc.startedAt),
+		CompletedAt:     copyTime(proc.completedAt),
+		Manifest:        cloneManifest(proc.manifest),
+		ProgramDigest:   proc.programDigest,
+		ParentProcessID: proc.parentProcessID,
+		ChildProcessIDs: append([]string(nil), proc.childProcessIDs...),
 	}
 }
 
@@ -108,8 +110,8 @@ func copyTime(value *time.Time) *time.Time {
 	if value == nil {
 		return nil
 	}
-	copy := *value
-	return &copy
+	dup := *value
+	return &dup
 }
 
 // visibleCapabilities drops capabilities marked Hidden (e.g. the LLM cognition
@@ -124,12 +126,6 @@ func visibleCapabilities(caps []sys.Capability) []sys.Capability {
 		}
 	}
 	return visible
-}
-
-func (r *Runtime) processContext(proc *processState) ProcessContext {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.processContextLocked(proc)
 }
 
 func (r *Runtime) processContextLocked(proc *processState) ProcessContext {
