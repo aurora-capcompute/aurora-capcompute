@@ -96,18 +96,16 @@ func (l *lifecycleDispatcher) Dispatch(ctx context.Context, cred ProcessContext,
 		// host reads it back from there. Acknowledge so the guest can return.
 		return sys.Result(json.RawMessage(`{"ok":true}`)), nil
 	case callSysCompensate:
-		// Deferred: validate and journal the registration, never execute it.
-		// Validation happens here — at registration — so a misspelled or
-		// ungranted undo surfaces to the guest immediately, not at abort time.
+		// Deferred: journal the registration, never execute it. The undo is a
+		// syscall like any other — the same granted-name check every dispatch
+		// gets, applied at registration so a misspelled or ungranted undo
+		// surfaces to the guest immediately rather than at abort time.
 		var args compensateArgs
 		if err := json.Unmarshal(syscall.Args, &args); err != nil {
 			return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode sys.compensate: %v", err)), nil
 		}
 		if strings.TrimSpace(args.Name) == "" {
 			return sys.FailCode(sys.ErrnoInvalidArgs, "sys.compensate: a capability name is required"), nil
-		}
-		if strings.HasPrefix(args.Name, "sys.") {
-			return sys.FailCode(sys.ErrnoInvalidArgs, "sys.compensate: reserved protocol calls cannot be compensations"), nil
 		}
 		if _, ok := sys.FindCapability(l.next.Capabilities(), args.Name); !ok {
 			return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("sys.compensate: capability %q is not granted", args.Name)), nil
