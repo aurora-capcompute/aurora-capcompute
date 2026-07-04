@@ -8,7 +8,7 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-// progressDispatcher serves the aurora.log syscall: a side-effect-free progress
+// progressDispatcher serves the sys.log syscall: a side-effect-free progress
 // report published to live session subscribers. It sits below the replay layer
 // (reports are journaled like any syscall) and publishes its capability —
 // hidden — so the Validator's grant set covers it.
@@ -28,10 +28,10 @@ func newProgressDispatcher(next sys.Dispatcher[ProcessContext], publish func(str
 }
 
 func (d *progressDispatcher) Dispatch(ctx context.Context, cred ProcessContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
-	if syscall.Name == "aurora.log" {
+	if syscall.Name == "sys.log" {
 		var args progressArgs
 		if err := json.Unmarshal(syscall.Args, &args); err != nil {
-			return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode aurora.log: %v", err)), nil
+			return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode sys.log: %v", err)), nil
 		}
 		d.publish(d.sessionID, Event{
 			Type: "progress",
@@ -44,14 +44,14 @@ func (d *progressDispatcher) Dispatch(ctx context.Context, cred ProcessContext, 
 
 func (d *progressDispatcher) Capabilities() []sys.Capability {
 	return appendMissing(d.next.Capabilities(), sys.Capability{
-		Name:        "aurora.log",
+		Name:        "sys.log",
 		Description: "report a short progress message to the user while working",
 		Hidden:      true,
 	})
 }
 
 // appendMissing adds capabilities the set does not already name — assemblies
-// may register a capability (e.g. aurora.log) themselves, and the grant set
+// may register a capability (e.g. sys.log) themselves, and the grant set
 // must stay duplicate-free.
 func appendMissing(capabilities []sys.Capability, extra ...sys.Capability) []sys.Capability {
 	for _, candidate := range extra {

@@ -61,7 +61,7 @@ func (r *Runtime) activateProcess(ctx context.Context, pid string) (*capcompute.
 		Entrypoint: "run",
 		Cred:       cred,
 		Dispatcher: chain,
-		// The guest fetches its input via the agent.input syscall (served by
+		// The guest fetches its input via the sys.input syscall (served by
 		// the lifecycle dispatcher), so no entrypoint input is supplied here.
 	})
 	if err != nil {

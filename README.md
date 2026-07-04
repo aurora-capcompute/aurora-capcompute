@@ -56,8 +56,8 @@ Labeler → Declassifier → savepoints → lifecycle → delegation → tasks �
 
 - **Complete mediation** — the Validator admits only granted capability names
   (schema-checked args); the grant set is exactly the chain's published
-  surface, the runtime's own protocol calls (`agent.input`, `agent.finish`,
-  `aurora.log`) included, hidden from the program's menu but granted explicitly.
+  surface, the runtime's own protocol calls (`sys.input`, `sys.output`,
+  `sys.log`) included, hidden from the program's menu but granted explicitly.
 - **Journal** — each syscall is journaled as an intent before it executes and
   a completion before the guest observes it, hash-chained, in the session's
   event stream (`syscall.recorded` events; a `journal.header` event pins the

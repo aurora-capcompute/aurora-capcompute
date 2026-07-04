@@ -206,7 +206,7 @@ func TestRuntimePassesManifestToDispatcherProvider(t *testing.T) {
 	// The program brackets its one turn in a sys.begin/sys.commit savepoint, so
 	// the journal narrative is input → begin → chat → commit → finish.
 	names := journalNames(t, runtime, proc.ID)
-	want := []string{callAgentInput, sys.SyscallBegin, "openai.chat", sys.SyscallCommit, callAgentFinish}
+	want := []string{callSysInput, sys.SyscallBegin, "openai.chat", sys.SyscallCommit, callSysOutput}
 	if len(names) != len(want) {
 		t.Fatalf("journal = %v, want %v", names, want)
 	}
@@ -1067,7 +1067,7 @@ func TestRuntimeHardRetryForksFromBeginning(t *testing.T) {
 		t.Fatal("expected a failure error")
 	}
 
-	// Hard retry always forks from the beginning (agent.input step, no shared prefix).
+	// Hard retry always forks from the beginning (sys.input step, no shared prefix).
 	if _, err := runtime.Retry(proc.ID, RetryRestart); err != nil {
 		t.Fatalf("retry: %v", err)
 	}

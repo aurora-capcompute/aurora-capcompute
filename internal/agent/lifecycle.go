@@ -13,17 +13,17 @@ import (
 
 // Agent lifecycle syscalls. The guest fetches its input and reports its answer
 // through these calls so both are recorded on the replay journal — making the
-// per-process tape the full narrative: agent.input → capability calls → agent.finish.
+// per-process tape the full narrative: sys.input → capability calls → sys.output.
 const (
-	callAgentInput  = "agent.input"
-	callAgentFinish = "agent.finish"
+	callSysInput  = "sys.input"
+	callSysOutput = "sys.output"
 )
 
 type finishArgs struct {
 	Answer string `json:"answer"`
 }
 
-// lifecycleDispatcher serves the agent.input/agent.finish lifecycle syscalls
+// lifecycleDispatcher serves the sys.input/sys.output lifecycle syscalls
 // below the replay layer (so they are journaled) and forwards everything else
 // to the capability dispatcher. It publishes both — hidden — into the chain's
 // capability set: the kernel's Validator enforces complete mediation from the
@@ -54,7 +54,7 @@ func newLifecycleDispatcher(
 
 func (l *lifecycleDispatcher) Dispatch(ctx context.Context, cred ProcessContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	switch syscall.Name {
-	case callAgentInput:
+	case callSysInput:
 		payload, err := json.Marshal(agentInput{
 			Message:      l.message,
 			History:      l.history,
@@ -65,7 +65,7 @@ func (l *lifecycleDispatcher) Dispatch(ctx context.Context, cred ProcessContext,
 			return sys.Fail(err.Error()), nil
 		}
 		return sys.Result(payload), nil
-	case callAgentFinish:
+	case callSysOutput:
 		// The answer travels in syscall.Args and is recorded on the journal; the
 		// host reads it back from there. Acknowledge so the guest can return.
 		return sys.Result(json.RawMessage(`{"ok":true}`)), nil
@@ -77,12 +77,12 @@ func (l *lifecycleDispatcher) Dispatch(ctx context.Context, cred ProcessContext,
 func (l *lifecycleDispatcher) Capabilities() []sys.Capability {
 	return appendMissing(l.next.Capabilities(),
 		sys.Capability{
-			Name:        callAgentInput,
+			Name:        callSysInput,
 			Description: "fetch this process's input: message, history, system prompt, and the visible capability menu",
 			Hidden:      true,
 		},
 		sys.Capability{
-			Name:        callAgentFinish,
+			Name:        callSysOutput,
 			Description: "record this process's final answer on the journal",
 			Hidden:      true,
 		},
@@ -90,7 +90,7 @@ func (l *lifecycleDispatcher) Capabilities() []sys.Capability {
 }
 
 // answerFromJournal reads a completed process's answer from the journal's final
-// intent/completion pair, which must be the agent.finish syscall. The answer is
+// intent/completion pair, which must be the sys.output syscall. The answer is
 // therefore sourced from the tape (the single source of truth) rather than the
 // guest's return value.
 func (r *Runtime) answerFromJournal(processID string) (string, error) {
@@ -119,7 +119,7 @@ func (r *Runtime) answerFromJournal(processID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if intent.Syscall == nil || intent.Syscall.Name != callAgentFinish {
+	if intent.Syscall == nil || intent.Syscall.Name != callSysOutput {
 		name := ""
 		if intent.Syscall != nil {
 			name = intent.Syscall.Name

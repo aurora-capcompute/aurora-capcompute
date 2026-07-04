@@ -195,7 +195,7 @@ func (r *Runtime) processDrivers(resolveCtx context.Context, cred ProcessContext
 // wrapProtocol stacks the runtime's protocol layers above the task layer:
 // the delegation router (above tasks, so a delegated child's park suspends
 // the parent transparently instead of becoming a human-approvable task), then
-// the agent lifecycle outermost — its agent.input payload advertises every
+// the agent lifecycle outermost — its sys.input payload advertises every
 // capability beneath it, delegation tools included.
 func (r *Runtime) wrapProtocol(cred ProcessContext, next sys.Dispatcher[ProcessContext]) (sys.Dispatcher[ProcessContext], error) {
 	r.mu.Lock()
@@ -665,7 +665,7 @@ func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, erro
 	}
 
 	if mode == RetryRestart {
-		// Hard restart: always fork from the beginning (the agent.input step),
+		// Hard restart: always fork from the beginning (the sys.input step),
 		// giving the program a completely fresh revision with no shared prefix.
 		r.forkJournalLocked(proc, 0, RetryRestart)
 	} else if proc.status == ProcessYielded || proc.status == ProcessWaitingTask {
