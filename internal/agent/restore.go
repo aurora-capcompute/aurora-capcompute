@@ -7,6 +7,8 @@ import (
 	"context"
 	"log/slog"
 	"sort"
+
+	"github.com/aurora-capcompute/aurora-capcompute/internal/task"
 )
 
 // Restore: rebuild in-memory state by folding each session's event stream.
@@ -135,6 +137,45 @@ func (r *Runtime) restoreSession(proj Projection, journals map[string]map[uint64
 			}
 		}
 	}
+	// A park is only coherent with its wakeup: a waiting process whose pending
+	// task resolved (the resolution outran the crash, the resume did not) and a
+	// yielded parent whose children all finished would otherwise sleep forever —
+	// nothing re-delivers a lost wakeup. Fold them to interrupted, the
+	// re-drivable status, so recovery resumes them like any cut-off process.
+	pending := map[string]bool{}
+	for _, record := range proj.TaskList() {
+		if record.State == task.StatePending {
+			pending[record.Scope.ProcessID] = true
+		}
+	}
+	for _, processID := range session.processIDs {
+		proc := r.processes[processID]
+		if proc == nil {
+			continue
+		}
+		lost := false
+		switch proc.status {
+		case ProcessWaitingTask:
+			lost = !pending[proc.id]
+		case ProcessYielded:
+			lost = true
+			for _, childID := range proc.childProcessIDs {
+				if child := r.processes[childID]; child != nil && !isTerminal(child.status) {
+					lost = false
+					break
+				}
+			}
+		}
+		if lost {
+			slog.Info("parked process lost its wakeup in a crash; folding to interrupted",
+				"process_id", proc.id, "status", proc.status)
+			proc.status = ProcessInterrupted
+			if err := r.appendProcess(proc); err != nil {
+				return err
+			}
+		}
+	}
+
 	if session.activeProcessID != "" && r.processes[session.activeProcessID] == nil {
 		slog.Info("clearing active process from session due to program digest mismatch",
 			"session_id", session.id, "process_id", session.activeProcessID)
