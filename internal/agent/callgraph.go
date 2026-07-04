@@ -2,11 +2,8 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sort"
-
-	"github.com/aurora-capcompute/capcompute/sys"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/eventlog"
 )
@@ -73,60 +70,35 @@ func (r *Runtime) SessionGraph(sessionID string) (SessionGraph, error) {
 	r.mu.Unlock()
 
 	ctx := context.Background()
-	events, err := r.log.Read(ctx, eventlog.Scope{TenantID: tenantID, SessionID: sessionID}, 0)
+	scope := eventlog.Scope{TenantID: tenantID, SessionID: sessionID}
+	events, err := r.log.Read(ctx, scope, 0)
 	if err != nil {
 		return SessionGraph{}, err
 	}
 
-	// Pair each revision's intent records with their completions. Records
-	// arrive in append order per revision, so a completion always follows its
-	// intent within the same revision's sub-sequence.
-	type entryKey struct {
-		position int
-		revision uint64
-	}
-	allEntries := map[string]map[entryKey]JournalEntry{} // process → key → entry
-	openIntent := map[string]map[uint64]entryKey{}       // process → revision → open intent key
-
-	for _, ev := range events {
-		if ev.Kind != evSyscall {
-			continue
-		}
-		var sd syscallRecordData
-		if err := json.Unmarshal(ev.Data, &sd); err != nil {
-			return SessionGraph{}, fmt.Errorf("decode syscall.recorded: %w", err)
-		}
-		if allEntries[ev.Proc] == nil {
-			allEntries[ev.Proc] = make(map[entryKey]JournalEntry)
-			openIntent[ev.Proc] = make(map[uint64]entryKey)
-		}
-		rec := sd.Record
-		if rec.Syscall != nil {
-			key := entryKey{rec.Position, ev.Rev}
-			allEntries[ev.Proc][key] = JournalEntry{
-				Position:    rec.Position,
-				Revision:    ev.Rev,
-				Syscall:     *rec.Syscall,
-				Outcome:     JournalOutcome{Status: sys.StatusYield, Message: "in flight"},
-				Compensates: rec.Compensates,
-			}
-			openIntent[ev.Proc][ev.Rev] = key
-			continue
-		}
-		if rec.Result != nil {
-			if key, ok := openIntent[ev.Proc][ev.Rev]; ok {
-				entry := allEntries[ev.Proc][key]
-				entry.Outcome = encodeOutcome(*rec.Result)
-				allEntries[ev.Proc][key] = entry
-				delete(openIntent[ev.Proc], ev.Rev)
-			}
-		}
+	// One folder, one pairer: rebuild every revision's journal view the same
+	// way restore does, and pair intents with completions the same way the
+	// single-journal read does (entries). A revision's view resolves every
+	// position's writing revision, so keeping only the entries a revision
+	// wrote itself unions to the all-revisions set with no duplicates —
+	// abandoned branches included.
+	journals, _, err := foldJournals(events, r.log, scope, r.journalNow, r.journalAppendPublisher(sessionID))
+	if err != nil {
+		return SessionGraph{}, err
 	}
 
 	for _, meta := range metas {
-		entries := make([]JournalEntry, 0, len(allEntries[meta.id]))
-		for _, e := range allEntries[meta.id] {
-			entries = append(entries, e)
+		var entries []JournalEntry
+		for _, journal := range journals[meta.id] {
+			all, err := journal.entries()
+			if err != nil {
+				return SessionGraph{}, err
+			}
+			for _, entry := range all {
+				if entry.Revision == journal.rev {
+					entries = append(entries, entry)
+				}
+			}
 		}
 		sort.Slice(entries, func(i, j int) bool {
 			if entries[i].Position != entries[j].Position {
