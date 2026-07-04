@@ -118,6 +118,7 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		NewJournal: runtime.journalFor,
 		Header:     runtime.headerFor,
 		Taints:     runtime.taints,
+		Now:        runtime.now,
 		Tasks:      runtime.tasks,
 		TaskSecret: runtime.taskSecret,
 		TaskTTL:    runtime.taskTTL,

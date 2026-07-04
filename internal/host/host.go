@@ -12,7 +12,9 @@ package host
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
+	"io"
 	"time"
 
 	"github.com/aurora-capcompute/capcompute"
@@ -39,6 +41,10 @@ type Factory[ID comparable, K capcompute.PID[ID]] struct {
 	NewJournal func(context.Context, K) (journaled.Journal, error)
 	Header     func(K) journaled.Header
 	Taints     *capcompute.Taints[ID]
+	// Now and Rand feed the journaled world sources (sys.now / sys.random);
+	// nil defaults to the real clock and crypto/rand.
+	Now  func() time.Time
+	Rand io.Reader
 
 	Tasks         task.Store
 	TaskScope     func(K) task.Scope
@@ -82,10 +88,21 @@ func (f Factory[ID, K]) NewDispatcher(ctx context.Context, cred K) (sys.Dispatch
 			return nil, err
 		}
 	}
+	// The world sources sit below replay (so their values are journaled and
+	// replay verbatim) and above the task and routing layers.
+	now := f.Now
+	if now == nil {
+		now = time.Now
+	}
+	entropy := f.Rand
+	if entropy == nil {
+		entropy = rand.Reader
+	}
+	withWorld := &worldDispatcher[K]{next: below, now: now, rand: entropy}
 	// Savepoint markers sit below replay (so they are journaled) and above the
 	// task and routing layers (so they never become durable tasks or dispatch
 	// a child).
-	withSavepoints := &savepointDispatcher[K]{next: below}
+	withSavepoints := &savepointDispatcher[K]{next: withWorld}
 
 	// The grant set is the complete mediation surface: everything this process's
 	// chain can serve — drivers, delegation routes, and the runtime's own
