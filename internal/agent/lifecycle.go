@@ -17,10 +17,18 @@ import (
 const (
 	callSysInput  = "sys.input"
 	callSysOutput = "sys.output"
+	// callSysAbort rolls the process back instead of finishing it: the runtime
+	// unwinds the completed effects of the open critical zone, dispatching each
+	// capability's declared inverse newest-first (saga compensation).
+	callSysAbort = "sys.abort"
 )
 
 type finishArgs struct {
 	Answer string `json:"answer"`
+}
+
+type abortArgs struct {
+	Reason string `json:"reason"`
 }
 
 // lifecycleDispatcher serves the sys.input/sys.output lifecycle syscalls
@@ -69,6 +77,11 @@ func (l *lifecycleDispatcher) Dispatch(ctx context.Context, cred ProcessContext,
 		// The answer travels in syscall.Args and is recorded on the journal; the
 		// host reads it back from there. Acknowledge so the guest can return.
 		return sys.Result(json.RawMessage(`{"ok":true}`)), nil
+	case callSysAbort:
+		// The reason travels in syscall.Args and is journaled as the terminal
+		// call; the runtime reads it back and compensates completed effects
+		// before the process finishes. Acknowledge so the guest can return.
+		return sys.Result(json.RawMessage(`{"ok":true}`)), nil
 	default:
 		return l.next.Dispatch(ctx, cred, syscall, auth)
 	}
@@ -84,6 +97,11 @@ func (l *lifecycleDispatcher) Capabilities() []sys.Capability {
 		sys.Capability{
 			Name:        callSysOutput,
 			Description: "record this process's final answer on the journal",
+			Hidden:      true,
+		},
+		sys.Capability{
+			Name:        callSysAbort,
+			Description: "roll this process back: compensate its completed effects newest-first",
 			Hidden:      true,
 		},
 	)

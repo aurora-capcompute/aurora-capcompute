@@ -186,6 +186,10 @@ func (r *Runtime) execute(processID string) {
 	}
 	switch result.Status {
 	case capcompute.ResumeCompleted:
+		if reason, ok := r.abortReason(processID); ok {
+			r.compensate(processID, reason)
+			return
+		}
 		answer, err := r.answerFromJournal(processID)
 		if err != nil {
 			r.finish(processID, ProcessFailed, "", err)

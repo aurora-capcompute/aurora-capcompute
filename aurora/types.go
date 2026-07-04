@@ -44,6 +44,7 @@ const (
 	ProcessCompleted   = agent.ProcessCompleted
 	ProcessStopped     = agent.ProcessStopped
 	ProcessFailed      = agent.ProcessFailed
+	ProcessCompensated = agent.ProcessCompensated
 )
 
 type RetryMode = agent.RetryMode

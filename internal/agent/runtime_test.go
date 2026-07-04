@@ -1110,3 +1110,127 @@ func TestRuntimeHardRetryForksFromBeginning(t *testing.T) {
 		t.Fatal("expected revision-2 entries in graph (hard retry re-ran from the beginning)")
 	}
 }
+
+// compensationDispatchers drives a run that charges (a capability declaring a
+// refund inverse) and then, on the next turn, aborts — exercising the whole
+// compensation path: sys.abort -> the runtime unwinds the process's effects ->
+// billing.charge's declared inverse (billing.refund) is dispatched.
+type compensationDispatchers struct{ d *compensationDispatcher }
+
+func (compensationDispatchers) Normalize(_ string, settings json.RawMessage) (json.RawMessage, error) {
+	if len(settings) == 0 {
+		return json.RawMessage(`{}`), nil
+	}
+	return append(json.RawMessage(nil), settings...), nil
+}
+
+func (p compensationDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ Manifest) (sys.Dispatcher[ProcessContext], error) {
+	return p.d, nil
+}
+
+type compensationDispatcher struct {
+	mu       sync.Mutex
+	charged  bool
+	refunded bool
+}
+
+func (d *compensationDispatcher) Capabilities() []sys.Capability {
+	return []sys.Capability{
+		{Name: "openai.chat", Description: "llm", InputSchema: json.RawMessage(`{"type":"object"}`), Hidden: true, Compensation: sys.Compensation{Kind: sys.CompensateNone}},
+		{Name: "billing.charge", Description: "charge a card", InputSchema: json.RawMessage(`{"type":"object"}`), Compensation: sys.Compensation{Kind: sys.CompensateSyscall, Syscall: "billing.refund"}},
+		{Name: "billing.refund", Description: "refund a charge (the inverse of billing.charge)", InputSchema: json.RawMessage(`{"type":"object"}`), Compensation: sys.Compensation{Kind: sys.CompensateNone}},
+	}
+}
+
+func (d *compensationDispatcher) Dispatch(_ context.Context, _ ProcessContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
+	switch syscall.Name {
+	case "billing.charge":
+		d.mu.Lock()
+		d.charged = true
+		d.mu.Unlock()
+		return sys.Result(json.RawMessage(`{"charged":true}`)), nil
+	case "billing.refund":
+		d.mu.Lock()
+		d.refunded = true
+		d.mu.Unlock()
+		return sys.Result(json.RawMessage(`{"refunded":true}`)), nil
+	case "openai.chat":
+		var req struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		_ = json.Unmarshal(syscall.Args, &req)
+		if _, later := firstAndLaterUser(req.Messages); later {
+			// The charge observation is in: give up and roll back.
+			return chatActions(`{"actions":[{"action":"abort","content":{"reason":"could not confirm the order"}}]}`), nil
+		}
+		// First turn: charge.
+		return chatActions(`{"actions":[{"action":"billing.charge","content":{"amount":100}}]}`), nil
+	default:
+		return sys.Fail("unsupported call: " + syscall.Name), nil
+	}
+}
+
+// TestRuntimeCompensatesOnAbort proves guest-initiated saga compensation end to
+// end: the guest charges, then aborts; the runtime detects the sys.abort
+// terminal call, unwinds the process's completed effects, dispatches the charge's
+// declared inverse, and finishes the process as compensated.
+func TestRuntimeCompensatesOnAbort(t *testing.T) {
+	store := newRuntimeStore()
+	disp := &compensationDispatcher{}
+	runtime, err := NewRuntime(context.Background(), Config{
+		Programs: staticPrograms{
+			defaultID: "program@1",
+			sources:   []ProgramSource{{ID: "program@1", Wasm: buildProgram(t)}},
+		},
+		Dispatchers:  compensationDispatchers{d: disp},
+		Log:          store.log,
+		Leases:       store,
+		ProcessTable: newMemProcessTable(),
+		TaskSecret:   []byte("stable-secret"),
+		IDSource:     sequentialIDs(),
+	})
+	if err != nil {
+		t.Fatalf("new runtime: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := runtime.Close(ctx); err != nil {
+			t.Errorf("close runtime: %v", err)
+		}
+	})
+
+	session, err := runtime.CreateSession(nil)
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	proc, err := runtime.CreateProcess(session.ID, "place the order", Manifest{
+		Version: ManifestVersion,
+		Program: "program@1",
+		Tools: []Tool{
+			{Name: "billing.charge", Type: "core.custom"},
+			{Name: "billing.refund", Type: "core.custom"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create process: %v", err)
+	}
+
+	final := waitForStatus(t, runtime, proc.ID, ProcessCompensated)
+
+	disp.mu.Lock()
+	charged, refunded := disp.charged, disp.refunded
+	disp.mu.Unlock()
+	if !charged {
+		t.Fatal("the effect never ran (billing.charge)")
+	}
+	if !refunded {
+		t.Fatal("compensation did not dispatch the declared inverse (billing.refund)")
+	}
+	if !strings.Contains(final.Answer, "compensated 1") {
+		t.Fatalf("compensation summary = %q, want a 'compensated 1' tally", final.Answer)
+	}
+}

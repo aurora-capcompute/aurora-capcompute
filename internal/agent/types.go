@@ -35,6 +35,9 @@ const (
 	ProcessCompleted   ProcessStatus = "completed"
 	ProcessStopped     ProcessStatus = "stopped"
 	ProcessFailed      ProcessStatus = "failed"
+	// ProcessCompensated is terminal: the guest rolled the process back with
+	// sys.abort and the runtime unwound its completed effects (saga compensation).
+	ProcessCompensated ProcessStatus = "compensated"
 )
 
 type RetryMode string

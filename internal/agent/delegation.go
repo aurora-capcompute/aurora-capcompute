@@ -410,7 +410,7 @@ func (r *Runtime) resumeParentIfWaiting(parentProcessID string) {
 // isTerminal reports whether a process status is a final state (no further execution).
 func isTerminal(status ProcessStatus) bool {
 	switch status {
-	case ProcessCompleted, ProcessFailed, ProcessStopped, ProcessInterrupted:
+	case ProcessCompleted, ProcessFailed, ProcessStopped, ProcessInterrupted, ProcessCompensated:
 		return true
 	default:
 		return false
