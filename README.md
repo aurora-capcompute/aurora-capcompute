@@ -57,7 +57,8 @@ Labeler → Declassifier → savepoints → lifecycle → delegation → tasks �
 - **Complete mediation** — the Validator admits only granted capability names
   (schema-checked args); the grant set is exactly the chain's published
   surface, the runtime's own protocol calls (`sys.input`, `sys.output`,
-  `sys.log`) included, hidden from the program's menu but granted explicitly.
+  `sys.log`, `sys.compensate`, `sys.abort`) included, hidden from the
+  program's menu but granted explicitly.
 - **Journal** — each syscall is journaled as an intent before it executes and
   a completion before the guest observes it, hash-chained, in the session's
   event stream (`syscall.recorded` events; a `journal.header` event pins the
@@ -65,6 +66,14 @@ Labeler → Declassifier → savepoints → lifecycle → delegation → tasks �
   refused up front). Retries fork the journal copy-on-write into a new
   revision; a failed process resumes right after the outermost open `sys.begin`
   savepoint so the program's whole declared unit re-executes.
+- **Rollback** — a guest registers an effect's undo with `sys.compensate` (a
+  deferred syscall journaled with concrete guest-supplied args) and rolls the
+  open section back with `sys.abort{reason, retry_seconds}`: the runtime
+  executes the registered compensations newest-first (journaled,
+  idempotency-keyed, crash-resumable), then re-runs the section after the
+  delay — parked on a durable retry timer — or finishes the process as
+  `compensated`. A compensation that fails semantically fails the process with
+  the rollback report; the journal is the remediation map.
 - **Approval** — a yielded syscall becomes a durable task and leaves its
   intent open; resolving the task re-drives the intent under its original
   idempotency key with the stored resolution as the dispatch Authorization.

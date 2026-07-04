@@ -17,9 +17,14 @@ import (
 const (
 	callSysInput  = "sys.input"
 	callSysOutput = "sys.output"
-	// callSysAbort rolls the process back instead of finishing it: the runtime
-	// unwinds the completed effects of the open critical zone, dispatching each
-	// capability's declared inverse newest-first (saga compensation).
+	// callSysCompensate registers an effect's undo: a deferred syscall the
+	// runtime journals (name + concrete guest-supplied args) but executes only
+	// if the critical section later aborts.
+	callSysCompensate = "sys.compensate"
+	// callSysAbort rolls the open critical section back instead of finishing:
+	// the runtime executes the registered compensations newest-first, then
+	// retries the section after the declared delay or stops the process as
+	// compensated. With no section open, the whole process rolls back.
 	callSysAbort = "sys.abort"
 )
 
@@ -29,6 +34,15 @@ type finishArgs struct {
 
 type abortArgs struct {
 	Reason string `json:"reason"`
+	// RetrySeconds schedules a fresh attempt of the aborted section that many
+	// seconds after the rollback (0 = immediately). Absent means no retry: the
+	// process finishes as compensated.
+	RetrySeconds *int64 `json:"retry_seconds"`
+}
+
+type compensateArgs struct {
+	Name string          `json:"name"`
+	Args json.RawMessage `json:"args"`
 }
 
 // lifecycleDispatcher serves the sys.input/sys.output lifecycle syscalls
@@ -43,6 +57,7 @@ type lifecycleDispatcher struct {
 	history      []HistoryMessage
 	systemPrompt string
 	manifest     Manifest
+	attempt      int
 }
 
 func newLifecycleDispatcher(
@@ -50,6 +65,7 @@ func newLifecycleDispatcher(
 	message string,
 	history []HistoryMessage,
 	manifest Manifest,
+	attempt int,
 ) *lifecycleDispatcher {
 	return &lifecycleDispatcher{
 		next:         next,
@@ -57,6 +73,7 @@ func newLifecycleDispatcher(
 		history:      history,
 		systemPrompt: manifest.SystemPrompt,
 		manifest:     manifest,
+		attempt:      attempt,
 	}
 }
 
@@ -68,6 +85,7 @@ func (l *lifecycleDispatcher) Dispatch(ctx context.Context, cred ProcessContext,
 			History:      l.history,
 			SystemPrompt: l.systemPrompt,
 			Capabilities: visibleCapabilities(l.next.Capabilities()),
+			Attempt:      l.attempt,
 		})
 		if err != nil {
 			return sys.Fail(err.Error()), nil
@@ -77,10 +95,28 @@ func (l *lifecycleDispatcher) Dispatch(ctx context.Context, cred ProcessContext,
 		// The answer travels in syscall.Args and is recorded on the journal; the
 		// host reads it back from there. Acknowledge so the guest can return.
 		return sys.Result(json.RawMessage(`{"ok":true}`)), nil
+	case callSysCompensate:
+		// Deferred: validate and journal the registration, never execute it.
+		// Validation happens here — at registration — so a misspelled or
+		// ungranted undo surfaces to the guest immediately, not at abort time.
+		var args compensateArgs
+		if err := json.Unmarshal(syscall.Args, &args); err != nil {
+			return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode sys.compensate: %v", err)), nil
+		}
+		if strings.TrimSpace(args.Name) == "" {
+			return sys.FailCode(sys.ErrnoInvalidArgs, "sys.compensate: a capability name is required"), nil
+		}
+		if strings.HasPrefix(args.Name, "sys.") {
+			return sys.FailCode(sys.ErrnoInvalidArgs, "sys.compensate: reserved protocol calls cannot be compensations"), nil
+		}
+		if _, ok := sys.FindCapability(l.next.Capabilities(), args.Name); !ok {
+			return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("sys.compensate: capability %q is not granted", args.Name)), nil
+		}
+		return sys.Result(json.RawMessage(`{}`)), nil
 	case callSysAbort:
-		// The reason travels in syscall.Args and is journaled as the terminal
-		// call; the runtime reads it back and compensates completed effects
-		// before the process finishes. Acknowledge so the guest can return.
+		// The reason and retry delay travel in syscall.Args and are journaled as
+		// the terminal call; the runtime reads them back, executes the registered
+		// compensations, and applies the retry. Acknowledge so the guest returns.
 		return sys.Result(json.RawMessage(`{"ok":true}`)), nil
 	default:
 		return l.next.Dispatch(ctx, cred, syscall, auth)
@@ -100,8 +136,13 @@ func (l *lifecycleDispatcher) Capabilities() []sys.Capability {
 			Hidden:      true,
 		},
 		sys.Capability{
+			Name:        callSysCompensate,
+			Description: "register an effect's undo, executed only if the section later aborts",
+			Hidden:      true,
+		},
+		sys.Capability{
 			Name:        callSysAbort,
-			Description: "roll this process back: compensate its completed effects newest-first",
+			Description: "roll the open section back (registered compensations run newest-first), then retry or stop",
 			Hidden:      true,
 		},
 	)

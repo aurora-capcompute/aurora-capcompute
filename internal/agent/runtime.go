@@ -59,24 +59,25 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		return nil, err
 	}
 	runtime := &Runtime{
-		kernels:      make(map[string]*capcompute.Kernel[string, ProcessContext]),
-		programs:     programs,
-		processTable: config.ProcessTable,
-		taints:       capcompute.NewTaints[string](),
-		log:          config.Log,
-		leases:       config.Leases,
-		tenantID:     strings.TrimSpace(config.TenantID),
-		sessions:     make(map[string]*sessionState),
-		processes:    make(map[string]*processState),
-		subscribers:  make(map[string]map[uint64]chan Event),
-		idSource:     config.IDSource,
-		now:          config.Now,
-		eventSize:    config.EventSize,
-		taskSecret:   append([]byte(nil), config.TaskSecret...),
-		taskTTL:      config.TaskTTL,
-		instanceID:   strings.TrimSpace(config.InstanceID),
-		leaseTTL:     config.LeaseTTL,
-		dispatchers:  config.Dispatchers,
+		kernels:         make(map[string]*capcompute.Kernel[string, ProcessContext]),
+		programs:        programs,
+		processTable:    config.ProcessTable,
+		taints:          capcompute.NewTaints[string](),
+		log:             config.Log,
+		leases:          config.Leases,
+		tenantID:        strings.TrimSpace(config.TenantID),
+		sessions:        make(map[string]*sessionState),
+		processes:       make(map[string]*processState),
+		subscribers:     make(map[string]map[uint64]chan Event),
+		idSource:        config.IDSource,
+		now:             config.Now,
+		eventSize:       config.EventSize,
+		taskSecret:      append([]byte(nil), config.TaskSecret...),
+		taskTTL:         config.TaskTTL,
+		instanceID:      strings.TrimSpace(config.InstanceID),
+		leaseTTL:        config.LeaseTTL,
+		maxAbortRetries: config.MaxAbortRetries,
+		dispatchers:     config.Dispatchers,
 	}
 	if runtime.tenantID == "" {
 		runtime.tenantID = DefaultTenantID
@@ -93,6 +94,9 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 	}
 	if runtime.taskTTL <= 0 {
 		runtime.taskTTL = 24 * time.Hour
+	}
+	if runtime.maxAbortRetries <= 0 {
+		runtime.maxAbortRetries = defaultMaxAbortRetries
 	}
 	if runtime.instanceID == "" {
 		instanceID, err := randomID("instance_")
@@ -203,10 +207,12 @@ func (r *Runtime) wrapProtocol(cred ProcessContext, next sys.Dispatcher[ProcessC
 	var manifest Manifest
 	var message string
 	var history []HistoryMessage
+	var attempt int
 	if proc != nil {
 		manifest = cloneManifest(proc.manifest)
 		message = proc.message
 		history = append([]HistoryMessage(nil), proc.history...)
+		attempt = proc.attempt
 	}
 	r.mu.Unlock()
 	if proc == nil {
@@ -219,7 +225,7 @@ func (r *Runtime) wrapProtocol(cred ProcessContext, next sys.Dispatcher[ProcessC
 		}
 		next = router
 	}
-	return newLifecycleDispatcher(next, message, history, manifest), nil
+	return newLifecycleDispatcher(next, message, history, manifest, attempt), nil
 }
 
 // journalFor returns the process's live journal view.
@@ -657,10 +663,42 @@ func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, erro
 		return ProcessSnapshot{}, fmt.Errorf("%w: session already has active process %s", ErrConflict, session.activeProcessID)
 	}
 
+	abort, aborted := proc.journal.abortTail()
+	if aborted && !abort.settled() {
+		// The journal ends in a sys.abort whose rollback has not finished (a
+		// crash mid-rollback, or a compensation that failed). Resume the
+		// rollback — never the guest: replaying past a rolled-back tail is
+		// refused by the tape, and restarting would abandon live effects.
+		// Running marks the settlement in flight and refuses concurrent retries.
+		if mode == RetryRestart {
+			r.mu.Unlock()
+			return ProcessSnapshot{}, fmt.Errorf("%w: process %s has an unfinished rollback; resume it first", ErrConflict, processID)
+		}
+		proc.status = ProcessRunning
+		proc.err = ""
+		proc.updatedAt = r.now().UTC()
+		_ = r.appendProcess(proc)
+		snapshot := r.processSnapshotLocked(proc)
+		sessionID := proc.sessionID
+		r.mu.Unlock()
+		r.publish(sessionID, Event{Type: "process.updated", Data: snapshot})
+		r.wg.Add(1)
+		go func() {
+			defer r.wg.Done()
+			r.settleAbort(processID)
+		}()
+		return snapshot, nil
+	}
+
 	if mode == RetryRestart {
 		// Hard restart: always fork from the beginning (the sys.input step),
 		// giving the program a completely fresh revision with no shared prefix.
 		r.forkJournalLocked(proc, 0, RetryRestart)
+	} else if aborted {
+		// A settled abort (the retry timer fired, or a human resumed): the
+		// rolled-back attempt stays in the log; the aborted section re-runs
+		// fresh from its begin.
+		r.forkJournalLocked(proc, abort.ScopeStart, RetryResume)
 	} else if proc.status == ProcessYielded || proc.status == ProcessWaitingTask {
 		// Resume from a park: no fork. The journal's open intent at the tail is
 		// re-driven by replay under its original idempotency key; a resolved

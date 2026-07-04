@@ -78,36 +78,41 @@ type Config struct {
 	// least-recently-used instances are deactivated past it and reactivate by
 	// journal replay (0 = a default of 64).
 	MaxResidentProcesses int
+	// MaxAbortRetries bounds how many attempts a process gets before a
+	// sys.abort retry is refused and the process finishes as compensated
+	// (0 = a default of 10) — the guard against a guest that aborts forever.
+	MaxAbortRetries int
 	// QuotaOf reports a tenant's scheduling quota. Nil means unlimited.
 	QuotaOf func(tenant string) sched.Quota
 }
 
 type Runtime struct {
-	mu           sync.Mutex
-	kernels      map[string]*capcompute.Kernel[string, ProcessContext]
-	programs     *loadedPrograms
-	processTable capcompute.ProcessTable[string, ProcessContext]
-	scheduler    *sched.Scheduler[string, ProcessContext]
-	taints       *capcompute.Taints[string]
-	log          eventlog.Log
-	leases       Leases
-	tasks        *eventTaskStore
-	tenantID     string
-	sessions     map[string]*sessionState
-	processes    map[string]*processState
-	subscribers  map[string]map[uint64]chan Event
-	nextSubID    uint64
-	idSource     func(string) (string, error)
-	now          func() time.Time
-	eventSize    int
-	taskSecret   []byte
-	taskTTL      time.Duration
-	instanceID   string
-	leaseTTL     time.Duration
-	dispatchers  DispatcherProvider
-	factory      internalhost.Factory[string, ProcessContext]
-	wg           sync.WaitGroup
-	closed       bool
+	mu              sync.Mutex
+	kernels         map[string]*capcompute.Kernel[string, ProcessContext]
+	programs        *loadedPrograms
+	processTable    capcompute.ProcessTable[string, ProcessContext]
+	scheduler       *sched.Scheduler[string, ProcessContext]
+	taints          *capcompute.Taints[string]
+	log             eventlog.Log
+	leases          Leases
+	tasks           *eventTaskStore
+	tenantID        string
+	sessions        map[string]*sessionState
+	processes       map[string]*processState
+	subscribers     map[string]map[uint64]chan Event
+	nextSubID       uint64
+	idSource        func(string) (string, error)
+	now             func() time.Time
+	eventSize       int
+	taskSecret      []byte
+	taskTTL         time.Duration
+	instanceID      string
+	leaseTTL        time.Duration
+	maxAbortRetries int
+	dispatchers     DispatcherProvider
+	factory         internalhost.Factory[string, ProcessContext]
+	wg              sync.WaitGroup
+	closed          bool
 }
 
 type sessionState struct {
@@ -198,6 +203,10 @@ type agentInput struct {
 	History      []HistoryMessage `json:"history,omitempty"`
 	SystemPrompt string           `json:"system_prompt,omitempty"`
 	Capabilities []sys.Capability `json:"capabilities,omitempty"`
+	// Attempt is which run of this process the guest is on (1 = first). A
+	// retried process — including an abort-retry — sees a higher attempt, so a
+	// program can back off or change strategy.
+	Attempt int `json:"attempt,omitempty"`
 }
 
 type SessionSummary struct {

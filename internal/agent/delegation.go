@@ -374,6 +374,8 @@ func childTerminal(snapshot ProcessSnapshot) (answer string, done bool, err erro
 		return "", true, fmt.Errorf("child process stopped")
 	case ProcessInterrupted:
 		return "", true, fmt.Errorf("child process interrupted")
+	case ProcessCompensated:
+		return "", true, fmt.Errorf("child process rolled back: %s", snapshot.Answer)
 	default:
 		return "", false, nil
 	}

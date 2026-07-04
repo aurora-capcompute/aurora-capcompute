@@ -1,7 +1,5 @@
-github.com/aurora-capcompute/capcompute v0.0.0-20260703235707-80e04f04b5a3 h1:DGEAvo70XEWoJnAhgW9QvGe5pnCgzcEEW+OGvHikL3M=
-github.com/aurora-capcompute/capcompute v0.0.0-20260703235707-80e04f04b5a3/go.mod h1:amOvok50sDYLlp8/mG6zgxdpkvXhW2HzVnrErRB68Gw=
-github.com/aurora-capcompute/capcompute v0.0.0-20260704181906-be72beed7853 h1:Wbx5yRaI6q/p47YbULM6YPB+MQdeG86Fu1dAM8nEMyI=
-github.com/aurora-capcompute/capcompute v0.0.0-20260704181906-be72beed7853/go.mod h1:amOvok50sDYLlp8/mG6zgxdpkvXhW2HzVnrErRB68Gw=
+github.com/aurora-capcompute/capcompute v0.0.0-20260704210933-64fbab12b631 h1:cfzWgx0FrAF1/K0mDv9/I5kpJiW+/Lh1QWVHXaUzKaA=
+github.com/aurora-capcompute/capcompute v0.0.0-20260704210933-64fbab12b631/go.mod h1:amOvok50sDYLlp8/mG6zgxdpkvXhW2HzVnrErRB68Gw=
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc h1:U9qPSI2PIWSS1VwoXQT9A3Wy9MM3WgvqSxFWenqJduM=
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/dlclark/regexp2 v1.11.0 h1:G/nrcoOa7ZXlpoa/91N3X7mM3r8eIlMBBJZvsz/mxKI=
