@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -1149,6 +1150,12 @@ type compensationDispatcher struct {
 	// shipping.book, which yields for approval — parking the process with the
 	// turn's section open.
 	parkMidTurn bool
+	// gapInfraFailure scripts the worst register-after window: charge, then
+	// inventory.sync (whose driver dies once with an infrastructure error —
+	// killing the guest BEFORE it reaches the compensate), then the refund
+	// registration. The later turn aborts, so the registered refund must run.
+	gapInfraFailure bool
+	inventoryFailed bool
 	// dedupe makes charge/refund exactly-once on the idempotency key, the way
 	// a real effectful driver is (ROADMAP #18).
 	dedupe bool
@@ -1187,6 +1194,7 @@ func (d *compensationDispatcher) Capabilities() []sys.Capability {
 		{Name: "billing.charge", Description: "charge a card", InputSchema: json.RawMessage(`{"type":"object"}`)},
 		{Name: "billing.refund", Description: "refund a charge", InputSchema: json.RawMessage(`{"type":"object"}`)},
 		{Name: "shipping.book", Description: "book a shipment", InputSchema: json.RawMessage(`{"type":"object"}`)},
+		{Name: "inventory.sync", Description: "sync inventory", InputSchema: json.RawMessage(`{"type":"object"}`)},
 	}
 }
 
@@ -1215,6 +1223,17 @@ func (d *compensationDispatcher) Dispatch(ctx context.Context, _ ProcessContext,
 			return sys.Yield("Approve the shipment"), nil
 		}
 		return sys.Result(json.RawMessage(`{"booked":true}`)), nil
+	case "inventory.sync":
+		// One infrastructure death (an error, not a failed result: the quantum
+		// dies, the intent stays open), then success on the re-driven intent.
+		d.mu.Lock()
+		if !d.inventoryFailed {
+			d.inventoryFailed = true
+			d.mu.Unlock()
+			return sys.SyscallResult{}, errors.New("inventory hiccup")
+		}
+		d.mu.Unlock()
+		return sys.Result(json.RawMessage(`{"synced":true}`)), nil
 	case "openai.chat":
 		var req struct {
 			Messages []struct {
@@ -1260,6 +1279,9 @@ func (d *compensationDispatcher) Dispatch(ctx context.Context, _ ProcessContext,
 		// observations back for the abort story.
 		if d.parkMidTurn {
 			return chatActions(`{"actions":[{"action":"billing.charge","content":{"amount":100}},{"action":"compensate","content":{"name":"billing.refund","args":{"charge_id":"c1"}}},{"action":"shipping.book","content":{"speed":"express"}}]}`), nil
+		}
+		if d.gapInfraFailure {
+			return chatActions(`{"actions":[{"action":"billing.charge","content":{"amount":100}},{"action":"inventory.sync","content":{}},{"action":"compensate","content":{"name":"billing.refund","args":{"charge_id":"c1"}}}]}`), nil
 		}
 		return chatActions(`{"actions":[{"action":"billing.charge","content":{"amount":100}},{"action":"compensate","content":{"name":"billing.refund","args":{"charge_id":"c1"}}}]}`), nil
 	default:

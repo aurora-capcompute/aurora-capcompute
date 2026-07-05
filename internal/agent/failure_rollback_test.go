@@ -67,13 +67,15 @@ func TestFailureInsideSectionRollsBackThenRetryRecovers(t *testing.T) {
 	}
 
 	// Retry forks at the section's begin — over compensated state — and the
-	// fresh attempt completes without a second charge.
+	// fresh attempt completes without a second charge. Attempt 3, exactly: the
+	// deterministic failure earned one re-drive (which replayed to the same
+	// wall with no journal progress) before the rollback ran.
 	if _, err := runtime.Retry(proc.ID, RetryResume); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
 	final := waitForStatus(t, runtime, proc.ID, ProcessCompleted)
-	if final.Answer != "recovered-after-rollback" || final.Attempt != 2 {
-		t.Fatalf("answer = %q attempt = %d, want recovery on attempt 2", final.Answer, final.Attempt)
+	if final.Answer != "recovered-after-rollback" || final.Attempt != 3 {
+		t.Fatalf("answer = %q attempt = %d, want recovery on attempt 3 (one re-drive, one rollback retry)", final.Answer, final.Attempt)
 	}
 	disp.mu.Lock()
 	charges, refunds = disp.charges, disp.refunds
@@ -108,6 +110,30 @@ func TestRetryAfterRollbackReExecutesIdenticalEffects(t *testing.T) {
 	disp.mu.Unlock()
 	if charges != 2 || refunds != 1 {
 		t.Fatalf("charges = %d, refunds = %d, want 2 and 1: the fresh attempt's identical charge must re-execute, never adopt the compensated one", charges, refunds)
+	}
+}
+
+// TestInfraFailureInTheGapHealsByRedrive: the driver dies between an effect
+// and its registration — the worst register-after-dispatch window. The
+// failure re-drives by replay: the recorded charge is served (never
+// re-executed), the open inventory intent re-drives under its original key,
+// and the guest walks forward into the registration it never made. When the
+// model later aborts, the refund is armed and runs — nothing leaked, no
+// human involved.
+func TestInfraFailureInTheGapHealsByRedrive(t *testing.T) {
+	disp := &compensationDispatcher{gapInfraFailure: true, abortContent: `{"reason":"order abandoned"}`}
+	runtime := newCompensationRuntime(t, disp)
+	proc := startCompensationProcess(t, runtime)
+
+	final := waitForStatus(t, runtime, proc.ID, ProcessCompensated)
+	disp.mu.Lock()
+	charges, refunds := disp.charges, disp.refunds
+	disp.mu.Unlock()
+	if charges != 1 || refunds != 1 {
+		t.Fatalf("charges = %d, refunds = %d, want the gap-interrupted registration recovered and executed exactly once", charges, refunds)
+	}
+	if !strings.Contains(final.Answer, "billing.refund") {
+		t.Fatalf("rollback report = %q, want the executed undo named", final.Answer)
 	}
 }
 

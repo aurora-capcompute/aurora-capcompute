@@ -719,13 +719,16 @@ func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, erro
 			proc.cascade = false
 		}
 	} else {
-		// Failed/stopped/interrupted resume: fork at the end of the journal and
-		// let the program continue, replaying every recorded outcome including
-		// soft failures. A failure inside an open section never lands here: the
-		// failure aborted the section (rollback-before-redo), so its journal
-		// ends in an abort — settled forks at the section's begin above,
-		// unsettled resumes the rollback first.
-		r.forkJournalLocked(proc, proc.journal.Length(), RetryResume)
+		// Failed/stopped/interrupted resume: same revision, no fork. A resume
+		// continues the attempt — replay serves everything recorded (an open
+		// intent at the tail re-drives under its original key) and the guest
+		// proceeds mid-flight, so an interruption never touches effects and
+		// never opens a new key space. Only a rollback mints a new revision.
+		// Reuse the whole child subtree: every delegation call is served or
+		// re-driven from the recorded prefix.
+		proc.cascade = true
+		proc.cascadeMode = RetryResume
+		proc.cascadeCursor = childrenBefore(proc.childSpawnOffsets, proc.journal.Length())
 	}
 	return r.relaunchLocked(proc)
 }
@@ -784,11 +787,15 @@ func (r *Runtime) relaunchLocked(proc *processState) (ProcessSnapshot, error) {
 
 // forkJournalLocked re-forks process's journal at forkOffset as a new revision,
 // records the retry mode for downstream cascade children, and positions the
-// cascade cursor. Must be called with the runtime mutex held.
+// cascade cursor. Forks happen only where an attempt boundary is real — a
+// settled rollback re-running its section, or an explicit restart — never for
+// a plain resume, which continues the same revision. Must be called with the
+// runtime mutex held.
 func (r *Runtime) forkJournalLocked(proc *processState, forkOffset int, mode RetryMode) {
 	parent := proc.journal
 	proc.revision++
 	proc.forkOffset = forkOffset
+	proc.lastFailureLength = 0
 	proc.journal = newLogJournal(
 		parent.log, parent.scope, parent.proc, proc.revision,
 		parent.history, forkOffset,

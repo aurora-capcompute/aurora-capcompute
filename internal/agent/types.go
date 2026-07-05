@@ -163,6 +163,13 @@ type processState struct {
 	// revision that was forked but crashed before logging any record can be
 	// reconstructed on restore.
 	forkOffset int
+	// lastFailureLength is the journal length observed at this revision's most
+	// recent guest failure — the re-drive progress guard. Failing again at the
+	// same length means the re-drive appended nothing: a deterministic wall,
+	// resume is impossible, the section rolls back. In-memory only (length
+	// grows monotonically within a revision, so losing it to a crash merely
+	// buys one extra re-drive); cleared when the journal forks.
+	lastFailureLength int
 	// cascade re-execution state: when a process is restarted, cascade is set so the
 	// delegation router reuses (retries) the existing children at cascadeCursor in
 	// spawn order rather than spawning fresh ones. cascadeMode records whether the
@@ -181,7 +188,10 @@ type processState struct {
 
 // ProcessContext is the host-side credential for one process revision: the syscall
 // triad's "who". The kernel keys instances by PID(); two revisions of one process
-// are distinct processes, so a forked retry can never resume a stale instance.
+// are distinct processes, so a forked retry (a rollback's re-run, a restart)
+// can never resume a stale instance. A plain resume deliberately keeps its
+// revision — it continues the same attempt — and activates fresh by replay,
+// since the scheduler retains only yielded processes as warm residents.
 type ProcessContext struct {
 	TenantID  string `json:"tenant_id"`
 	SessionID string `json:"session_id"`

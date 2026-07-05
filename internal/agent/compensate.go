@@ -11,13 +11,18 @@ package agent
 // process as compensated. The whole story — registrations, abort, executed
 // compensations — lives in the journal, in order.
 //
-// The rollback triggers whether or not the guest is alive to ask for it. A
-// guest failure or a stop inside an open section is an implicit abort: the
-// host authors the same sys.abort record (journaled.Abort, with a cause the
-// guest cannot forge) and runs the same settle path before the process
-// reports failed or stopped, so a retry always forks over compensated state.
-// Only a host interruption skips it — a restart resumes the section
-// mid-flight by replay, because a restart must not touch effects.
+// The rollback triggers whether or not the guest is alive to ask for it, but
+// only when resuming is provably impossible. An interruption (host restart)
+// and a guest failure alike resume by replay first — same revision, recorded
+// effects served, open intents re-driven under their original keys, the
+// registrations the cut-off guest was about to make landing in the journal —
+// which is what makes registering an undo after its effect safe. A failure
+// that re-drives without journal progress has hit a deterministic wall: the
+// host then authors the same sys.abort record the guest would (journaled.Abort,
+// with a cause the guest cannot forge) and runs the same settle path before
+// the process reports failed. A stop rolls back immediately — the human asked
+// for an end, not a resume. A retry after either forks at the section's begin,
+// over compensated state.
 //
 // Scope is positional: an abort rolls back everything registered since the
 // outermost-open sys.begin (committed inner sections included — a section
@@ -251,14 +256,32 @@ func (r *Runtime) beginHostAbort(processID, cause, reason string) bool {
 }
 
 // failProcess finishes a failing process. A failure inside an open critical
-// section is an implicit abort: the section can never commit, so the runtime
-// closes it exactly as sys.abort would — the abort record journaled with cause
-// "failure", the registered compensations run newest-first — before the
-// process reports failed. Every crash window resumes from the journal, and a
-// later retry forks at the section's begin over rolled-back state instead of
-// orphaning a half-executed attempt. Without an open section the failure is
-// terminal as-is: nothing partial is awaiting a commit that will never come.
+// section is first treated like any interruption: re-drive by replay, because
+// most failures are transient and a resume completes what the failure cut
+// short — the recorded effects are served, an open intent re-drives under its
+// original key, and the registrations the guest was about to make land in the
+// journal. This is what makes registering an undo after its effect safe: the
+// rollback can only run once every registration reachable from the recorded
+// history is durable. A re-drive that appends nothing has hit a deterministic
+// wall — resume is impossible — and only then does the implicit abort run:
+// the abort record journaled with cause "failure", the registered
+// compensations newest-first, the process reporting failed, and a later retry
+// forking at the section's begin over rolled-back state. Without an open
+// section the failure is terminal as-is: nothing partial is awaiting a commit
+// that will never come.
 func (r *Runtime) failProcess(processID string, failure error) {
+	if r.redriveAfterFailure(processID) {
+		return
+	}
+	r.failNow(processID, failure)
+}
+
+// failNow rolls an open section back and finishes the process as failed, with
+// no re-drive — the path for failures that are decisions rather than
+// accidents: a child failure propagated under OnFailurePropagate (the child
+// already earned its own re-drive before its wall; the policy says surface
+// it) and a failure whose re-drive hit the wall.
+func (r *Runtime) failNow(processID string, failure error) {
 	if failure == nil {
 		failure = errors.New("process failed")
 	}
@@ -267,6 +290,40 @@ func (r *Runtime) failProcess(processID string, failure error) {
 		return
 	}
 	r.finish(processID, ProcessFailed, "", failure)
+}
+
+// redriveAfterFailure relaunches a process that failed inside an open critical
+// section, at most once per journal length: the progress guard. It reports
+// false — fall through to the rollback — when no section is open, a rollback
+// is already the journal's last word, a stop or shutdown is in flight, or the
+// journal did not grow since the previous failure (the deterministic wall).
+func (r *Runtime) redriveAfterFailure(processID string) bool {
+	r.mu.Lock()
+	proc := r.processes[processID]
+	if proc == nil || proc.journal == nil || proc.stopRequested || r.closed {
+		r.mu.Unlock()
+		return false
+	}
+	journal := proc.journal
+	if _, open := journal.outermostOpenBegin(); !open {
+		r.mu.Unlock()
+		return false
+	}
+	if _, aborted := journal.abortTail(); aborted {
+		r.mu.Unlock()
+		return false
+	}
+	length := journal.Length()
+	if proc.lastFailureLength == length {
+		r.mu.Unlock()
+		return false
+	}
+	proc.lastFailureLength = length
+	if _, err := r.relaunchLocked(proc); err != nil {
+		slog.Warn("re-drive after failure", "process_id", processID, "error", err)
+		return false
+	}
+	return true
 }
 
 // stopProcess finishes a stopped process, first rolling back its open critical

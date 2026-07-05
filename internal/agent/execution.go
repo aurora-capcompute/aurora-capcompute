@@ -180,7 +180,9 @@ func (r *Runtime) execute(processID string) {
 	}
 	r.mu.Unlock()
 	if forced != nil {
-		r.failProcess(processID, forced)
+		// A propagated child failure is a policy decision, not an accident —
+		// no re-drive: roll the open section back and surface it.
+		r.failNow(processID, forced)
 		return
 	}
 	switch result.Status {
