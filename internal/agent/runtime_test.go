@@ -1137,6 +1137,14 @@ type compensationDispatcher struct {
 	// guardRefunds makes billing.refund yield until dispatched with an approved
 	// Authorization — the sign-off-gated undo.
 	guardRefunds bool
+	// failMidTurn scripts the first turn as charge + registered refund + a call
+	// to an ungranted capability, so the guest fails with the turn's section
+	// open — after the effect and its registration.
+	failMidTurn bool
+	// parkMidTurn scripts the first turn as charge + registered refund +
+	// shipping.book, which yields for approval — parking the process with the
+	// turn's section open.
+	parkMidTurn bool
 
 	mu         sync.Mutex
 	charges    int
@@ -1149,6 +1157,7 @@ func (d *compensationDispatcher) Capabilities() []sys.Capability {
 		llmCapability(),
 		{Name: "billing.charge", Description: "charge a card", InputSchema: json.RawMessage(`{"type":"object"}`)},
 		{Name: "billing.refund", Description: "refund a charge", InputSchema: json.RawMessage(`{"type":"object"}`)},
+		{Name: "shipping.book", Description: "book a shipment", InputSchema: json.RawMessage(`{"type":"object"}`)},
 	}
 }
 
@@ -1174,6 +1183,11 @@ func (d *compensationDispatcher) Dispatch(_ context.Context, _ ProcessContext, s
 		d.refundArgs = string(syscall.Args)
 		d.mu.Unlock()
 		return sys.Result(json.RawMessage(`{"refunded":true}`)), nil
+	case "shipping.book":
+		if auth.Decision != sys.Approved {
+			return sys.Yield("Approve the shipment"), nil
+		}
+		return sys.Result(json.RawMessage(`{"booked":true}`)), nil
 	case "openai.chat":
 		var req struct {
 			Messages []struct {
@@ -1192,6 +1206,25 @@ func (d *compensationDispatcher) Dispatch(_ context.Context, _ ProcessContext, s
 			return chatActions(`{"actions":[{"action":"abort","content":` + d.abortContent + `}]}`), nil
 		}
 		// First turn: charge, and register the refund with the charge's id.
+		// The scripted tail then decides how the turn ends: an ungranted call
+		// (the guest fails mid-section), a yielding call (it parks
+		// mid-section), or observations fed back for the abort story.
+		switch {
+		case d.failMidTurn:
+			// Recovery keys on external state, not the attempt number: a
+			// section refork replays the original sys.input (attempt and all),
+			// so what a fresh attempt observes differently is the rolled-back
+			// world — the refund exists, the model concludes.
+			d.mu.Lock()
+			refunded := d.refunds > 0
+			d.mu.Unlock()
+			if refunded {
+				return chatActions(`{"actions":[{"action":"final","content":{"answer":"recovered-after-rollback"}}]}`), nil
+			}
+			return chatActions(`{"actions":[{"action":"billing.charge","content":{"amount":100}},{"action":"compensate","content":{"name":"billing.refund","args":{"charge_id":"c1"}}},{"action":"kaboom.unavailable","content":{}}]}`), nil
+		case d.parkMidTurn:
+			return chatActions(`{"actions":[{"action":"billing.charge","content":{"amount":100}},{"action":"compensate","content":{"name":"billing.refund","args":{"charge_id":"c1"}}},{"action":"shipping.book","content":{"speed":"express"}}]}`), nil
+		}
 		return chatActions(`{"actions":[{"action":"billing.charge","content":{"amount":100}},{"action":"compensate","content":{"name":"billing.refund","args":{"charge_id":"c1"}}}]}`), nil
 	default:
 		return sys.Fail("unsupported call: " + syscall.Name), nil

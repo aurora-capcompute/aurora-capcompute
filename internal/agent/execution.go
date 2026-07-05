@@ -105,11 +105,8 @@ func (r *Runtime) execute(processID string) {
 		return
 	}
 	if proc.stopRequested {
-		r.finishLocked(proc, ProcessStopped, "", context.Canceled)
-		snapshot := r.processSnapshotLocked(proc)
-		sessionID := proc.sessionID
 		r.mu.Unlock()
-		r.publish(sessionID, Event{Type: "process.updated", Data: snapshot})
+		r.stopProcess(processID, context.Canceled)
 		return
 	}
 	leaseResource := fmt.Sprintf("%s/%d", proc.id, proc.revision)
@@ -153,7 +150,11 @@ func (r *Runtime) execute(processID string) {
 		}
 	}
 	if err != nil {
-		r.finish(processID, r.failureStatus(err), "", err)
+		if r.failureStatus(err) == ProcessFailed {
+			r.failProcess(processID, err)
+		} else {
+			r.finish(processID, ProcessInterrupted, "", err)
+		}
 		return
 	}
 
@@ -181,7 +182,7 @@ func (r *Runtime) execute(processID string) {
 	forced := proc.failure
 	r.mu.Unlock()
 	if forced != nil {
-		r.finish(processID, ProcessFailed, "", forced)
+		r.failProcess(processID, forced)
 		return
 	}
 	switch result.Status {
@@ -194,7 +195,7 @@ func (r *Runtime) execute(processID string) {
 		}
 		answer, err := r.answerFromJournal(processID)
 		if err != nil {
-			r.finish(processID, ProcessFailed, "", err)
+			r.failProcess(processID, err)
 			return
 		}
 		r.finish(processID, ProcessCompleted, answer, nil)
@@ -210,12 +211,14 @@ func (r *Runtime) execute(processID string) {
 		closing := r.closed
 		r.mu.Unlock()
 		if closing {
+			// A closing host interrupts, never aborts: the restart resumes the
+			// open section mid-flight — a host restart must not touch effects.
 			r.finish(processID, ProcessInterrupted, "", result.Err)
 		} else {
-			r.finish(processID, ProcessStopped, "", result.Err)
+			r.stopProcess(processID, result.Err)
 		}
 	default:
-		r.finish(processID, ProcessFailed, "", result.Err)
+		r.failProcess(processID, result.Err)
 	}
 }
 

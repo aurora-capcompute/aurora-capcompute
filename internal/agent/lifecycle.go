@@ -23,12 +23,15 @@ const (
 	// callSysCompensate registers an effect's undo: a deferred syscall the
 	// runtime journals (name + concrete guest-supplied args) but executes only
 	// if the critical section later aborts.
-	callSysCompensate = "sys.compensate"
+	callSysCompensate = sys.SyscallCompensate
 	// callSysAbort rolls the open critical section back instead of finishing:
 	// the runtime executes the registered compensations newest-first, then
 	// retries the section after the declared delay or stops the process as
-	// compensated. With no section open, the whole process rolls back.
-	callSysAbort = "sys.abort"
+	// compensated. With no section open, the whole process rolls back. The
+	// host authors the same record (journaled.Abort) when it must close a
+	// section the guest cannot — a failure or a stop — so one journal shape
+	// drives every rollback.
+	callSysAbort = sys.SyscallAbort
 )
 
 type finishArgs struct {
@@ -41,7 +44,19 @@ type abortArgs struct {
 	// seconds after the rollback (0 = immediately). Absent means no retry: the
 	// process finishes as compensated.
 	RetrySeconds *int64 `json:"retry_seconds"`
+	// Cause is reserved for host-authored aborts (journaled.Abort) and decides
+	// the process's terminal state once the rollback settles: "failure" ends
+	// failed with Reason as the error, "stop" ends stopped. Empty is the
+	// guest's own sys.abort, which applies RetrySeconds instead. Guests may
+	// not set it — the lifecycle rejects a forged cause before it journals a
+	// completed abort.
+	Cause string `json:"cause,omitempty"`
 }
+
+const (
+	abortCauseFailure = "failure"
+	abortCauseStop    = "stop"
+)
 
 type compensateArgs struct {
 	Name string          `json:"name"`
@@ -118,6 +133,18 @@ func (l *lifecycleDispatcher) Dispatch(ctx context.Context, cred ProcessContext,
 		// The reason and retry delay travel in syscall.Args and are journaled as
 		// the terminal call; the runtime reads them back, executes the registered
 		// compensations, and applies the retry. Acknowledge so the guest returns.
+		// The cause field is the host's alone: rollback detection only honors a
+		// successfully completed abort, so failing a forged one here keeps it
+		// inert. Empty args are a bare "roll back now, no retry".
+		if len(syscall.Args) > 0 {
+			var args abortArgs
+			if err := json.Unmarshal(syscall.Args, &args); err != nil {
+				return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode sys.abort: %v", err)), nil
+			}
+			if args.Cause != "" {
+				return sys.FailCode(sys.ErrnoInvalidArgs, "sys.abort: cause is reserved for the host"), nil
+			}
+		}
 		return sys.Result(json.RawMessage(`{"ok":true}`)), nil
 	default:
 		return l.next.Dispatch(ctx, cred, syscall, auth)

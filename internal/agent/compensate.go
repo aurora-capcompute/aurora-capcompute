@@ -60,6 +60,10 @@ type abortState struct {
 	Position     int // the sys.abort intent's journal position
 	Reason       string
 	RetrySeconds *int64
+	// Cause is who ended the section: empty for the guest's own sys.abort
+	// (whose retry policy then applies), abortCauseFailure or abortCauseStop
+	// for a host-authored abort (which settles into failed or stopped).
+	Cause string
 	// ScopeStart is where the rollback scope begins and where a retry forks:
 	// one past the open section's sys.begin, or 0 with no section open.
 	ScopeStart int
@@ -103,11 +107,20 @@ func (j *logJournal) abortTail() (*abortState, bool) {
 			if rec.Syscall == nil {
 				return nil, false
 			}
-			if abortPos >= 0 {
-				return nil, false // a normal call after the abort: not a terminal abort
-			}
+			// Only the journal's last word rolls back: any later call abandons
+			// a previous abort. And an abort counts only once its completion
+			// succeeded — a rejected one (a guest forging the host's cause
+			// field) is an ordinary failed call, never a rollback trigger.
+			abortPos = -1
 			if rec.Syscall.Name == callSysAbort && i+1 < length {
-				abortPos = i
+				next, err := j.Load(i + 1)
+				if err != nil {
+					return nil, false
+				}
+				if next.Kind == journaled.KindCompletion && next.Result != nil &&
+					next.Result.Status() == sys.StatusResult {
+					abortPos = i
+				}
 			}
 		case journaled.KindCompensationIntent:
 			// A registration counts as compensated only when its inverse
@@ -142,6 +155,7 @@ func (j *logJournal) abortTail() (*abortState, bool) {
 		Position:     abortPos,
 		Reason:       args.Reason,
 		RetrySeconds: args.RetrySeconds,
+		Cause:        args.Cause,
 		Compensated:  compensated,
 	}
 	if off, ok := j.outermostOpenBegin(); ok {
@@ -191,6 +205,74 @@ func (r *Runtime) hasAbortTail(processID string) bool {
 	}
 	_, ok := journal.abortTail()
 	return ok
+}
+
+// beginHostAbort prepares a host-initiated rollback and reports whether one is
+// due: true means the process's journal holds an open critical section and now
+// ends in a completed abort — either the one just appended (carrying the cause
+// and reason) or one already there (a guest abort this transition raced, whose
+// own policy then wins). False means nothing partial is at stake: no open
+// section, or the abort record could not be made durable — in which case the
+// process finishes plainly and a later retry re-drives the section instead.
+func (r *Runtime) beginHostAbort(processID, cause, reason string) bool {
+	r.mu.Lock()
+	proc := r.processes[processID]
+	var journal *logJournal
+	if proc != nil {
+		journal = proc.journal
+	}
+	r.mu.Unlock()
+	if journal == nil {
+		return false
+	}
+	if _, open := journal.outermostOpenBegin(); !open {
+		return false
+	}
+	if _, aborted := journal.abortTail(); aborted {
+		return true
+	}
+	args, err := json.Marshal(abortArgs{Reason: reason, Cause: cause})
+	if err == nil {
+		err = journaled.Abort(journal, args)
+	}
+	if err != nil {
+		slog.Warn("append host abort record; finishing without rollback",
+			"process_id", processID, "cause", cause, "error", err)
+		return false
+	}
+	return true
+}
+
+// failProcess finishes a failing process. A failure inside an open critical
+// section is an implicit abort: the section can never commit, so the runtime
+// closes it exactly as sys.abort would — the abort record journaled with cause
+// "failure", the registered compensations run newest-first — before the
+// process reports failed. Every crash window resumes from the journal, and a
+// later retry forks at the section's begin over rolled-back state instead of
+// orphaning a half-executed attempt. Without an open section the failure is
+// terminal as-is: nothing partial is awaiting a commit that will never come.
+func (r *Runtime) failProcess(processID string, failure error) {
+	if failure == nil {
+		failure = errors.New("process failed")
+	}
+	if r.beginHostAbort(processID, abortCauseFailure, failure.Error()) {
+		r.settleAbort(processID)
+		return
+	}
+	r.finish(processID, ProcessFailed, "", failure)
+}
+
+// stopProcess finishes a stopped process, first rolling back its open critical
+// section — a stop is an abort without a retry. When the stop raced the
+// guest's own sys.abort (the quantum was killed right after the abort was
+// journaled), the guest's record is already the journal's last word and its
+// policy wins: the stop dissolves into the guest's rollback.
+func (r *Runtime) stopProcess(processID string, cause error) {
+	if r.beginHostAbort(processID, abortCauseStop, "stopped") {
+		r.settleAbort(processID)
+		return
+	}
+	r.finish(processID, ProcessStopped, "", cause)
 }
 
 // errRollbackParked marks a rollback suspended on a human: an inverse yielded,
@@ -322,6 +404,17 @@ func (r *Runtime) settleAbort(processID string) {
 	}
 
 	report := rollbackReport(state, undone)
+	switch state.Cause {
+	case abortCauseFailure:
+		// The host aborted the section because the guest failed: the rollback
+		// is done, the failure stands. The reason carried the original error
+		// across every crash window; a later retry re-runs the section fresh.
+		r.finish(processID, ProcessFailed, report, errors.New(state.Reason))
+		return
+	case abortCauseStop:
+		r.finish(processID, ProcessStopped, report, context.Canceled)
+		return
+	}
 	if state.RetrySeconds == nil {
 		r.finish(processID, ProcessCompensated, report, nil)
 		return

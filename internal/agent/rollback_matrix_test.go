@@ -99,6 +99,11 @@ func (c *crashLog) appends() int {
 // a re-driven intent re-reads its recorded result instead of re-executing.
 type matrixDispatcher struct {
 	world *crashLog
+	// failMidSection scripts the guest-failure story instead of the abort one:
+	// the first turn charges, registers the refund, then requests an ungranted
+	// capability — the guest dies with the section open, right after the
+	// effect and its registration.
+	failMidSection bool
 
 	mu      sync.Mutex
 	seen    map[string]sys.SyscallResult
@@ -172,6 +177,9 @@ func (d *matrixDispatcher) Dispatch(ctx context.Context, _ ProcessContext, sysca
 		if refunded {
 			return chatActions(`{"actions":[{"action":"final","content":{"answer":"recovered-after-rollback"}}]}`), nil
 		}
+		if d.failMidSection {
+			return chatActions(`{"actions":[{"action":"billing.charge","content":{"amount":100}},{"action":"compensate","content":{"name":"billing.refund","args":{"charge_id":"c1"}}},{"action":"kaboom.unavailable","content":{}}]}`), nil
+		}
 		return chatActions(`{"actions":[{"action":"billing.charge","content":{"amount":100}},{"action":"compensate","content":{"name":"billing.refund","args":{"charge_id":"c1"}}}]}`), nil
 	default:
 		return sys.Fail("unsupported call: " + syscall.Name), nil
@@ -232,10 +240,10 @@ type matrixOutcome struct {
 
 // runRollbackFlow drives the whole story once, crashing at the given append
 // (-1 = never), then restarts and recovers to completion.
-func runRollbackFlow(t *testing.T, crashAt int) matrixOutcome {
+func runRollbackFlow(t *testing.T, crashAt int, failMidSection bool) matrixOutcome {
 	t.Helper()
 	world := newCrashLog(crashAt)
-	disp := &matrixDispatcher{world: world, seen: make(map[string]sys.SyscallResult)}
+	disp := &matrixDispatcher{world: world, failMidSection: failMidSection, seen: make(map[string]sys.SyscallResult)}
 
 	// Life 1: run until the crash stops the world or the task completes.
 	first := newMatrixRuntime(t, world, disp)
@@ -258,10 +266,15 @@ func runRollbackFlow(t *testing.T, crashAt int) matrixOutcome {
 		if err != nil {
 			break
 		}
-		if snap.Status == ProcessWaitingTask {
+		switch snap.Status {
+		case ProcessWaitingTask:
 			fireRetryTimers(first, processID)
+		case ProcessFailed:
+			// The failure story's convergence: the section rolled back, a
+			// retry re-runs it fresh (a human or a policy would drive this).
+			_, _ = first.Retry(processID, RetryResume)
 		}
-		if isTerminal(snap.Status) && snap.Status == ProcessCompleted {
+		if snap.Status == ProcessCompleted {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
@@ -324,15 +337,29 @@ func runRollbackFlow(t *testing.T, crashAt int) matrixOutcome {
 	return outcome
 }
 
-// TestRollbackCrashMatrix crashes at every append position of the rollback
-// story and requires convergence: the task completes, effects are exactly-once
-// (one charge, one refund — never a lost or doubled inverse), and the journal
-// chain verifies.
+// TestRollbackCrashMatrix crashes at every append position of the abort
+// story — the guest's own sys.abort — and requires convergence: the task
+// completes, effects are exactly-once (one charge, one refund — never a lost
+// or doubled inverse), and the journal chain verifies.
 func TestRollbackCrashMatrix(t *testing.T) {
+	runCrashMatrix(t, false)
+}
+
+// TestFailureRollbackCrashMatrix is the class the abort matrix cannot see: the
+// guest FAILS mid-section — after the charge executed and its refund was
+// registered — instead of aborting cleanly. The failure must abort the section
+// (rollback-before-redo), and the retry must re-run it over compensated state;
+// crashing at every append across fail → host abort → settle → retry → refork
+// proves no window orphans the registration or doubles an effect.
+func TestFailureRollbackCrashMatrix(t *testing.T) {
+	runCrashMatrix(t, true)
+}
+
+func runCrashMatrix(t *testing.T, failMidSection bool) {
 	if testing.Short() {
 		t.Skip("matrix is not short")
 	}
-	baseline := runRollbackFlow(t, -1)
+	baseline := runRollbackFlow(t, -1, failMidSection)
 	if baseline.answer != "recovered-after-rollback" {
 		t.Fatalf("baseline answer = %q", baseline.answer)
 	}
@@ -341,7 +368,7 @@ func TestRollbackCrashMatrix(t *testing.T) {
 	}
 
 	for crashAt := 1; crashAt < baseline.appends; crashAt++ {
-		outcome := runRollbackFlow(t, crashAt)
+		outcome := runRollbackFlow(t, crashAt, failMidSection)
 		if outcome.skipped {
 			continue // the world ended before the task existed
 		}

@@ -596,7 +596,37 @@ func (r *Runtime) Stop(processID string) (ProcessSnapshot, error) {
 			proc.stop()
 		}
 	case ProcessYielded, ProcessWaitingTask:
-		r.finishLocked(proc, ProcessStopped, "", context.Canceled)
+		abort, aborted := proc.journal.abortTail()
+		_, open := proc.journal.outermostOpenBegin()
+		switch {
+		case aborted && !abort.settled():
+			// A rollback is parked on its pending task; abandoning it would
+			// leave external state undefined. Deny the task instead — that
+			// fails the rollback with the report — or resolve it to finish.
+			r.mu.Unlock()
+			return ProcessSnapshot{}, fmt.Errorf(
+				"%w: process %s is mid-rollback; resolve or deny its pending task instead", ErrConflict, processID)
+		case !aborted && open:
+			// Parked inside an open section: roll it back before stopping — a
+			// stop is an abort without a retry. The settle dispatches drivers,
+			// so it runs off-lock; Stopping guards against concurrent retries.
+			proc.status = ProcessStopping
+			proc.updatedAt = r.now().UTC()
+			snapshot := r.processSnapshotLocked(proc)
+			_ = r.appendProcess(proc)
+			r.mu.Unlock()
+			r.publish(proc.sessionID, Event{Type: "process.updated", Data: snapshot})
+			r.wg.Add(1)
+			go func() {
+				defer r.wg.Done()
+				r.stopProcess(processID, context.Canceled)
+			}()
+			return snapshot, nil
+		default:
+			// No open section — or a settled abort, whose rollback already ran
+			// (the park is its retry timer, now moot): stop plainly.
+			r.finishLocked(proc, ProcessStopped, "", context.Canceled)
+		}
 	case ProcessStopping, ProcessStopped:
 	default:
 		r.mu.Unlock()
@@ -689,9 +719,10 @@ func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, erro
 		// giving the program a completely fresh revision with no shared prefix.
 		r.forkJournalLocked(proc, 0, RetryRestart)
 	} else if aborted {
-		// A settled abort (the retry timer fired, or a human resumed): the
-		// rolled-back attempt stays in the log; the aborted section re-runs
-		// fresh from its begin.
+		// A settled abort — the retry timer fired, or a human retried a
+		// failed/stopped process whose section was rolled back: the rolled-back
+		// attempt stays in the log; the aborted section re-runs fresh from its
+		// begin, over compensated state.
 		r.forkJournalLocked(proc, abort.ScopeStart, RetryResume)
 	} else if proc.status == ProcessYielded || proc.status == ProcessWaitingTask {
 		// Resume from a park: no fork. The journal's open intent at the tail is
@@ -709,17 +740,11 @@ func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, erro
 	} else {
 		// Failed/stopped/interrupted resume: fork at the end of the journal and
 		// let the program continue, replaying every recorded outcome including
-		// soft failures. A failed process only forks earlier when the program
-		// explicitly left a savepoint open: we fork right after the outermost
-		// still-open sys.begin so its whole body re-executes live under the
-		// bumped revision.
-		forkOffset := proc.journal.Length()
-		if proc.status == ProcessFailed {
-			if off, ok := proc.journal.outermostOpenBegin(); ok {
-				forkOffset = off
-			}
-		}
-		r.forkJournalLocked(proc, forkOffset, RetryResume)
+		// soft failures. A failure inside an open section never lands here: the
+		// failure aborted the section (rollback-before-redo), so its journal
+		// ends in an abort — settled forks at the section's begin above,
+		// unsettled resumes the rollback first.
+		r.forkJournalLocked(proc, proc.journal.Length(), RetryResume)
 	}
 	return r.relaunchLocked(proc)
 }
