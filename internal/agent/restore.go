@@ -112,15 +112,18 @@ func (r *Runtime) restoreSession(proj Projection, journals map[string]map[uint64
 		}
 		if j := journals[proc.id][proc.revision]; j != nil {
 			proc.journal = j
-		} else {
+		} else if history := histories[proc.id]; history != nil {
 			// No records logged for this revision yet (process crashed before any
 			// syscall). Share the existing history so replay can serve the shared
 			// prefix; the exact fork point was persisted when the revision forked.
-			history := histories[proc.id]
-			if history == nil {
-				history = newProcessHistory()
-			}
 			proc.journal = r.newJournal(proc, history, sr.ForkOffset)
+		} else {
+			// No journal events survive for this process at all — either it never
+			// journaled anything, or it finished and compaction traded its journal
+			// away, keeping only the snapshot state. An empty view at fork 0 keeps
+			// Journal()/snapshots well-defined (length 0, no dangling shared prefix
+			// beneath a stale fork offset); a hard restart forks from 0 anyway.
+			proc.journal = r.newJournal(proc, newProcessHistory(), 0)
 		}
 		r.processes[proc.id] = proc
 		proc.history = append([]HistoryMessage(nil), session.history...)

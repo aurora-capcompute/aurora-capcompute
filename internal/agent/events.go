@@ -22,6 +22,11 @@ const (
 	evTaskCreated  = "task.created"
 	evTaskResolved = "task.resolved"
 	evTaskExecuted = "task.executed"
+	// evSessionSnapshot is compaction's checkpoint: one event carrying the whole
+	// folded base of a session — every process's latest StoredProcess and every
+	// task record — so a rewritten stream of [snapshot + retained journal
+	// events] folds to the same projection the uncompacted stream did.
+	evSessionSnapshot = "session.snapshot"
 )
 
 // taskEventData carries a task record plus its token hash, which task.Record
@@ -34,6 +39,26 @@ type taskEventData struct {
 
 type taskExecutedData struct {
 	TaskID string `json:"task_id"`
+}
+
+// sessionSnapshotData is the folded base a session.snapshot event carries:
+// every process's latest durable state plus every task record. Tasks travel in
+// the taskEventData envelope so the secret-derived TokenHash (json:"-" on
+// task.Record) survives the snapshot the same way it survives task events —
+// without it a restored pending task could never be resolved.
+type sessionSnapshotData struct {
+	Processes []StoredProcess `json:"processes"`
+	Tasks     []taskEventData `json:"tasks,omitempty"`
+}
+
+// sessionSnapshotEvent builds the session-level checkpoint event (Proc and Rev
+// zero: it belongs to the stream, not to any one process).
+func sessionSnapshotEvent(now time.Time, processes []StoredProcess, tasks []task.Record) (eventlog.Event, error) {
+	data := sessionSnapshotData{Processes: processes}
+	for _, record := range tasks {
+		data.Tasks = append(data.Tasks, taskEventData{Record: record, TokenHash: record.TokenHash})
+	}
+	return encodeEvent(evSessionSnapshot, "", 0, now, data)
 }
 
 func processStateEvent(now time.Time, r StoredProcess) (eventlog.Event, error) {
@@ -89,7 +114,11 @@ type Projection struct {
 
 // Fold reconstructs a session's durable projection from its event stream. Events
 // must be in append order (ascending Seq). Session state is derived from the process
-// projection rather than stored in a dedicated event.
+// projection rather than stored in a dedicated event. A session.snapshot event
+// seeds the projection — folding is last-writer-wins per id, so the events
+// after it (there are none right after a compaction, but appends resume)
+// override the seeded base exactly as they overrode the events the snapshot
+// replaced: a compacted stream folds to the same projection.
 func Fold(events []eventlog.Event) (Projection, error) {
 	proj := Projection{
 		Processes: make(map[string]StoredProcess),
@@ -97,6 +126,18 @@ func Fold(events []eventlog.Event) (Projection, error) {
 	}
 	for _, ev := range events {
 		switch ev.Kind {
+		case evSessionSnapshot:
+			var sd sessionSnapshotData
+			if err := json.Unmarshal(ev.Data, &sd); err != nil {
+				return Projection{}, fmt.Errorf("decode session.snapshot: %w", err)
+			}
+			for _, r := range sd.Processes {
+				proj.Processes[r.ID] = r
+			}
+			for _, td := range sd.Tasks {
+				td.Record.TokenHash = td.TokenHash
+				proj.Tasks[td.Record.ID] = td.Record
+			}
 		case evProcessState:
 			var r StoredProcess
 			if err := json.Unmarshal(ev.Data, &r); err != nil {

@@ -429,7 +429,9 @@ func encodeOutcome(result sys.SyscallResult) JournalOutcome {
 // processHistory so forked journals can serve the shared prefix without
 // parent-pointer chains. It returns both the journals and the per-process
 // histories (so callers that need to create new revisions for an existing process
-// can share the same history).
+// can share the same history). Every other kind — session.snapshot included —
+// is skipped: a snapshot carries process/task state, never journal records, so
+// after compaction the only journals that fold are the retained ones.
 func foldJournals(
 	events []eventlog.Event,
 	log eventlog.Log,

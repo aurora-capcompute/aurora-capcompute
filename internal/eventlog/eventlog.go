@@ -48,4 +48,14 @@ type Log interface {
 	// Streams lists the scopes that have at least one event for a tenant, so a
 	// runtime can enumerate sessions to fold on restore.
 	Streams(ctx context.Context, tenantID string) ([]Scope, error)
+	// Compact atomically replaces the stream's entire contents with events,
+	// re-assigning contiguous Seq 1..len(events); any Seq the caller set is
+	// ignored. It is the journal-lifecycle primitive behind snapshot
+	// compaction: the caller hands over a projection-equivalent rewrite (one
+	// snapshot event plus the retained tail) and the store swaps it in as a
+	// single atomic unit — a reader observes the old stream or the new one,
+	// never a mix, and a crash mid-compact must leave the old stream intact.
+	// Subsequent Appends continue at len(events)+1. Compacting to zero events
+	// erases the stream (it stops appearing in Streams).
+	Compact(ctx context.Context, scope Scope, events []Event) error
 }

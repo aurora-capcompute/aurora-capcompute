@@ -62,6 +62,19 @@ func (c *crashLog) Streams(ctx context.Context, tenantID string) ([]eventlog.Sco
 	return c.inner.Streams(ctx, tenantID)
 }
 
+// Compact passes through to the inner log, still honoring fail-stop: a crashed
+// world accepts no writes of any shape. The matrix itself never compacts —
+// this exists so crashLog keeps satisfying eventlog.Log.
+func (c *crashLog) Compact(ctx context.Context, scope eventlog.Scope, events []eventlog.Event) error {
+	c.mu.Lock()
+	if c.down {
+		c.mu.Unlock()
+		return errWorldCrashed
+	}
+	c.mu.Unlock()
+	return c.inner.Compact(ctx, scope, events)
+}
+
 func (c *crashLog) crashed() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
