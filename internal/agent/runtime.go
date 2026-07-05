@@ -610,18 +610,9 @@ func (r *Runtime) Stop(processID string) (ProcessSnapshot, error) {
 			// Parked inside an open section: roll it back before stopping — a
 			// stop is an abort without a retry. The settle dispatches drivers,
 			// so it runs off-lock; Stopping guards against concurrent retries.
-			proc.status = ProcessStopping
-			proc.updatedAt = r.now().UTC()
-			snapshot := r.processSnapshotLocked(proc)
-			_ = r.appendProcess(proc)
-			r.mu.Unlock()
-			r.publish(proc.sessionID, Event{Type: "process.updated", Data: snapshot})
-			r.wg.Add(1)
-			go func() {
-				defer r.wg.Done()
+			return r.spawnSettleLocked(proc, ProcessStopping, func() {
 				r.stopProcess(processID, context.Canceled)
-			}()
-			return snapshot, nil
+			}), nil
 		default:
 			// No open section — or a settled abort, whose rollback already ran
 			// (the park is its retry timer, now moot): stop plainly.
@@ -698,20 +689,10 @@ func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, erro
 			r.mu.Unlock()
 			return ProcessSnapshot{}, fmt.Errorf("%w: process %s has an unfinished rollback; resume it first", ErrConflict, processID)
 		}
-		proc.status = ProcessRunning
 		proc.err = ""
-		proc.updatedAt = r.now().UTC()
-		_ = r.appendProcess(proc)
-		snapshot := r.processSnapshotLocked(proc)
-		sessionID := proc.sessionID
-		r.mu.Unlock()
-		r.publish(sessionID, Event{Type: "process.updated", Data: snapshot})
-		r.wg.Add(1)
-		go func() {
-			defer r.wg.Done()
+		return r.spawnSettleLocked(proc, ProcessRunning, func() {
 			r.settleAbort(processID)
-		}()
-		return snapshot, nil
+		}), nil
 	}
 
 	if mode == RetryRestart {
@@ -747,6 +728,27 @@ func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, erro
 		r.forkJournalLocked(proc, proc.journal.Length(), RetryResume)
 	}
 	return r.relaunchLocked(proc)
+}
+
+// spawnSettleLocked launches a rollback settlement off-lock: it marks the
+// process's transition, makes it durable and visible, then runs settle on the
+// runtime's wait group. The status it stamps (Running for a resumed
+// settlement, Stopping for a stop's rollback) is also the concurrency guard —
+// Retry and Stop refuse both. Called with r.mu held; unlocks it.
+func (r *Runtime) spawnSettleLocked(proc *processState, status ProcessStatus, settle func()) ProcessSnapshot {
+	proc.status = status
+	proc.updatedAt = r.now().UTC()
+	_ = r.appendProcess(proc)
+	snapshot := r.processSnapshotLocked(proc)
+	sessionID := proc.sessionID
+	r.mu.Unlock()
+	r.publish(sessionID, Event{Type: "process.updated", Data: snapshot})
+	r.wg.Add(1)
+	go func() {
+		defer r.wg.Done()
+		settle()
+	}()
+	return snapshot
 }
 
 // relaunchLocked resets a process for a fresh quantum and starts it: queued,

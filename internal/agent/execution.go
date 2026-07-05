@@ -119,12 +119,8 @@ func (r *Runtime) execute(processID string) {
 		if err == nil {
 			err = errors.New("process is leased by another Aurora instance")
 		}
-		r.finishLocked(proc, ProcessInterrupted, "", err)
-		_ = r.appendProcess(proc)
-		snapshot := r.processSnapshotLocked(proc)
-		sessionID := proc.sessionID
 		r.mu.Unlock()
-		r.publish(sessionID, Event{Type: "process.updated", Data: snapshot})
+		r.finish(processID, ProcessInterrupted, "", err)
 		return
 	}
 	defer r.leases.Release(
@@ -177,9 +173,11 @@ func (r *Runtime) execute(processID string) {
 
 	result := <-results
 	r.mu.Lock()
-	proc = r.processes[processID]
-	proc.stop = nil
-	forced := proc.failure
+	var forced error
+	if proc = r.processes[processID]; proc != nil {
+		proc.stop = nil
+		forced = proc.failure
+	}
 	r.mu.Unlock()
 	if forced != nil {
 		r.failProcess(processID, forced)

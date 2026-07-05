@@ -11,6 +11,14 @@ package agent
 // process as compensated. The whole story — registrations, abort, executed
 // compensations — lives in the journal, in order.
 //
+// The rollback triggers whether or not the guest is alive to ask for it. A
+// guest failure or a stop inside an open section is an implicit abort: the
+// host authors the same sys.abort record (journaled.Abort, with a cause the
+// guest cannot forge) and runs the same settle path before the process
+// reports failed or stopped, so a retry always forks over compensated state.
+// Only a host interruption skips it — a restart resumes the section
+// mid-flight by replay, because a restart must not touch effects.
+//
 // Scope is positional: an abort rolls back everything registered since the
 // outermost-open sys.begin (committed inner sections included — a section
 // inside a failed section failed with it), or since the beginning of the
@@ -20,7 +28,6 @@ package agent
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -190,21 +197,27 @@ func (j *logJournal) abortTail() (*abortState, bool) {
 	return state, true
 }
 
+// processJournal fetches a process's credentials and live journal under the
+// runtime lock — the preamble every journal-driven settlement path shares.
+func (r *Runtime) processJournal(processID string) (ProcessContext, *logJournal, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	proc := r.processes[processID]
+	if proc == nil || proc.journal == nil {
+		return ProcessContext{}, nil, false
+	}
+	return r.processContextLocked(proc), proc.journal, true
+}
+
 // hasAbortTail reports whether a process's journal ends in a sys.abort — the
 // completion path's cheap dispatch test.
 func (r *Runtime) hasAbortTail(processID string) bool {
-	r.mu.Lock()
-	proc := r.processes[processID]
-	var journal *logJournal
-	if proc != nil {
-		journal = proc.journal
-	}
-	r.mu.Unlock()
-	if journal == nil {
+	_, journal, ok := r.processJournal(processID)
+	if !ok {
 		return false
 	}
-	_, ok := journal.abortTail()
-	return ok
+	_, aborted := journal.abortTail()
+	return aborted
 }
 
 // beginHostAbort prepares a host-initiated rollback and reports whether one is
@@ -215,14 +228,8 @@ func (r *Runtime) hasAbortTail(processID string) bool {
 // section, or the abort record could not be made durable — in which case the
 // process finishes plainly and a later retry re-drives the section instead.
 func (r *Runtime) beginHostAbort(processID, cause, reason string) bool {
-	r.mu.Lock()
-	proc := r.processes[processID]
-	var journal *logJournal
-	if proc != nil {
-		journal = proc.journal
-	}
-	r.mu.Unlock()
-	if journal == nil {
+	_, journal, ok := r.processJournal(processID)
+	if !ok {
 		return false
 	}
 	if _, open := journal.outermostOpenBegin(); !open {
@@ -295,16 +302,8 @@ var errRollbackParked = errors.New("rollback parked on an external task")
 // crash, a resolution, or a manual retry of a failed rollback) continues where
 // the last attempt stopped.
 func (r *Runtime) settleAbort(processID string) {
-	r.mu.Lock()
-	proc := r.processes[processID]
-	var cred ProcessContext
-	var journal *logJournal
-	if proc != nil {
-		cred = r.processContextLocked(proc)
-		journal = proc.journal
-	}
-	r.mu.Unlock()
-	if proc == nil || journal == nil {
+	cred, journal, ok := r.processJournal(processID)
+	if !ok {
 		r.finish(processID, ProcessFailed, "", errors.New("rollback: process journal is unavailable"))
 		return
 	}
@@ -402,13 +401,18 @@ func (r *Runtime) settleAbort(processID string) {
 			return
 		}
 	}
+	r.applyAbortPolicy(ctx, processID, cred, state, rollbackReport(state, undone))
+}
 
-	report := rollbackReport(state, undone)
+// applyAbortPolicy finishes a fully settled rollback. A host-authored abort
+// terminates into its cause — failed (the guest's original error restored
+// from the record) or stopped. The guest's own abort applies its declared
+// retry policy: re-run the section now, park on a durable retry timer, or
+// finish as compensated — with the retry budget as the guard against a guest
+// that aborts forever.
+func (r *Runtime) applyAbortPolicy(ctx context.Context, processID string, cred ProcessContext, state *abortState, report string) {
 	switch state.Cause {
 	case abortCauseFailure:
-		// The host aborted the section because the guest failed: the rollback
-		// is done, the failure stands. The reason carried the original error
-		// across every crash window; a later retry re-runs the section fresh.
 		r.finish(processID, ProcessFailed, report, errors.New(state.Reason))
 		return
 	case abortCauseStop:
@@ -431,13 +435,7 @@ func (r *Runtime) settleAbort(processID string) {
 			fmt.Errorf("abort retry budget exhausted after %d attempts", attempt))
 		return
 	}
-	delay := time.Duration(*state.RetrySeconds) * time.Second
-	if delay < 0 {
-		delay = 0
-	}
-	if delay > maxAbortRetryDelay {
-		delay = maxAbortRetryDelay
-	}
+	delay := min(max(time.Duration(*state.RetrySeconds)*time.Second, 0), maxAbortRetryDelay)
 	if delay == 0 {
 		r.retrySection(processID, state.ScopeStart)
 		return
@@ -488,14 +486,12 @@ func (r *Runtime) parkForRetry(ctx context.Context, cred ProcessContext, state *
 		ID:              taskID,
 		JournalPosition: state.Position,
 		Syscall:         sys.Syscall{Abi: sys.ABIVersion, Name: abortRetryCall, Args: args},
-		Summary:         summaryFor(state.Reason),
+		Summary:         retrySummary(state.Reason),
 		State:           task.StatePending,
 		CreatedAt:       now,
 		ExpiresAt:       &expires,
 	}
-	token := task.Token(r.taskSecret, cred.TenantID, record.ID)
-	sum := sha256.Sum256([]byte(token))
-	record.TokenHash = sum[:]
+	task.StampToken(&record, r.taskSecret)
 	if err := r.tasks.Create(ctx, record); err != nil {
 		return err
 	}
@@ -503,7 +499,8 @@ func (r *Runtime) parkForRetry(ctx context.Context, cred ProcessContext, state *
 	return nil
 }
 
-func summaryFor(reason string) string {
+// retrySummary is the retry timer task's human-facing one-liner.
+func retrySummary(reason string) string {
 	if strings.TrimSpace(reason) == "" {
 		return "abort retry"
 	}

@@ -139,9 +139,7 @@ func (d *Dispatcher[K]) Dispatch(ctx context.Context, cred K, syscall sys.Syscal
 		expires := now.Add(d.TaskTTL)
 		record.ExpiresAt = &expires
 	}
-	token := Token(d.TokenSecret, scope.TenantID, record.ID)
-	sum := sha256.Sum256([]byte(token))
-	record.TokenHash = sum[:]
+	StampToken(&record, d.TokenSecret)
 	if err := d.Store.Create(ctx, record); err != nil {
 		return sys.SyscallResult{}, err
 	}
@@ -199,6 +197,15 @@ func Token(secret []byte, tenantID, taskID string) string {
 	_, _ = mac.Write([]byte{0})
 	_, _ = mac.Write([]byte(taskID))
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// StampToken derives the record's resolution token from the secret and stores
+// its hash on the record — the one way a task is armed. Only the hash is ever
+// persisted; the bearer token itself is recomputed on demand from the same
+// inputs.
+func StampToken(record *Record, secret []byte) {
+	sum := sha256.Sum256([]byte(Token(secret, record.Scope.TenantID, record.ID)))
+	record.TokenHash = sum[:]
 }
 
 func VerifyToken(expectedHash []byte, token string) bool {
