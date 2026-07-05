@@ -15,8 +15,8 @@ import (
 // are state-carried: a process event holds the process's full durable state at that
 // point, so folding is last-writer-wins per id. Session state is derived from
 // the process projection (no separate session event). Task events are semantic
-// (created / resolved / executed). Capability-journal and fork events are
-// defined alongside the journal view.
+// (created / resolved / executed). Capability-journal events (syscall.recorded,
+// journal.header) are defined alongside the journal view.
 const (
 	evProcessState = "process.state"
 	evTaskCreated  = "task.created"
@@ -121,8 +121,8 @@ func Fold(events []eventlog.Event) (Projection, error) {
 				proj.Tasks[x.TaskID] = rec
 			}
 		}
-		// capability.recorded / proc.forked / session.state (legacy, ignored) are
-		// handled by the journal view or silently skipped here.
+		// syscall.recorded / journal.header belong to the journal view
+		// (foldJournals); any other kind is skipped.
 	}
 	proj.Session = deriveStoredSession(proj.Processes)
 	return proj, nil

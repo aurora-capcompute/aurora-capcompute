@@ -359,21 +359,24 @@ var errRollbackParked = errors.New("rollback parked on an external task")
 // crash, a resolution, or a manual retry of a failed rollback) continues where
 // the last attempt stopped.
 func (r *Runtime) settleAbort(processID string) {
+	fail := func(err error) {
+		r.finish(processID, ProcessFailed, "", fmt.Errorf("rollback: %w", err))
+	}
 	cred, journal, ok := r.processJournal(processID)
 	if !ok {
-		r.finish(processID, ProcessFailed, "", errors.New("rollback: process journal is unavailable"))
+		fail(errors.New("process journal is unavailable"))
 		return
 	}
 	state, ok := journal.abortTail()
 	if !ok {
-		r.finish(processID, ProcessFailed, "", errors.New("rollback: journal does not end in sys.abort"))
+		fail(errors.New("journal does not end in sys.abort"))
 		return
 	}
 
 	ctx := context.Background()
 	drivers, err := r.processDrivers(ctx, cred)
 	if err != nil {
-		r.finish(processID, ProcessFailed, "", fmt.Errorf("rollback: %w", err))
+		fail(err)
 		return
 	}
 	// The task layer over the same journal: a yielding inverse becomes a
@@ -392,7 +395,7 @@ func (r *Runtime) settleAbort(processID string) {
 	}
 	compensator, err := journaled.NewCompensator(journal)
 	if err != nil {
-		r.finish(processID, ProcessFailed, "", fmt.Errorf("rollback: %w", err))
+		fail(err)
 		return
 	}
 	// Effects arms the compensator's pending state and surfaces a compensation
@@ -400,7 +403,7 @@ func (r *Runtime) settleAbort(processID string) {
 	// the guest's registrations, not the executed effects.
 	_, resume, err := compensator.Effects(0)
 	if err != nil {
-		r.finish(processID, ProcessFailed, "", fmt.Errorf("rollback: %w", err))
+		fail(err)
 		return
 	}
 	state.Resume = resume
@@ -480,16 +483,21 @@ func (r *Runtime) applyAbortPolicy(ctx context.Context, processID string, cred P
 		r.finish(processID, ProcessCompensated, report, nil)
 		return
 	}
+	// The retry budget counts rollback cycles, not quanta: every abort retry
+	// forks a new revision (the only minting events are rollback re-runs and
+	// restarts), while re-drives and approval parks merely bump the attempt.
+	// Budgeting on attempt would let a flaky-but-recovering section exhaust
+	// its rollbacks without ever looping.
 	r.mu.Lock()
-	attempt := 0
+	rollbacks := uint64(0)
 	if p := r.processes[processID]; p != nil {
-		attempt = p.attempt
+		rollbacks = p.revision - 1
 	}
-	limit := r.maxAbortRetries
+	limit := uint64(r.maxAbortRetries)
 	r.mu.Unlock()
-	if attempt >= limit {
+	if rollbacks >= limit {
 		r.finish(processID, ProcessCompensated, report,
-			fmt.Errorf("abort retry budget exhausted after %d attempts", attempt))
+			fmt.Errorf("abort retry budget exhausted after %d rollbacks", rollbacks))
 		return
 	}
 	delay := min(max(time.Duration(*state.RetrySeconds)*time.Second, 0), maxAbortRetryDelay)
