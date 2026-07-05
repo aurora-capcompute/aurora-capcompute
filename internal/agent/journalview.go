@@ -281,6 +281,12 @@ func (j *logJournal) Append(rec journaled.Record) error {
 		return fmt.Errorf("invalid journal position %d (want %d)", rec.Position, j.forkOffset+len(j.records))
 	}
 	stored := copyRecord(rec)
+	// Stamp the attempt: this revision wrote the record. Records served from
+	// the shared prefix keep the revision that first wrote them, which is what
+	// scopes intent identity (idempotency keys) to the attempt — a re-driven
+	// open intent keeps its original key; a rolled-back section's re-execution
+	// writes fresh records here and gets a fresh key space.
+	stored.Revision = j.rev
 	ev, err := encodeEvent(evSyscall, j.proc, j.rev, j.now(), syscallRecordData{
 		Revision: j.rev,
 		Record:   stored,
@@ -429,9 +435,8 @@ func encodeOutcome(result sys.SyscallResult) JournalOutcome {
 // processHistory so forked journals can serve the shared prefix without
 // parent-pointer chains. It returns both the journals and the per-process
 // histories (so callers that need to create new revisions for an existing process
-// can share the same history). Every other kind — session.snapshot included —
-// is skipped: a snapshot carries process/task state, never journal records, so
-// after compaction the only journals that fold are the retained ones.
+// can share the same history). Every other event kind is skipped: only journal
+// events carry journal records.
 func foldJournals(
 	events []eventlog.Event,
 	log eventlog.Log,

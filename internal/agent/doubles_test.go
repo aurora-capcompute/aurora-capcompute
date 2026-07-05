@@ -78,24 +78,6 @@ func (m *memLog) Streams(_ context.Context, tenantID string) ([]eventlog.Scope, 
 	return out, nil
 }
 
-// Compact atomically swaps the whole stream for events, re-assigning Seq 1..n.
-func (m *memLog) Compact(_ context.Context, scope eventlog.Scope, events []eventlog.Event) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if len(events) == 0 {
-		delete(m.streams, scope)
-		return nil
-	}
-	replaced := make([]eventlog.Event, len(events))
-	for i, ev := range events {
-		ev.Seq = uint64(i) + 1
-		ev.Data = append([]byte(nil), ev.Data...)
-		replaced[i] = ev
-	}
-	m.streams[scope] = replaced
-	return nil
-}
-
 // memProcessTable is an in-memory capcompute.ProcessTable.
 type memProcessTable struct {
 	mu        sync.Mutex

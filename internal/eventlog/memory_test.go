@@ -68,25 +68,6 @@ func (m *memoryLog) Streams(_ context.Context, tenantID string) ([]Scope, error)
 	return out, nil
 }
 
-// Compact swaps the whole stream for events under one lock hold — the
-// contract's atomicity — re-assigning Seq 1..n. Zero events erase the stream.
-func (m *memoryLog) Compact(_ context.Context, scope Scope, events []Event) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if len(events) == 0 {
-		delete(m.streams, scope)
-		return nil
-	}
-	replaced := make([]Event, len(events))
-	for i, ev := range events {
-		ev.Seq = uint64(i) + 1
-		ev.Data = append([]byte(nil), ev.Data...)
-		replaced[i] = ev
-	}
-	m.streams[scope] = replaced
-	return nil
-}
-
 var _ Log = (*memoryLog)(nil)
 
 func TestAppendAssignsContiguousSeq(t *testing.T) {
@@ -154,46 +135,6 @@ func TestStoredEventsAreIsolatedFromCallerMutation(t *testing.T) {
 	again, _ := log.Read(ctx, scope, 0)
 	if string(again[0].Data) != `{"x":1}` {
 		t.Fatalf("read copy aliased stored event: %s", again[0].Data)
-	}
-}
-
-// The Compact contract: the stream is atomically replaced by the given events
-// renumbered from 1, Append continues past the new head, and compacting to
-// nothing erases the stream from Streams.
-func TestCompactReplacesStreamAndRenumbers(t *testing.T) {
-	log := newMemoryLog()
-	ctx := context.Background()
-	scope := Scope{TenantID: "t", SessionID: "th"}
-	_, _ = log.Append(ctx, scope, Event{Kind: "a"}, Event{Kind: "b"}, Event{Kind: "c"}, Event{Kind: "d"})
-
-	if err := log.Compact(ctx, scope, []Event{
-		{Seq: 99, Kind: "snapshot", Data: json.RawMessage(`{"s":1}`)}, // caller Seq is ignored
-		{Seq: 3, Kind: "d"},
-	}); err != nil {
-		t.Fatalf("compact: %v", err)
-	}
-	events, err := log.Read(ctx, scope, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(events) != 2 || events[0].Seq != 1 || events[0].Kind != "snapshot" ||
-		events[1].Seq != 2 || events[1].Kind != "d" {
-		t.Fatalf("compacted stream = %+v, want [snapshot@1 d@2]", events)
-	}
-	// Append continues at the compacted head, not the pre-compaction one.
-	head, err := log.Append(ctx, scope, Event{Kind: "e"})
-	if err != nil || head != 3 {
-		t.Fatalf("append after compact head = %d, err = %v, want 3", head, err)
-	}
-	// Compacting to zero events erases the stream.
-	if err := log.Compact(ctx, scope, nil); err != nil {
-		t.Fatal(err)
-	}
-	if rest, _ := log.Read(ctx, scope, 0); len(rest) != 0 {
-		t.Fatalf("erased stream still has %d events", len(rest))
-	}
-	if streams, _ := log.Streams(ctx, "t"); len(streams) != 0 {
-		t.Fatalf("erased stream still listed: %v", streams)
 	}
 }
 

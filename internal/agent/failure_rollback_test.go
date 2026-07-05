@@ -83,6 +83,34 @@ func TestFailureInsideSectionRollsBackThenRetryRecovers(t *testing.T) {
 	}
 }
 
+// TestRetryAfterRollbackReExecutesIdenticalEffects: intent identity is scoped
+// by the revision that wrote the record, so a rolled-back attempt's exactly-
+// once memory is dead to its retry. Attempt 2 re-issues the byte-identical
+// charge at the same journal position; against a deduping driver it must land
+// as a NEW charge (the first one was compensated — adopting its recorded
+// result would commit a refunded effect), while the crash-redrive path keeps
+// the stability the matrix proves.
+func TestRetryAfterRollbackReExecutesIdenticalEffects(t *testing.T) {
+	disp := &compensationDispatcher{failMidTurn: true, rechargeAfterRollback: true, dedupe: true}
+	runtime := newCompensationRuntime(t, disp)
+	proc := startCompensationProcess(t, runtime)
+
+	waitForStatus(t, runtime, proc.ID, ProcessFailed)
+	if _, err := runtime.Retry(proc.ID, RetryResume); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	final := waitForStatus(t, runtime, proc.ID, ProcessCompleted)
+	if final.Answer != "recharged" {
+		t.Fatalf("answer = %q", final.Answer)
+	}
+	disp.mu.Lock()
+	charges, refunds := disp.charges, disp.refunds
+	disp.mu.Unlock()
+	if charges != 2 || refunds != 1 {
+		t.Fatalf("charges = %d, refunds = %d, want 2 and 1: the fresh attempt's identical charge must re-execute, never adopt the compensated one", charges, refunds)
+	}
+}
+
 // TestStopInsideSectionRollsBack: stopping a process parked mid-section (the
 // yielding call's intent open at the journal tail) is an abort without a
 // retry — the registered refund runs, then the process stops.

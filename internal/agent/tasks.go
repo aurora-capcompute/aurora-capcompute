@@ -42,28 +42,6 @@ func (s *eventTaskStore) scope(record task.Record) eventlog.Scope {
 	return eventlog.Scope{TenantID: record.Scope.TenantID, SessionID: record.Scope.SessionID}
 }
 
-// freeze locks the store for the duration of a stream rewrite: every task
-// mutation appends its event under this lock, so holding it closes the one
-// append path that does not run under the runtime mutex (an external
-// ResolveTask racing a compaction). The returned func releases the freeze.
-func (s *eventTaskStore) freeze() (unfreeze func()) {
-	s.mu.Lock()
-	return s.mu.Unlock
-}
-
-// sessionRecordsLocked returns one session's task records in creation order —
-// the base a session.snapshot carries. Callers must hold the store frozen.
-func (s *eventTaskStore) sessionRecordsLocked(tenantID, sessionID string) []task.Record {
-	var out []task.Record
-	for _, record := range s.records {
-		if record.Scope.TenantID == tenantID && record.Scope.SessionID == sessionID {
-			out = append(out, cloneTaskRecord(record))
-		}
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
-	return out
-}
-
 func (s *eventTaskStore) Find(_ context.Context, scope task.Scope, position int, callHash string) (task.Record, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

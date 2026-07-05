@@ -1141,15 +1141,44 @@ type compensationDispatcher struct {
 	// to an ungranted capability, so the guest fails with the turn's section
 	// open — after the effect and its registration.
 	failMidTurn bool
+	// rechargeAfterRollback (with failMidTurn) scripts the post-rollback
+	// attempt to re-issue the byte-identical charge and then conclude — the
+	// probe for attempt-scoped idempotency keys.
+	rechargeAfterRollback bool
 	// parkMidTurn scripts the first turn as charge + registered refund +
 	// shipping.book, which yields for approval — parking the process with the
 	// turn's section open.
 	parkMidTurn bool
+	// dedupe makes charge/refund exactly-once on the idempotency key, the way
+	// a real effectful driver is (ROADMAP #18).
+	dedupe bool
 
 	mu         sync.Mutex
+	seen       map[string]sys.SyscallResult
 	charges    int
 	refunds    int
 	refundArgs string
+}
+
+// effect applies one charge/refund exactly-once when dedupe is on: a re-seen
+// idempotency key replays the recorded result instead of re-executing.
+func (d *compensationDispatcher) effect(ctx context.Context, name string, run func() sys.SyscallResult) (sys.SyscallResult, error) {
+	key, _ := sys.IdempotencyKey(ctx)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.dedupe && key != "" {
+		if recorded, ok := d.seen[name+"/"+key]; ok {
+			return recorded, nil
+		}
+	}
+	result := run()
+	if d.dedupe && key != "" && result.Status() == sys.StatusResult {
+		if d.seen == nil {
+			d.seen = make(map[string]sys.SyscallResult)
+		}
+		d.seen[name+"/"+key] = result
+	}
+	return result, nil
 }
 
 func (d *compensationDispatcher) Capabilities() []sys.Capability {
@@ -1161,28 +1190,26 @@ func (d *compensationDispatcher) Capabilities() []sys.Capability {
 	}
 }
 
-func (d *compensationDispatcher) Dispatch(_ context.Context, _ ProcessContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
+func (d *compensationDispatcher) Dispatch(ctx context.Context, _ ProcessContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	switch syscall.Name {
 	case "billing.charge":
-		d.mu.Lock()
-		d.charges++
-		d.mu.Unlock()
-		return sys.Result(json.RawMessage(`{"charge_id":"c1"}`)), nil
+		return d.effect(ctx, "charge", func() sys.SyscallResult {
+			d.charges++
+			return sys.Result(json.RawMessage(`{"charge_id":"c1"}`))
+		})
 	case "billing.refund":
-		d.mu.Lock()
-		if d.guardRefunds && auth.Decision != sys.Approved {
-			d.mu.Unlock()
-			return sys.Yield("Approve the refund"), nil
-		}
-		if d.failRefundsOnce {
-			d.failRefundsOnce = false
-			d.mu.Unlock()
-			return sys.FailCode(sys.ErrnoInternal, "card network down"), nil
-		}
-		d.refunds++
-		d.refundArgs = string(syscall.Args)
-		d.mu.Unlock()
-		return sys.Result(json.RawMessage(`{"refunded":true}`)), nil
+		return d.effect(ctx, "refund", func() sys.SyscallResult {
+			if d.guardRefunds && auth.Decision != sys.Approved {
+				return sys.Yield("Approve the refund")
+			}
+			if d.failRefundsOnce {
+				d.failRefundsOnce = false
+				return sys.FailCode(sys.ErrnoInternal, "card network down")
+			}
+			d.refunds++
+			d.refundArgs = string(syscall.Args)
+			return sys.Result(json.RawMessage(`{"refunded":true}`))
+		})
 	case "shipping.book":
 		if auth.Decision != sys.Approved {
 			return sys.Yield("Approve the shipment"), nil
@@ -1201,28 +1228,37 @@ func (d *compensationDispatcher) Dispatch(_ context.Context, _ ProcessContext, s
 				return chatActions(`{"actions":[{"action":"final","content":{"answer":"recovered-after-rollback"}}]}`), nil
 			}
 		}
+		if d.failMidTurn {
+			// The failure story, self-contained. Recovery keys on external
+			// state, not the attempt number: a section refork replays the
+			// original sys.input (attempt and all), so what a fresh attempt
+			// observes differently is the rolled-back world — the refund
+			// exists, the model concludes.
+			d.mu.Lock()
+			refunded := d.refunds > 0
+			d.mu.Unlock()
+			if !refunded {
+				return chatActions(`{"actions":[{"action":"billing.charge","content":{"amount":100}},{"action":"compensate","content":{"name":"billing.refund","args":{"charge_id":"c1"}}},{"action":"kaboom.unavailable","content":{}}]}`), nil
+			}
+			if d.rechargeAfterRollback {
+				// The fresh attempt re-issues the byte-identical charge — it
+				// must land as a NEW effect (the rolled-back attempt's key
+				// space is dead) — then concludes on its observation.
+				if _, later := firstAndLaterUser(req.Messages); later {
+					return chatActions(`{"actions":[{"action":"final","content":{"answer":"recharged"}}]}`), nil
+				}
+				return chatActions(`{"actions":[{"action":"billing.charge","content":{"amount":100}}]}`), nil
+			}
+			return chatActions(`{"actions":[{"action":"final","content":{"answer":"recovered-after-rollback"}}]}`), nil
+		}
 		if _, later := firstAndLaterUser(req.Messages); later {
 			// The charge observation is in: give up and roll back.
 			return chatActions(`{"actions":[{"action":"abort","content":` + d.abortContent + `}]}`), nil
 		}
-		// First turn: charge, and register the refund with the charge's id.
-		// The scripted tail then decides how the turn ends: an ungranted call
-		// (the guest fails mid-section), a yielding call (it parks
-		// mid-section), or observations fed back for the abort story.
-		switch {
-		case d.failMidTurn:
-			// Recovery keys on external state, not the attempt number: a
-			// section refork replays the original sys.input (attempt and all),
-			// so what a fresh attempt observes differently is the rolled-back
-			// world — the refund exists, the model concludes.
-			d.mu.Lock()
-			refunded := d.refunds > 0
-			d.mu.Unlock()
-			if refunded {
-				return chatActions(`{"actions":[{"action":"final","content":{"answer":"recovered-after-rollback"}}]}`), nil
-			}
-			return chatActions(`{"actions":[{"action":"billing.charge","content":{"amount":100}},{"action":"compensate","content":{"name":"billing.refund","args":{"charge_id":"c1"}}},{"action":"kaboom.unavailable","content":{}}]}`), nil
-		case d.parkMidTurn:
+		// First turn: charge, and register the refund with the charge's id —
+		// then either park mid-section on a yielding call, or feed the
+		// observations back for the abort story.
+		if d.parkMidTurn {
 			return chatActions(`{"actions":[{"action":"billing.charge","content":{"amount":100}},{"action":"compensate","content":{"name":"billing.refund","args":{"charge_id":"c1"}}},{"action":"shipping.book","content":{"speed":"express"}}]}`), nil
 		}
 		return chatActions(`{"actions":[{"action":"billing.charge","content":{"amount":100}},{"action":"compensate","content":{"name":"billing.refund","args":{"charge_id":"c1"}}}]}`), nil
