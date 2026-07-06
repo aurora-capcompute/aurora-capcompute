@@ -696,8 +696,19 @@ func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, erro
 	}
 
 	if mode == RetryRestart {
-		// Hard restart: always fork from the beginning (the sys.input step),
-		// giving the program a completely fresh revision with no shared prefix.
+		// Hard restart: fork from the beginning, giving the program a
+		// completely fresh revision with no shared prefix. Restarting is
+		// abandoning the current revision, so everything it registered and
+		// never committed rolls back first (revision law 2) — the settle runs
+		// off-lock and re-runs the process from scratch when it completes.
+		// A completed process committed its whole-process zone by finishing:
+		// nothing is uncommitted, so it restarts directly.
+		if proc.status != ProcessCompleted {
+			proc.err = ""
+			return r.spawnSettleLocked(proc, ProcessRunning, func() {
+				r.restartProcess(processID)
+			}), nil
+		}
 		r.forkJournalLocked(proc, 0, RetryRestart)
 	} else if aborted {
 		// A settled abort — the retry timer fired, or a human retried a

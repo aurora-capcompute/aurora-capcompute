@@ -161,6 +161,32 @@ func TestStopInsideSectionRollsBack(t *testing.T) {
 	}
 }
 
+// TestRestartAbandonsOpenSection: an explicit restart abandons the current
+// revision, so a process parked mid-section rolls back — the registered
+// refund runs — before the fresh from-scratch run (which re-reads its input,
+// sees attempt 2, and concludes). Without the abandonment the fork at 0 would
+// orphan the charge and its registration in the shadowed revision.
+func TestRestartAbandonsOpenSection(t *testing.T) {
+	disp := &compensationDispatcher{parkMidTurn: true}
+	runtime := newCompensationRuntime(t, disp)
+	proc := startCompensationProcess(t, runtime)
+
+	waitForStatus(t, runtime, proc.ID, ProcessWaitingTask)
+	if _, err := runtime.Retry(proc.ID, RetryRestart); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	final := waitForStatus(t, runtime, proc.ID, ProcessCompleted)
+	if final.Answer != "recovered-after-rollback" {
+		t.Fatalf("answer = %q, want the fresh run's attempt-2 conclusion", final.Answer)
+	}
+	disp.mu.Lock()
+	charges, refunds := disp.charges, disp.refunds
+	disp.mu.Unlock()
+	if charges != 1 || refunds != 1 {
+		t.Fatalf("charges = %d, refunds = %d, want the abandoned revision rolled back exactly once", charges, refunds)
+	}
+}
+
 // TestStopRefusedMidRollback: a rollback parked on its inverse's approval task
 // cannot be stopped out from under — abandoning it would leave external state
 // undefined. The task's denial is the way out.

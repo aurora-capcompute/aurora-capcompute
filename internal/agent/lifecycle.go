@@ -45,17 +45,18 @@ type abortArgs struct {
 	// process finishes as compensated.
 	RetrySeconds *int64 `json:"retry_seconds"`
 	// Cause is reserved for host-authored aborts (journaled.Abort) and decides
-	// the process's terminal state once the rollback settles: "failure" ends
-	// failed with Reason as the error, "stop" ends stopped. Empty is the
-	// guest's own sys.abort, which applies RetrySeconds instead. Guests may
-	// not set it — the lifecycle rejects a forged cause before it journals a
-	// completed abort.
+	// what follows once the rollback settles: "failure" ends failed with
+	// Reason as the error, "stop" ends stopped, "restart" re-runs the process
+	// from scratch as a fresh revision. Empty is the guest's own sys.abort,
+	// which applies RetrySeconds instead. Guests may not set it — the
+	// lifecycle rejects a forged cause before it journals a completed abort.
 	Cause string `json:"cause,omitempty"`
 }
 
 const (
 	abortCauseFailure = "failure"
 	abortCauseStop    = "stop"
+	abortCauseRestart = "restart"
 )
 
 type compensateArgs struct {
