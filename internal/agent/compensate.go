@@ -217,6 +217,17 @@ func (j *logJournal) rollbackView() (*rollbackState, bool) {
 	return state, started
 }
 
+// unsettledRollback reads the process's rollback picture together with the
+// gate Stop and Retry share: whether an abandonment or a journal-marked
+// rollback owns the process and has not yet settled. An unsettled rollback
+// resumes settlement, never the guest, and refuses a restart. Called with the
+// runtime mutex held.
+func (p *processState) unsettledRollback() (state *rollbackState, started, unsettled bool) {
+	state, started = p.journal.rollbackView()
+	unsettled = (p.abandoning != "" || started) && (state == nil || !state.settled())
+	return state, started, unsettled
+}
+
 // registrationsIn scans [start, end) for armed registrations: completed
 // sys.compensate calls, in registration order. A rejected registration never
 // armed.
@@ -251,22 +262,21 @@ func (j *logJournal) registrationsIn(start, end int) []compensationRegistration 
 	return out
 }
 
-// processJournal fetches a process's credentials and live journal under the
-// runtime lock — the preamble every journal-driven settlement path shares.
-func (r *Runtime) processJournal(processID string) (ProcessContext, *logJournal, bool) {
+// liveJournal fetches a process's live journal under the runtime lock.
+func (r *Runtime) liveJournal(processID string) (*logJournal, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	proc := r.processes[processID]
 	if proc == nil || proc.journal == nil {
-		return ProcessContext{}, nil, false
+		return nil, false
 	}
-	return r.processContextLocked(proc), proc.journal, true
+	return proc.journal, true
 }
 
 // guestAborted reports whether a process's journal ends in the guest's own
 // completed sys.abort — the completion path's cheap dispatch test.
 func (r *Runtime) guestAborted(processID string) bool {
-	_, journal, ok := r.processJournal(processID)
+	journal, ok := r.liveJournal(processID)
 	if !ok {
 		return false
 	}
@@ -447,16 +457,16 @@ func (r *Runtime) settleRollback(processID string) {
 	fail := func(err error) {
 		r.finish(processID, ProcessFailed, "", fmt.Errorf("rollback: %w", err))
 	}
-	cred, journal, ok := r.processJournal(processID)
-	if !ok {
+	r.mu.Lock()
+	proc := r.processes[processID]
+	if proc == nil || proc.journal == nil {
+		r.mu.Unlock()
 		fail(errors.New("process journal is unavailable"))
 		return
 	}
-	r.mu.Lock()
-	kind, reason := "", ""
-	if proc := r.processes[processID]; proc != nil {
-		kind, reason = proc.abandoning, proc.err
-	}
+	cred := r.processContextLocked(proc)
+	journal := proc.journal
+	kind, reason := proc.abandoning, proc.err
 	r.mu.Unlock()
 	state, started := journal.rollbackView()
 	if state == nil {
@@ -471,6 +481,15 @@ func (r *Runtime) settleRollback(processID string) {
 		// A restart abandons the whole revision: the fork at 0 severs
 		// everything, so everything uncommitted rolls back.
 		state.widenToRevision(journal)
+	}
+	// The report names the guest's declared reason; a host abandonment
+	// reports the error recorded when it was stamped, or failing that its kind.
+	reportReason := state.Reason
+	if kind != "" {
+		reportReason = reason
+		if reportReason == "" {
+			reportReason = kind
+		}
 	}
 
 	ctx := context.Background()
@@ -529,13 +548,6 @@ func (r *Runtime) settleRollback(processID string) {
 		}
 		undone = append(undone, inverse.Name)
 		return nil
-	}
-	reportReason := state.Reason
-	if kind != "" {
-		reportReason = reason
-		if reportReason == "" {
-			reportReason = kind
-		}
 	}
 	settleStopped := func(err error) {
 		if errors.Is(err, errRollbackParked) {

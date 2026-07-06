@@ -175,14 +175,8 @@ func (l *lifecycleDispatcher) Capabilities() []sys.Capability {
 // therefore sourced from the tape (the single source of truth) rather than the
 // guest's return value.
 func (r *Runtime) answerFromJournal(processID string) (string, error) {
-	r.mu.Lock()
-	proc := r.processes[processID]
-	var journal *logJournal
-	if proc != nil {
-		journal = proc.journal
-	}
-	r.mu.Unlock()
-	if journal == nil {
+	journal, ok := r.liveJournal(processID)
+	if !ok {
 		return "", errors.New("agent process journal is unavailable")
 	}
 	length := journal.Length()

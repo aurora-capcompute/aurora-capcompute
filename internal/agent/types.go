@@ -36,7 +36,8 @@ const (
 	ProcessStopped     ProcessStatus = "stopped"
 	ProcessFailed      ProcessStatus = "failed"
 	// ProcessCompensated is terminal: the guest rolled the process back with
-	// sys.abort and the runtime unwound its completed effects (saga compensation).
+	// sys.abort — its registered compensations ran — and declared no retry,
+	// or exhausted the retry budget.
 	ProcessCompensated ProcessStatus = "compensated"
 )
 
@@ -78,9 +79,11 @@ type Config struct {
 	// least-recently-used instances are deactivated past it and reactivate by
 	// journal replay (0 = a default of 64).
 	MaxResidentProcesses int
-	// MaxAbortRetries bounds how many attempts a process gets before a
+	// MaxAbortRetries bounds how many rollbacks a process gets before a
 	// sys.abort retry is refused and the process finishes as compensated
 	// (0 = a default of 10) — the guard against a guest that aborts forever.
+	// The budget counts rollback cycles (revisions minted), not quanta: crash
+	// re-drives and approval parks never spend it.
 	MaxAbortRetries int
 	// QuotaOf reports a tenant's scheduling quota. Nil means unlimited.
 	QuotaOf func(tenant string) sched.Quota

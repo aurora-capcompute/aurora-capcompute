@@ -239,8 +239,8 @@ func (r *Runtime) journalFor(_ context.Context, cred ProcessContext) (journaled.
 
 // headerFor is the journal writer identity for one process revision: the
 // syscall ABI, the program digest as the program, and the process id. The
-// tape refuses to
-// replay a journal whose recorded header differs — the versioned-replay law.
+// tape refuses to replay a journal whose recorded header differs — the
+// versioned-replay law.
 func (r *Runtime) headerFor(cred ProcessContext) journaled.Header {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -596,10 +596,10 @@ func (r *Runtime) Stop(processID string) (ProcessSnapshot, error) {
 			proc.stop()
 		}
 	case ProcessYielded, ProcessWaitingTask:
-		state, started := proc.journal.rollbackView()
+		_, started, unsettled := proc.unsettledRollback()
 		_, open := proc.journal.outermostOpenBegin()
 		switch {
-		case (proc.abandoning != "" || started) && (state == nil || !state.settled()):
+		case unsettled:
 			// A rollback is parked on its pending task; walking away would
 			// leave external state undefined. Deny the task instead — that
 			// fails the rollback with the report — or resolve it to finish.
@@ -678,8 +678,8 @@ func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, erro
 		return ProcessSnapshot{}, fmt.Errorf("%w: session already has active process %s", ErrConflict, session.activeProcessID)
 	}
 
-	state, started := proc.journal.rollbackView()
-	if (proc.abandoning != "" || started) && (state == nil || !state.settled()) {
+	state, started, unsettled := proc.unsettledRollback()
+	if unsettled {
 		// A rollback is in flight — an abandonment not yet concluded, or a
 		// guest abort whose settlement a crash or a failed compensation cut
 		// short. Resume the rollback — never the guest: replaying past a
@@ -729,9 +729,7 @@ func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, erro
 		// park was a delegated child's approval, enable cascade reconnection so
 		// the re-executed delegation call reuses the now-finished child.
 		if proc.reconnectChildren {
-			proc.cascade = true
-			proc.cascadeMode = RetryResume
-			proc.cascadeCursor = childrenBefore(proc.childSpawnOffsets, proc.journal.Length())
+			proc.resumeCascade()
 		} else {
 			proc.cascade = false
 		}
@@ -743,9 +741,7 @@ func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, erro
 		// never opens a new key space. Only a rollback mints a new revision.
 		// Reuse the whole child subtree: every delegation call is served or
 		// re-driven from the recorded prefix.
-		proc.cascade = true
-		proc.cascadeMode = RetryResume
-		proc.cascadeCursor = childrenBefore(proc.childSpawnOffsets, proc.journal.Length())
+		proc.resumeCascade()
 	}
 	return r.relaunchLocked(proc)
 }
@@ -825,6 +821,16 @@ func (r *Runtime) forkJournalLocked(proc *processState, forkOffset int, mode Ret
 	proc.cascade = true
 	proc.cascadeMode = mode
 	proc.cascadeCursor = childrenBefore(proc.childSpawnOffsets, forkOffset)
+}
+
+// resumeCascade arms cascade reconnection for a resume at the same revision:
+// the delegation router reuses the recorded children in spawn order, the
+// cursor starting past those whose delegation call replay serves from the
+// journal. Called with the runtime mutex held.
+func (p *processState) resumeCascade() {
+	p.cascade = true
+	p.cascadeMode = RetryResume
+	p.cascadeCursor = childrenBefore(p.childSpawnOffsets, p.journal.Length())
 }
 
 // childrenBefore counts the children whose delegation completion sits inside

@@ -152,8 +152,8 @@ func TestInfraFailureInTheGapHealsByRedrive(t *testing.T) {
 }
 
 // TestStopInsideSectionRollsBack: stopping a process parked mid-section (the
-// yielding call's intent open at the journal tail) is an abort without a
-// retry — the registered refund runs, then the process stops.
+// yielding call's intent open at the journal tail) is an abandonment without
+// a retry — the registered refund runs, then the process stops.
 func TestStopInsideSectionRollsBack(t *testing.T) {
 	disp := &compensationDispatcher{parkMidTurn: true}
 	runtime := newCompensationRuntime(t, disp)

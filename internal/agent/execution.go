@@ -24,11 +24,11 @@ import (
 
 // activateProcess reconstructs the guest for one process revision: it
 // assembles the revision's dispatcher chain (monitor stack, replay tape over
-// the journal,
-// task layer, delegation routes, drivers), instantiates the guest from the
-// program's kernel, and saves it to the process table so the syscall host path
-// can find its dispatcher. Activation is exactly journal-replay wiring — the
-// journal, not the instance, is the durable process.
+// the journal, task layer, delegation routes, drivers), instantiates the
+// guest from the program's kernel, and saves it to the process table so the
+// syscall host path can find its dispatcher. Activation is exactly
+// journal-replay wiring — the journal, not the instance, is the durable
+// process.
 func (r *Runtime) activateProcess(ctx context.Context, pid string) (*capcompute.Process[ProcessContext], error) {
 	r.mu.Lock()
 	var proc *processState
@@ -250,8 +250,8 @@ func (r *Runtime) driveDirect(pid string) (<-chan capcompute.ResumeResult[Proces
 
 // failureStatus maps a pre-quantum error to the process status it should
 // finish with: a scheduling conflict is an interruption (the process can be
-// re-driven),
-// everything else — an incompatible journal, a missing program — is a failure.
+// re-driven); everything else — an incompatible journal, a missing program —
+// is a failure.
 func (r *Runtime) failureStatus(err error) ProcessStatus {
 	if errors.Is(err, sched.ErrAlreadyScheduled) || errors.Is(err, sched.ErrClosed) {
 		return ProcessInterrupted
