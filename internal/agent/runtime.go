@@ -596,26 +596,26 @@ func (r *Runtime) Stop(processID string) (ProcessSnapshot, error) {
 			proc.stop()
 		}
 	case ProcessYielded, ProcessWaitingTask:
-		abort, aborted := proc.journal.abortTail()
+		state, started := proc.journal.rollbackView()
 		_, open := proc.journal.outermostOpenBegin()
 		switch {
-		case aborted && !abort.settled():
-			// A rollback is parked on its pending task; abandoning it would
+		case (proc.abandoning != "" || started) && (state == nil || !state.settled()):
+			// A rollback is parked on its pending task; walking away would
 			// leave external state undefined. Deny the task instead — that
 			// fails the rollback with the report — or resolve it to finish.
 			r.mu.Unlock()
 			return ProcessSnapshot{}, fmt.Errorf(
 				"%w: process %s is mid-rollback; resolve or deny its pending task instead", ErrConflict, processID)
-		case !aborted && open:
+		case !started && open:
 			// Parked inside an open section: roll it back before stopping — a
-			// stop is an abort without a retry. The settle dispatches drivers,
-			// so it runs off-lock; Stopping guards against concurrent retries.
+			// stop is an abandonment without a retry. The settle dispatches
+			// drivers, so it runs off-lock; Stopping guards concurrent retries.
 			return r.spawnSettleLocked(proc, ProcessStopping, func() {
 				r.stopProcess(processID, context.Canceled)
 			}), nil
 		default:
-			// No open section — or a settled abort, whose rollback already ran
-			// (the park is its retry timer, now moot): stop plainly.
+			// No open section — or a settled rollback, which already ran (the
+			// park is its retry timer, now moot): stop plainly.
 			r.finishLocked(proc, ProcessStopped, "", context.Canceled)
 		}
 	case ProcessStopping, ProcessStopped:
@@ -678,20 +678,23 @@ func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, erro
 		return ProcessSnapshot{}, fmt.Errorf("%w: session already has active process %s", ErrConflict, session.activeProcessID)
 	}
 
-	abort, aborted := proc.journal.abortTail()
-	if aborted && !abort.settled() {
-		// The journal ends in a sys.abort whose rollback has not finished (a
-		// crash mid-rollback, or a compensation that failed). Resume the
-		// rollback — never the guest: replaying past a rolled-back tail is
-		// refused by the tape, and restarting would abandon live effects.
-		// Running marks the settlement in flight and refuses concurrent retries.
+	state, started := proc.journal.rollbackView()
+	if (proc.abandoning != "" || started) && (state == nil || !state.settled()) {
+		// A rollback is in flight — an abandonment not yet concluded, or a
+		// guest abort whose settlement a crash or a failed compensation cut
+		// short. Resume the rollback — never the guest: replaying past a
+		// rolled-back tail is refused by the tape, and restarting would walk
+		// away from live effects. Running marks the settlement in flight and
+		// refuses concurrent retries.
 		if mode == RetryRestart {
 			r.mu.Unlock()
 			return ProcessSnapshot{}, fmt.Errorf("%w: process %s has an unfinished rollback; resume it first", ErrConflict, processID)
 		}
-		proc.err = ""
+		if proc.abandoning != abandonFailure {
+			proc.err = ""
+		}
 		return r.spawnSettleLocked(proc, ProcessRunning, func() {
-			r.settleAbort(processID)
+			r.settleRollback(processID)
 		}), nil
 	}
 
@@ -710,12 +713,15 @@ func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, erro
 			}), nil
 		}
 		r.forkJournalLocked(proc, 0, RetryRestart)
-	} else if aborted {
-		// A settled abort — the retry timer fired, or a human retried a
-		// failed/stopped process whose section was rolled back: the rolled-back
-		// attempt stays in the log; the aborted section re-runs fresh from its
-		// begin, over compensated state.
-		r.forkJournalLocked(proc, abort.ScopeStart, RetryResume)
+	} else if started || proc.abandoning != "" {
+		// A settled rollback — the retry timer fired, or a human retried a
+		// failed/stopped process whose scope was rolled back: the abandoned
+		// attempt stays in the log; the scope re-runs fresh from its start,
+		// over compensated state. The standing abandonment stamp licenses the
+		// fork even when the scope had nothing registered and the rollback
+		// left no journal trace: the revision hit its wall and can never run
+		// again, so a retry must re-mint it, not replay it.
+		r.forkJournalLocked(proc, state.ScopeStart, RetryResume)
 	} else if proc.status == ProcessYielded || proc.status == ProcessWaitingTask {
 		// Resume from a park: no fork. The journal's open intent at the tail is
 		// re-driven by replay under its original idempotency key; a resolved
@@ -807,6 +813,7 @@ func (r *Runtime) forkJournalLocked(proc *processState, forkOffset int, mode Ret
 	proc.revision++
 	proc.forkOffset = forkOffset
 	proc.lastFailureLength = 0
+	proc.abandoning = "" // the fork is the abandonment's conclusion
 	proc.journal = newLogJournal(
 		parent.log, parent.scope, parent.proc, proc.revision,
 		parent.history, forkOffset,

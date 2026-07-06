@@ -55,6 +55,12 @@ type StoredProcess struct {
 	// logging any record can be reconstructed on restore.
 	ChildSpawnOffsets []int
 	ForkOffset        int
+	// Abandoning is the host's abandonment of the current revision (failure,
+	// stop, or restart), persisted so a crash mid-rollback resumes the
+	// abandonment to its recorded conclusion, and standing until the fork
+	// that opens the successor revision. Management state: the journal
+	// carries only the guest's narrative.
+	Abandoning string `json:",omitempty"`
 }
 
 // Leases coordinates exclusive process and task execution across runtime instances.

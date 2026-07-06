@@ -27,10 +27,10 @@ const (
 	// callSysAbort rolls the open critical section back instead of finishing:
 	// the runtime executes the registered compensations newest-first, then
 	// retries the section after the declared delay or stops the process as
-	// compensated. With no section open, the whole process rolls back. The
-	// host authors the same record (journaled.Abort) when it must close a
-	// section the guest cannot — a failure or a stop — so one journal shape
-	// drives every rollback.
+	// compensated. With no section open, the whole process rolls back. This
+	// call is the guest's own way to abandon its revision — the only one that
+	// belongs on the journal; the host's abandonments (failure, stop, restart)
+	// are management state on the process, never journal records.
 	callSysAbort = sys.SyscallAbort
 )
 
@@ -44,19 +44,17 @@ type abortArgs struct {
 	// seconds after the rollback (0 = immediately). Absent means no retry: the
 	// process finishes as compensated.
 	RetrySeconds *int64 `json:"retry_seconds"`
-	// Cause is reserved for host-authored aborts (journaled.Abort) and decides
-	// what follows once the rollback settles: "failure" ends failed with
-	// Reason as the error, "stop" ends stopped, "restart" re-runs the process
-	// from scratch as a fresh revision. Empty is the guest's own sys.abort,
-	// which applies RetrySeconds instead. Guests may not set it — the
-	// lifecycle rejects a forged cause before it journals a completed abort.
-	Cause string `json:"cause,omitempty"`
 }
 
+// The host's abandonment kinds — management state on the process
+// (processState.abandoning), never journal records: the journal carries the
+// guest's narrative, and the guest's own abandonment is its sys.abort call.
+// The kind decides what follows once the rollback settles: failed (the
+// recorded error standing), stopped, or re-run from scratch.
 const (
-	abortCauseFailure = "failure"
-	abortCauseStop    = "stop"
-	abortCauseRestart = "restart"
+	abandonFailure = "failure"
+	abandonStop    = "stop"
+	abandonRestart = "restart"
 )
 
 type compensateArgs struct {
@@ -134,16 +132,11 @@ func (l *lifecycleDispatcher) Dispatch(ctx context.Context, cred ProcessContext,
 		// The reason and retry delay travel in syscall.Args and are journaled as
 		// the terminal call; the runtime reads them back, executes the registered
 		// compensations, and applies the retry. Acknowledge so the guest returns.
-		// The cause field is the host's alone: rollback detection only honors a
-		// successfully completed abort, so failing a forged one here keeps it
-		// inert. Empty args are a bare "roll back now, no retry".
+		// Empty args are a bare "roll back now, no retry".
 		if len(syscall.Args) > 0 {
 			var args abortArgs
 			if err := json.Unmarshal(syscall.Args, &args); err != nil {
 				return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode sys.abort: %v", err)), nil
-			}
-			if args.Cause != "" {
-				return sys.FailCode(sys.ErrnoInvalidArgs, "sys.abort: cause is reserved for the host"), nil
 			}
 		}
 		return sys.Result(json.RawMessage(`{"ok":true}`)), nil

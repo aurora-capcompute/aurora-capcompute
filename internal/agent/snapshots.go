@@ -163,6 +163,7 @@ func (r *Runtime) storedProcessLocked(proc *processState) StoredProcess {
 		ChildProcessIDs:   append([]string(nil), proc.childProcessIDs...),
 		ChildSpawnOffsets: append([]int(nil), proc.childSpawnOffsets...),
 		ForkOffset:        proc.forkOffset,
+		Abandoning:        proc.abandoning,
 	}
 }
 

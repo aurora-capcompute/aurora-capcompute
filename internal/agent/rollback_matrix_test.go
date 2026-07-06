@@ -334,10 +334,11 @@ func TestRollbackCrashMatrix(t *testing.T) {
 
 // TestFailureRollbackCrashMatrix is the class the abort matrix cannot see: the
 // guest FAILS mid-section — after the charge executed and its refund was
-// registered — instead of aborting cleanly. The failure must abort the section
-// (rollback-before-redo), and the retry must re-run it over compensated state;
-// crashing at every append across fail → host abort → settle → retry → refork
-// proves no window orphans the registration or doubles an effect.
+// registered — instead of aborting cleanly. The failure must abandon the
+// revision (rollback-before-redo), and the retry must re-run the section over
+// compensated state; crashing at every append across fail → abandonment →
+// settle → retry → refork proves no window orphans the registration or
+// doubles an effect.
 func TestFailureRollbackCrashMatrix(t *testing.T) {
 	runCrashMatrix(t, true)
 }

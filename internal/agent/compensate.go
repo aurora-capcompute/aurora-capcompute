@@ -12,34 +12,39 @@ package agent
 // compensations — lives in the journal, in order.
 //
 // The revision laws. A revision is one attempt; abandoning it — deciding it
-// can never run again — is the only source of rollback, and rollback is the
-// only license to fork:
+// can never run again — is the only source of rollback, and a settled
+// rollback is the only license to fork:
 //
-//  1. A fork happens only over a settled abort record: at the open section's
-//     begin (or 0 when no section was open — the whole process is the zone),
-//     or at 0 on an explicit restart, which abandons the current revision
-//     first. A resume never forks: it continues the same revision by replay.
-//  2. Before any fork, every registration in the abandoned revision's
-//     uncommitted-section scope has run to a successful completion — the
-//     settled() gate; an unsettled rollback resumes settlement, never the
-//     guest.
-//  3. A revision is abandoned exactly when it can neither resume nor be
-//     needed again: the guest's own sys.abort, a failure whose re-drive made
-//     no journal progress (the deterministic wall), a stop, or a restart.
-//     The host authors the same sys.abort record the guest would
-//     (journaled.Abort, with a cause the guest cannot forge) and runs the
-//     same settle path. An interruption is not abandonment — the revision
-//     resumes: recorded effects served, open intents re-driven under their
-//     original keys, the registrations the cut-off guest was about to make
-//     landing in the journal, which is what makes registering an undo after
-//     its effect safe.
+//  1. A fork happens only over a settled rollback: at the abandoned scope's
+//     start (one past the open section's begin, or 0 when no section was
+//     open — the whole process is the zone), or at 0 on an explicit restart.
+//     A resume never forks: it continues the same revision by replay.
+//  2. Before any fork, every registration in the abandoned scope has run to
+//     a successful completion — the settled() gate; an unsettled rollback
+//     resumes settlement, never the guest.
+//  3. A revision is abandoned exactly when it can never run again: the
+//     guest's own sys.abort, a failure whose re-drive made no journal
+//     progress (the deterministic wall), a stop, or a restart. An
+//     interruption is not abandonment — the revision resumes: recorded
+//     effects served, open intents re-driven under their original keys, the
+//     registrations the cut-off guest was about to make landing in the
+//     journal, which is what makes registering an undo after its effect safe.
 //
-// Scope is positional: an abort rolls back everything registered since the
+// The journal carries only the guest's narrative: its calls (sys.abort
+// included — the guest's own abandonment, with its retry policy), and the
+// execution of the undos it registered — the compensation section, which is
+// itself the rollback marker. A host abandonment writes no journal record:
+// the decision is management state (processState.abandoning, durable in the
+// process stream), the restart's fork at 0 and the failure's error are its
+// visible records, and only the compensations it executes touch the journal.
+//
+// Scope is positional: a rollback covers everything registered since the
 // outermost-open sys.begin (committed inner sections included — a section
 // inside a failed section failed with it), or since the beginning of the
-// process when no section is open. This is the deliberate, backward counterpart
-// of the automatic forward crash-resume: a host failure re-drives a process;
-// sys.abort undoes it.
+// process when no section is open; a restart widens the scope to the whole
+// revision, since the fork at 0 severs everything. This is the deliberate,
+// backward counterpart of the automatic forward crash-resume: a host failure
+// re-drives a process; abandonment undoes it.
 
 import (
 	"context"
@@ -76,18 +81,26 @@ type compensationRegistration struct {
 	Args     json.RawMessage
 }
 
-// abortState is the journal's view of a terminal sys.abort: the abort itself,
-// the rollback scope, and how far the rollback has progressed.
-type abortState struct {
-	Position     int // the sys.abort intent's journal position
+// rollbackState is the journal's view of a rollback — due, in progress, or
+// settled: the scope of registrations to run and how far their execution has
+// progressed. A guest sys.abort tail carries the guest's reason and retry
+// policy; a host abandonment has no journal record of its own — its appended
+// compensation section is the marker, and its kind lives in the process's
+// management state.
+type rollbackState struct {
+	// GuestAbort is true when the journal's last word is the guest's own
+	// completed sys.abort; Reason and RetrySeconds are its args.
+	GuestAbort   bool
 	Reason       string
 	RetrySeconds *int64
-	// Cause is who ended the section: empty for the guest's own sys.abort
-	// (whose retry policy then applies), abortCauseFailure or abortCauseStop
-	// for a host-authored abort (which settles into failed or stopped).
-	Cause string
-	// ScopeStart is where the rollback scope begins and where a retry forks:
-	// one past the open section's sys.begin, or 0 with no section open.
+	// ScopeEnd bounds the registration scan: the guest abort's position, the
+	// first compensation record's, or the journal length when the rollback
+	// has not appended anything yet.
+	ScopeEnd int
+	// ScopeStart is the journal-derived scope: one past the open section's
+	// sys.begin, or 0 with no section open. It is where a section retry
+	// forks. A restart widens the effective scope to 0 via widenToRevision —
+	// the journal cannot know the abandonment kind.
 	ScopeStart int
 	// Registrations are the in-scope deferred undos, in registration order.
 	Registrations []compensationRegistration
@@ -100,24 +113,36 @@ type abortState struct {
 
 // settled reports whether the rollback has fully run: no compensation is open
 // and every in-scope registration has been compensated.
-func (a *abortState) settled() bool {
-	if a.Resume != nil {
+func (s *rollbackState) settled() bool {
+	if s.Resume != nil {
 		return false
 	}
-	for _, reg := range a.Registrations {
-		if !a.Compensated[reg.Position] {
+	for _, reg := range s.Registrations {
+		if !s.Compensated[reg.Position] {
 			return false
 		}
 	}
 	return true
 }
 
-// abortTail reads the journal's abort state: it exists when the last lifecycle
-// call is a completed sys.abort, followed only by compensation records. A
-// journal still mid-run (or one whose tail is a normal completion) has none.
-func (j *logJournal) abortTail() (*abortState, bool) {
+// widenToRevision widens the scope to the whole revision — a restart's
+// abandonment: every uncommitted registration, top-level ones included.
+func (s *rollbackState) widenToRevision(j *logJournal) {
+	s.ScopeStart = 0
+	s.Registrations = j.registrationsIn(0, s.ScopeEnd)
+}
+
+// rollbackView reads the journal's rollback picture. started reports whether
+// a rollback is already marked in the journal: the guest's own completed
+// sys.abort as the last word, or an appended compensation section (a host
+// abandonment's only journal trace). A nil state means the journal is
+// unreadable. When no rollback is marked, the returned state is the scope a
+// fresh abandonment would roll back — registrations scanned to the journal's
+// end — so the settle path reads one shape either way.
+func (j *logJournal) rollbackView() (*rollbackState, bool) {
 	length := j.Length()
 	abortPos := -1
+	firstCompensation := -1
 	compensated := map[int]bool{}
 	for i := 0; i < length; i++ {
 		rec, err := j.Load(i)
@@ -131,8 +156,7 @@ func (j *logJournal) abortTail() (*abortState, bool) {
 			}
 			// Only the journal's last word rolls back: any later call abandons
 			// a previous abort. And an abort counts only once its completion
-			// succeeded — a rejected one (a guest forging the host's cause
-			// field) is an ordinary failed call, never a rollback trigger.
+			// succeeded — a rejected sys.abort is an ordinary failed call.
 			abortPos = -1
 			if rec.Syscall.Name == callSysAbort && i+1 < length {
 				next, err := j.Load(i + 1)
@@ -145,6 +169,9 @@ func (j *logJournal) abortTail() (*abortState, bool) {
 				}
 			}
 		case journaled.KindCompensationIntent:
+			if firstCompensation < 0 {
+				firstCompensation = rec.Position
+			}
 			// A registration counts as compensated only when its inverse
 			// completed successfully: a failed inverse stays outstanding (a
 			// later settle re-attempts it) and an open one resumes under its
@@ -162,58 +189,66 @@ func (j *logJournal) abortTail() (*abortState, bool) {
 			}
 		}
 	}
-	if abortPos < 0 {
-		return nil, false
-	}
 
-	abortIntent, err := j.Load(abortPos)
-	if err != nil || abortIntent.Syscall == nil {
-		return nil, false
+	state := &rollbackState{ScopeEnd: length, Compensated: compensated}
+	started := false
+	switch {
+	case abortPos >= 0:
+		// The guest's own abandonment: reason and retry policy from its args.
+		started = true
+		state.GuestAbort = true
+		state.ScopeEnd = abortPos
+		if intent, err := j.Load(abortPos); err == nil && intent.Syscall != nil {
+			var args abortArgs
+			_ = json.Unmarshal(intent.Syscall.Args, &args)
+			state.Reason = args.Reason
+			state.RetrySeconds = args.RetrySeconds
+		}
+	case firstCompensation >= 0:
+		// A compensation section with no guest abort: a host abandonment's
+		// rollback, in progress or settled.
+		started = true
+		state.ScopeEnd = firstCompensation
 	}
-	var args abortArgs
-	_ = json.Unmarshal(abortIntent.Syscall.Args, &args)
-
-	state := &abortState{
-		Position:     abortPos,
-		Reason:       args.Reason,
-		RetrySeconds: args.RetrySeconds,
-		Cause:        args.Cause,
-		Compensated:  compensated,
-	}
-	// The rollback scope: everything registered since the open section's
-	// begin — or since the beginning of the process when no section is open.
-	// A restart abandons the whole revision, so its scope is always 0: every
-	// uncommitted registration, top-level ones included.
-	if off, ok := j.outermostOpenBegin(); ok && state.Cause != abortCauseRestart {
+	if off, ok := j.outermostOpenBegin(); ok {
 		state.ScopeStart = off
 	}
-	for i := state.ScopeStart; i < abortPos; i++ {
+	state.Registrations = j.registrationsIn(state.ScopeStart, state.ScopeEnd)
+	return state, started
+}
+
+// registrationsIn scans [start, end) for armed registrations: completed
+// sys.compensate calls, in registration order. A rejected registration never
+// armed.
+func (j *logJournal) registrationsIn(start, end int) []compensationRegistration {
+	var out []compensationRegistration
+	for i := start; i < end; i++ {
 		rec, err := j.Load(i)
 		if err != nil {
-			return nil, false
+			return nil
 		}
 		if rec.Kind != journaled.KindIntent || rec.Syscall == nil || rec.Syscall.Name != callSysCompensate {
 			continue
 		}
-		if i+1 >= abortPos {
+		if i+1 >= end {
 			continue
 		}
 		next, err := j.Load(i + 1)
 		if err != nil || next.Kind != journaled.KindCompletion || next.Result == nil ||
 			next.Result.Status() != sys.StatusResult {
-			continue // a rejected registration never armed
+			continue
 		}
 		var reg compensateArgs
 		if json.Unmarshal(rec.Syscall.Args, &reg) != nil {
 			continue
 		}
-		state.Registrations = append(state.Registrations, compensationRegistration{
+		out = append(out, compensationRegistration{
 			Position: rec.Position,
 			Name:     reg.Name,
 			Args:     reg.Args,
 		})
 	}
-	return state, true
+	return out
 }
 
 // processJournal fetches a process's credentials and live journal under the
@@ -228,56 +263,65 @@ func (r *Runtime) processJournal(processID string) (ProcessContext, *logJournal,
 	return r.processContextLocked(proc), proc.journal, true
 }
 
-// hasAbortTail reports whether a process's journal ends in a sys.abort — the
-// completion path's cheap dispatch test.
-func (r *Runtime) hasAbortTail(processID string) bool {
+// guestAborted reports whether a process's journal ends in the guest's own
+// completed sys.abort — the completion path's cheap dispatch test.
+func (r *Runtime) guestAborted(processID string) bool {
 	_, journal, ok := r.processJournal(processID)
 	if !ok {
 		return false
 	}
-	_, aborted := journal.abortTail()
-	return aborted
+	state, started := journal.rollbackView()
+	return started && state != nil && state.GuestAbort
 }
 
 // abandonRevision begins abandoning a process's current revision and reports
-// whether a rollback is due: true means the journal holds an open critical
-// section and now ends in a completed abort — either the one just appended
-// (carrying the cause and reason) or one already there (a guest abort this
-// transition raced, whose own policy then wins). False means nothing partial
-// is at stake: no open section, or the abort record could not be made durable
-// — in which case the caller proceeds plainly and a later retry re-drives the
-// section instead.
-func (r *Runtime) abandonRevision(processID, cause, reason string) bool {
-	_, journal, ok := r.processJournal(processID)
-	if !ok {
+// whether a rollback is due. The decision is management state, never a
+// journal record: abandoning is stamped on the process — durably, via the
+// process stream — so a crash mid-rollback resumes the abandonment to its
+// recorded conclusion; the journal will carry only the compensations the
+// rollback executes. False means nothing partial is at stake (no open
+// section for a failure or stop — the revision stays resumable) and the
+// caller proceeds plainly. When the guest's own sys.abort is already the
+// journal's last word, a failure or stop dissolves into it — the guest's
+// policy wins. A restart instead stamps its own kind over whatever stands —
+// a guest abort's settled remains or a standing host abandonment: those
+// rollbacks already ran, and what is still uncommitted widens into the
+// restart.
+func (r *Runtime) abandonRevision(processID, kind, reason string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	proc := r.processes[processID]
+	if proc == nil || proc.journal == nil {
 		return false
+	}
+	if proc.abandoning != "" && kind != abandonRestart {
+		return true // already abandoning; the settle resumes it
+	}
+	state, started := proc.journal.rollbackView()
+	if state == nil {
+		return false
+	}
+	if started && state.GuestAbort && kind != abandonRestart {
+		return true // the guest's own abandonment; its policy wins
 	}
 	// Failure and stop abandon only when a section is open: without one the
 	// revision stays resumable, and its top-level registrations stay armed
 	// for it. A restart abandons unconditionally — the fork at 0 severs the
 	// revision, so its whole uncommitted scope (top-level registrations
 	// included) rolls back first.
-	if _, open := journal.outermostOpenBegin(); !open && cause != abortCauseRestart {
+	if _, open := proc.journal.outermostOpenBegin(); !open && kind != abandonRestart {
 		return false
 	}
-	if state, aborted := journal.abortTail(); aborted {
-		// A failure or stop that raced the guest's own abort dissolves into it:
-		// the guest's record is the last word and its policy wins. A restart
-		// instead supersedes a settled abort — that rollback already ran, so a
-		// fresh restart-cause record is appended and what remains of the
-		// revision's uncommitted scope settles into the restart.
-		if cause != abortCauseRestart || !state.settled() {
-			return true
-		}
+	proc.abandoning = kind
+	if kind == abandonFailure && reason != "" {
+		proc.err = reason
 	}
-	args, err := json.Marshal(abortArgs{Reason: reason, Cause: cause})
-	if err == nil {
-		err = journaled.Abort(journal, args)
-	}
-	if err != nil {
-		slog.Warn("append host abort record; finishing without rollback",
-			"process_id", processID, "cause", cause, "error", err)
-		return false
+	proc.updatedAt = r.now().UTC()
+	if err := r.appendProcess(proc); err != nil {
+		// Degraded: the stamp is in memory only. A crash before the rollback
+		// concludes loses it — restore folds the process to interrupted, the
+		// re-drive hits the wall again, and the abandonment is re-detected.
+		slog.Warn("persist abandonment", "process_id", processID, "kind", kind, "error", err)
 	}
 	return true
 }
@@ -290,12 +334,11 @@ func (r *Runtime) abandonRevision(processID, cause, reason string) bool {
 // journal. This is what makes registering an undo after its effect safe: the
 // rollback can only run once every registration reachable from the recorded
 // history is durable. A re-drive that appends nothing has hit a deterministic
-// wall — resume is impossible — and only then does the implicit abort run:
-// the abort record journaled with cause "failure", the registered
-// compensations newest-first, the process reporting failed, and a later retry
-// forking at the section's begin over rolled-back state. Without an open
-// section the failure is terminal as-is: nothing partial is awaiting a commit
-// that will never come.
+// wall — resume is impossible — and only then is the revision abandoned: the
+// registered compensations run newest-first, the process reports failed with
+// the original error, and a later retry forks at the section's begin over
+// rolled-back state. Without an open section the failure is terminal as-is:
+// nothing partial is awaiting a commit that will never come.
 func (r *Runtime) failProcess(processID string, failure error) {
 	if r.redriveAfterFailure(processID) {
 		return
@@ -312,8 +355,8 @@ func (r *Runtime) failNow(processID string, failure error) {
 	if failure == nil {
 		failure = errors.New("process failed")
 	}
-	if r.abandonRevision(processID, abortCauseFailure, failure.Error()) {
-		r.settleAbort(processID)
+	if r.abandonRevision(processID, abandonFailure, failure.Error()) {
+		r.settleRollback(processID)
 		return
 	}
 	r.finish(processID, ProcessFailed, "", failure)
@@ -336,7 +379,11 @@ func (r *Runtime) redriveAfterFailure(processID string) bool {
 		r.mu.Unlock()
 		return false
 	}
-	if _, aborted := journal.abortTail(); aborted {
+	if proc.abandoning != "" {
+		r.mu.Unlock()
+		return false
+	}
+	if state, started := journal.rollbackView(); started || state == nil {
 		r.mu.Unlock()
 		return false
 	}
@@ -354,25 +401,24 @@ func (r *Runtime) redriveAfterFailure(processID string) bool {
 }
 
 // stopProcess finishes a stopped process, first rolling back its open critical
-// section — a stop is an abort without a retry. When the stop raced the
+// section — a stop is an abandonment without a retry. When the stop raced the
 // guest's own sys.abort (the quantum was killed right after the abort was
-// journaled), the guest's record is already the journal's last word and its
-// policy wins: the stop dissolves into the guest's rollback.
+// journaled), the guest's record is the journal's last word and its policy
+// wins: the stop dissolves into the guest's rollback.
 func (r *Runtime) stopProcess(processID string, cause error) {
-	if r.abandonRevision(processID, abortCauseStop, "stopped") {
-		r.settleAbort(processID)
+	if r.abandonRevision(processID, abandonStop, "") {
+		r.settleRollback(processID)
 		return
 	}
 	r.finish(processID, ProcessStopped, "", cause)
 }
 
 // restartProcess abandons the current revision on behalf of an explicit
-// restart — its uncommitted section rolls back like any abandonment — and
-// then re-runs the process from scratch. When there is nothing to roll back
-// (or the abort record could not be made durable) it forks at 0 directly.
+// restart — its whole uncommitted scope rolls back like any abandonment —
+// and then re-runs the process from scratch.
 func (r *Runtime) restartProcess(processID string) {
-	if r.abandonRevision(processID, abortCauseRestart, "restarted") {
-		r.settleAbort(processID)
+	if r.abandonRevision(processID, abandonRestart, "") {
+		r.settleRollback(processID)
 		return
 	}
 	r.retrySection(processID, 0, RetryRestart)
@@ -383,21 +429,21 @@ func (r *Runtime) restartProcess(processID string) {
 // tail is the park. Resolving the task resumes settlement.
 var errRollbackParked = errors.New("rollback parked on an external task")
 
-// settleAbort drives an aborted process to its post-rollback state: it executes
-// the remaining registered compensations newest-first (resuming any compensation
-// a crash left open, under its original idempotency key), then applies the
-// abort's retry policy — re-run the section now, park on a durable retry timer,
-// or finish as compensated. Inverses dispatch through the task layer, so an
-// undo that needs sign-off yields into a durable task like any forward call:
-// the rollback parks, the human is the terminal compensator inside it, and the
-// resolution resumes settlement (approved executes the inverse; denied fails
-// the rollback). A compensation that fails semantically stops the rollback and
-// fails the process with the rollback report: the remaining undos need a
-// human, and the journal is the remediation map. settleAbort is idempotent —
-// every step is journaled before it executes, so calling it again (after a
-// crash, a resolution, or a manual retry of a failed rollback) continues where
-// the last attempt stopped.
-func (r *Runtime) settleAbort(processID string) {
+// settleRollback drives an abandoned revision's rollback to its conclusion:
+// it executes the remaining registered compensations newest-first (resuming
+// any compensation a crash left open, under its original idempotency key),
+// then concludes by the abandonment's recorded kind — or, for the guest's own
+// sys.abort, by its declared retry policy. Inverses dispatch through the task
+// layer, so an undo that needs sign-off yields into a durable task like any
+// forward call: the rollback parks, the human is the terminal compensator
+// inside it, and the resolution resumes settlement (approved executes the
+// inverse; denied fails the rollback). A compensation that fails semantically
+// stops the rollback and fails the process with the rollback report: the
+// remaining undos need a human, and the journal is the remediation map.
+// settleRollback is idempotent — every step is journaled before it executes,
+// so calling it again (after a crash, a resolution, or a manual retry of a
+// failed rollback) continues where the last attempt stopped.
+func (r *Runtime) settleRollback(processID string) {
 	fail := func(err error) {
 		r.finish(processID, ProcessFailed, "", fmt.Errorf("rollback: %w", err))
 	}
@@ -406,10 +452,25 @@ func (r *Runtime) settleAbort(processID string) {
 		fail(errors.New("process journal is unavailable"))
 		return
 	}
-	state, ok := journal.abortTail()
-	if !ok {
-		fail(errors.New("journal does not end in sys.abort"))
+	r.mu.Lock()
+	kind, reason := "", ""
+	if proc := r.processes[processID]; proc != nil {
+		kind, reason = proc.abandoning, proc.err
+	}
+	r.mu.Unlock()
+	state, started := journal.rollbackView()
+	if state == nil {
+		fail(errors.New("journal is unreadable"))
 		return
+	}
+	if kind == "" && !(started && state.GuestAbort) {
+		fail(errors.New("no rollback is in progress"))
+		return
+	}
+	if kind == abandonRestart {
+		// A restart abandons the whole revision: the fork at 0 severs
+		// everything, so everything uncommitted rolls back.
+		state.widenToRevision(journal)
 	}
 
 	ctx := context.Background()
@@ -469,12 +530,19 @@ func (r *Runtime) settleAbort(processID string) {
 		undone = append(undone, inverse.Name)
 		return nil
 	}
+	reportReason := state.Reason
+	if kind != "" {
+		reportReason = reason
+		if reportReason == "" {
+			reportReason = kind
+		}
+	}
 	settleStopped := func(err error) {
 		if errors.Is(err, errRollbackParked) {
 			r.finish(processID, ProcessWaitingTask, "", nil)
 			return
 		}
-		r.finish(processID, ProcessFailed, rollbackReport(state, undone), fmt.Errorf("rollback stopped: %w", err))
+		r.finish(processID, ProcessFailed, rollbackReport(state, reportReason, undone), fmt.Errorf("rollback stopped: %w", err))
 	}
 
 	if state.Resume != nil {
@@ -500,27 +568,30 @@ func (r *Runtime) settleAbort(processID string) {
 			return
 		}
 	}
-	r.applyAbortPolicy(ctx, processID, cred, state, rollbackReport(state, undone))
+	r.concludeRollback(ctx, processID, cred, kind, reason, state, rollbackReport(state, reportReason, undone))
 }
 
-// applyAbortPolicy finishes a fully settled rollback. A host-authored abort
-// follows its abandonment cause — failed (the guest's original error restored
-// from the record), stopped, or restarted from scratch. The guest's own abort
-// applies its declared retry policy: re-run the section now, park on a
-// durable retry timer, or finish as compensated — with the retry budget as
-// the guard against a guest that aborts forever.
-func (r *Runtime) applyAbortPolicy(ctx context.Context, processID string, cred ProcessContext, state *abortState, report string) {
-	switch state.Cause {
-	case abortCauseFailure:
-		r.finish(processID, ProcessFailed, report, errors.New(state.Reason))
+// concludeRollback finishes a fully settled rollback. A host abandonment
+// follows its recorded kind — failed (the error recorded when the revision
+// was abandoned, standing), stopped, or restarted from scratch. The guest's
+// own abort applies its declared retry policy: re-run the section now, park
+// on a durable retry timer, or finish as compensated — with the retry budget
+// as the guard against a guest that aborts forever.
+func (r *Runtime) concludeRollback(ctx context.Context, processID string, cred ProcessContext, kind, reason string, state *rollbackState, report string) {
+	switch kind {
+	case abandonFailure:
+		if reason == "" {
+			reason = "process failed"
+		}
+		r.finish(processID, ProcessFailed, report, errors.New(reason))
 		return
-	case abortCauseStop:
+	case abandonStop:
 		r.finish(processID, ProcessStopped, report, context.Canceled)
 		return
-	case abortCauseRestart:
-		// The revision was abandoned by an explicit restart: cleaned up, now
-		// re-run from scratch. The abort record made the restart durable — a
-		// crash anywhere in the rollback resumes it and still restarts.
+	case abandonRestart:
+		// Cleaned up, now re-run from scratch. The abandonment was recorded
+		// durably before the rollback ran — a crash anywhere in it resumes
+		// the settlement and still restarts.
 		r.retrySection(processID, 0, RetryRestart)
 		return
 	}
@@ -578,7 +649,7 @@ func (r *Runtime) retrySection(processID string, forkOffset int, mode RetryMode)
 // fire time is the rollback plus the abort's delay. The distribution's timer
 // service arms and fires it like any timer task — restart-safe for free — and
 // its resolution resumes the process, which then re-runs the aborted section.
-func (r *Runtime) parkForRetry(ctx context.Context, cred ProcessContext, state *abortState, delay time.Duration) error {
+func (r *Runtime) parkForRetry(ctx context.Context, cred ProcessContext, state *rollbackState, delay time.Duration) error {
 	taskID, err := r.idSource("task_")
 	if err != nil {
 		return err
@@ -595,7 +666,7 @@ func (r *Runtime) parkForRetry(ctx context.Context, cred ProcessContext, state *
 	record := task.Record{
 		Scope:           cred.taskScope(),
 		ID:              taskID,
-		JournalPosition: state.Position,
+		JournalPosition: state.ScopeEnd,
 		Syscall:         sys.Syscall{Abi: sys.ABIVersion, Name: abortRetryCall, Args: args},
 		Summary:         retrySummary(state.Reason),
 		State:           task.StatePending,
@@ -618,10 +689,10 @@ func retrySummary(reason string) string {
 	return "abort retry: " + reason
 }
 
-// rollbackReport renders what the rollback did — the abort reason, the undos
-// that ran, and any registrations still outstanding. It is the compensated
+// rollbackReport renders what the rollback did — its reason, the undos that
+// ran, and any registrations still outstanding. It is the compensated
 // process's answer and a failed rollback's remediation map.
-func rollbackReport(state *abortState, undone []string) string {
+func rollbackReport(state *rollbackState, reason string, undone []string) string {
 	var remaining []string
 	for _, reg := range state.Registrations {
 		if !state.Compensated[reg.Position] {
@@ -630,9 +701,9 @@ func rollbackReport(state *abortState, undone []string) string {
 	}
 	var b strings.Builder
 	b.WriteString("rolled back")
-	if strings.TrimSpace(state.Reason) != "" {
+	if strings.TrimSpace(reason) != "" {
 		b.WriteString(": ")
-		b.WriteString(state.Reason)
+		b.WriteString(reason)
 	}
 	fmt.Fprintf(&b, " — %d compensation(s) executed", len(undone))
 	if len(undone) > 0 {

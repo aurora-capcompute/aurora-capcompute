@@ -170,6 +170,18 @@ type processState struct {
 	// grows monotonically within a revision, so losing it to a crash merely
 	// buys one extra re-drive); cleared when the journal forks.
 	lastFailureLength int
+	// abandoning records the host's abandonment of this revision —
+	// abandonFailure, abandonStop, or abandonRestart — set durably (a process
+	// event) before its rollback runs, so a crash mid-rollback resumes it to
+	// the right end. The stamp stands past the terminal conclusion as the
+	// record that the revision was abandoned — the license for a later retry
+	// to fork over its settled rollback, which a zero-registration scope
+	// leaves no journal trace of — and is cleared only by the fork that opens
+	// the successor revision. It is management state and lives here, in the
+	// management plane: the journal carries only what the guest did (its
+	// calls, and the execution of the undos it registered). The guest's own
+	// sys.abort needs no field — its record is in its journal.
+	abandoning string
 	// cascade re-execution state: when a process is restarted, cascade is set so the
 	// delegation router reuses (retries) the existing children at cascadeCursor in
 	// spawn order rather than spawning fresh ones. cascadeMode records whether the

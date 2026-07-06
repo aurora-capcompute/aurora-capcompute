@@ -106,6 +106,7 @@ func (r *Runtime) restoreSession(proj Projection, journals map[string]map[uint64
 			childProcessIDs:   append([]string(nil), sr.ChildProcessIDs...),
 			childSpawnOffsets: append([]int(nil), sr.ChildSpawnOffsets...),
 			forkOffset:        sr.ForkOffset,
+			abandoning:        sr.Abandoning,
 		}
 		if proc.revision == 0 {
 			proc.revision = 1

@@ -187,10 +187,10 @@ func (r *Runtime) execute(processID string) {
 	}
 	switch result.Status {
 	case capcompute.ResumeCompleted:
-		if r.hasAbortTail(processID) {
+		if r.guestAborted(processID) {
 			// The guest ended with sys.abort: roll the section back and apply
 			// its retry policy instead of reading an answer.
-			r.settleAbort(processID)
+			r.settleRollback(processID)
 			return
 		}
 		answer, err := r.answerFromJournal(processID)
