@@ -9,89 +9,97 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-const ManifestVersion = 2
+const ManifestVersion = 3
 
-// AgentToolType is the tool `type` for a sub-agent. A tool of this type is not a
-// leaf I/O dispatcher; it is process by the runtime as a child agent (see agent.go).
-const AgentToolType = "core.agent"
+// SpawnType is the syscall `type` for spawning a child process. A grant of
+// this type is not a leaf I/O driver: the runtime serves it by spawning a
+// child process that runs the named program under the grant's own syscall
+// set — the limitations the child lives inside.
+const SpawnType = "core.spawn"
 
-// Manifest is one agent node (root or child). Program/SystemPrompt configure this
-// node; Tools is its unified composition — leaf I/O tools plus `core.agent`
-// sub-agents, all sharing one shape.
+// Manifest is one process node (root or child). Program/SystemPrompt
+// configure this node; Syscalls is its grant set — every capability the
+// process may dispatch, leaf I/O drivers and `core.spawn` grants alike, one
+// shape for both.
 type Manifest struct {
 	Version int    `json:"version"`
 	Name    string `json:"name,omitempty"`
 	Program string `json:"program,omitempty"`
 	// BindingRef is an opaque application correlation reference (e.g. the
 	// name of the control-plane binding that produced this manifest). The
-	// runtime never interprets it; it only propagates it to delegated child
+	// runtime never interprets it; it only propagates it to spawned child
 	// manifests, like Tags on sessions.
 	BindingRef   string `json:"binding_ref,omitempty"`
 	SystemPrompt string `json:"system_prompt,omitempty"`
-	// OnFailure selects how a failure of this node (when it is a delegated child)
-	// is handled: OnFailureReport (default) surfaces it to the parent program as a
-	// recoverable failed observation; OnFailurePropagate fails the parent outright.
-	OnFailure string `json:"on_failure,omitempty"`
-	Tools     []Tool `json:"tools"`
+	// OnFailure selects how a failure of this node (when it is a spawned
+	// child) is handled: OnFailureReport (default) surfaces it to the parent
+	// program as a recoverable failed observation; OnFailurePropagate fails
+	// the parent outright.
+	OnFailure string    `json:"on_failure,omitempty"`
+	Syscalls  []Syscall `json:"syscalls"`
 }
 
-// Tool is one entry in an agent's composition. `Type` selects the dispatcher
-// implementation; `Name` is the local handle the program routes to. For a
-// `core.agent` tool, Settings decodes to AgentSettings and Tools holds the
-// sub-agent's own composition.
-type Tool struct {
+// Syscall is one granted capability in a process's manifest. `Type` selects
+// the driver implementation; `Name` is the syscall name the program
+// dispatches. For a `core.spawn` grant, Settings decodes to SpawnSettings —
+// the program to run and its policies — and Syscalls holds the child's own
+// grant set.
+type Syscall struct {
 	Name     string          `json:"name"`
 	Type     string          `json:"type"`
 	Settings json.RawMessage `json:"settings,omitempty"`
-	Tools    []Tool          `json:"tools,omitempty"`
+	Syscalls []Syscall       `json:"syscalls,omitempty"`
 	Hidden   bool            `json:"hidden,omitempty"`
 }
 
-// AgentSettings is the Settings shape of a `core.agent` tool.
-type AgentSettings struct {
+// SpawnSettings is the Settings shape of a `core.spawn` grant.
+type SpawnSettings struct {
 	Program      string `json:"program,omitempty"`
 	BindingRef   string `json:"binding_ref,omitempty"`
 	SystemPrompt string `json:"system_prompt,omitempty"`
 	OnFailure    string `json:"on_failure,omitempty"`
 }
 
-// Child failure-handling modes for AgentSettings.OnFailure.
+// Child failure-handling modes for SpawnSettings.OnFailure.
 const (
 	OnFailureReport    = "report"
 	OnFailurePropagate = "propagate"
 )
 
-// isAgent reports whether a tool is a sub-agent rather than a leaf I/O tool.
-func (t Tool) isAgent() bool { return t.Type == AgentToolType }
+// isSpawn reports whether a grant spawns a child process rather than naming
+// a leaf I/O driver.
+func (s Syscall) isSpawn() bool { return s.Type == SpawnType }
 
-// LeafTools returns the node's non-agent tools. Dispatcher providers build these
-// via the registry; `core.agent` tools are handled by the runtime instead.
-func (m Manifest) LeafTools() []Tool {
-	out := make([]Tool, 0, len(m.Tools))
-	for _, t := range m.Tools {
-		if !t.isAgent() {
-			out = append(out, t)
+// LeafSyscalls returns the node's non-spawn grants. Dispatcher providers
+// build these via the registry; `core.spawn` grants are served by the
+// runtime instead.
+func (m Manifest) LeafSyscalls() []Syscall {
+	out := make([]Syscall, 0, len(m.Syscalls))
+	for _, s := range m.Syscalls {
+		if !s.isSpawn() {
+			out = append(out, s)
 		}
 	}
 	return out
 }
 
-// agentTools returns the node's `core.agent` tools (process by the agent router).
-func (m Manifest) agentTools() []Tool {
-	out := make([]Tool, 0, len(m.Tools))
-	for _, t := range m.Tools {
-		if t.isAgent() {
-			out = append(out, t)
+// spawnGrants returns the node's `core.spawn` grants (served by the spawn
+// router).
+func (m Manifest) spawnGrants() []Syscall {
+	out := make([]Syscall, 0, len(m.Syscalls))
+	for _, s := range m.Syscalls {
+		if s.isSpawn() {
+			out = append(out, s)
 		}
 	}
 	return out
 }
 
-func decodeAgentSettings(tool Tool) (AgentSettings, error) {
-	var settings AgentSettings
-	if len(tool.Settings) > 0 {
-		if err := json.Unmarshal(tool.Settings, &settings); err != nil {
-			return AgentSettings{}, err
+func decodeSpawnSettings(grant Syscall) (SpawnSettings, error) {
+	var settings SpawnSettings
+	if len(grant.Settings) > 0 {
+		if err := json.Unmarshal(grant.Settings, &settings); err != nil {
+			return SpawnSettings{}, err
 		}
 	}
 	settings.Program = strings.TrimSpace(settings.Program)
@@ -101,7 +109,7 @@ func decodeAgentSettings(tool Tool) (AgentSettings, error) {
 }
 
 type DispatcherProvider interface {
-	Normalize(toolType string, settings json.RawMessage) (json.RawMessage, error)
+	Normalize(syscallType string, settings json.RawMessage) (json.RawMessage, error)
 	NewDispatcher(context.Context, ProcessContext, Manifest) (sys.Dispatcher[ProcessContext], error)
 }
 
@@ -114,75 +122,75 @@ func ValidateManifest(manifest Manifest, provider DispatcherProvider) (Manifest,
 	}
 	manifest.SystemPrompt = strings.TrimSpace(manifest.SystemPrompt)
 	manifest.Program = strings.TrimSpace(manifest.Program)
-	if err := validateTools(manifest.Tools, provider); err != nil {
+	if err := validateSyscalls(manifest.Syscalls, provider); err != nil {
 		return Manifest{}, err
 	}
 	return cloneManifest(manifest), nil
 }
 
-// validateTools normalizes leaf tools and recursively validates sub-agents,
-// enforcing unique names within each node.
-func validateTools(tools []Tool, provider DispatcherProvider) error {
-	seen := make(map[string]struct{}, len(tools))
-	for i := range tools {
-		tool := &tools[i]
-		tool.Name = strings.TrimSpace(tool.Name)
-		tool.Type = strings.TrimSpace(tool.Type)
-		if tool.Type == "" {
-			return fmt.Errorf("%w: tool %d type is required", ErrInvalid, i)
+// validateSyscalls normalizes leaf grants and recursively validates spawn
+// grants, enforcing unique names within each node.
+func validateSyscalls(syscalls []Syscall, provider DispatcherProvider) error {
+	seen := make(map[string]struct{}, len(syscalls))
+	for i := range syscalls {
+		grant := &syscalls[i]
+		grant.Name = strings.TrimSpace(grant.Name)
+		grant.Type = strings.TrimSpace(grant.Type)
+		if grant.Type == "" {
+			return fmt.Errorf("%w: syscall %d type is required", ErrInvalid, i)
 		}
-		if tool.isAgent() {
-			settings, err := decodeAgentSettings(*tool)
+		if grant.isSpawn() {
+			settings, err := decodeSpawnSettings(*grant)
 			if err != nil {
-				return fmt.Errorf("%w: agent tool %d settings: %v", ErrInvalid, i, err)
+				return fmt.Errorf("%w: spawn grant %d settings: %v", ErrInvalid, i, err)
 			}
 			if settings.Program == "" {
-				return fmt.Errorf("%w: agent tool %q requires settings.program", ErrInvalid, tool.Name)
+				return fmt.Errorf("%w: spawn grant %q requires settings.program", ErrInvalid, grant.Name)
 			}
-			if tool.Name == "" {
-				tool.Name = settings.Program
+			if grant.Name == "" {
+				grant.Name = settings.Program
 			}
 			switch settings.OnFailure {
 			case "", OnFailureReport, OnFailurePropagate:
 			default:
-				return fmt.Errorf("%w: agent tool %q on_failure must be %q or %q", ErrInvalid, tool.Name, OnFailureReport, OnFailurePropagate)
+				return fmt.Errorf("%w: spawn grant %q on_failure must be %q or %q", ErrInvalid, grant.Name, OnFailureReport, OnFailurePropagate)
 			}
-			if err := validateTools(tool.Tools, provider); err != nil {
-				return fmt.Errorf("agent %q: %w", tool.Name, err)
+			if err := validateSyscalls(grant.Syscalls, provider); err != nil {
+				return fmt.Errorf("spawn grant %q: %w", grant.Name, err)
 			}
 		} else {
-			if tool.Name == "" {
-				return fmt.Errorf("%w: tool %d name is required", ErrInvalid, i)
+			if grant.Name == "" {
+				return fmt.Errorf("%w: syscall %d name is required", ErrInvalid, i)
 			}
-			normalized, err := provider.Normalize(tool.Type, tool.Settings)
+			normalized, err := provider.Normalize(grant.Type, grant.Settings)
 			if err != nil {
-				return fmt.Errorf("%w: tool %q (%s) settings: %v", ErrInvalid, tool.Name, tool.Type, err)
+				return fmt.Errorf("%w: syscall %q (%s) settings: %v", ErrInvalid, grant.Name, grant.Type, err)
 			}
-			tool.Settings = append(json.RawMessage(nil), normalized...)
+			grant.Settings = append(json.RawMessage(nil), normalized...)
 		}
-		if _, exists := seen[tool.Name]; exists {
-			return fmt.Errorf("%w: duplicate tool name %q", ErrInvalid, tool.Name)
+		if _, exists := seen[grant.Name]; exists {
+			return fmt.Errorf("%w: duplicate syscall name %q", ErrInvalid, grant.Name)
 		}
-		seen[tool.Name] = struct{}{}
+		seen[grant.Name] = struct{}{}
 	}
 	return nil
 }
 
 func cloneManifest(manifest Manifest) Manifest {
 	out := manifest
-	out.Tools = cloneTools(manifest.Tools)
+	out.Syscalls = cloneSyscalls(manifest.Syscalls)
 	return out
 }
 
-func cloneTools(tools []Tool) []Tool {
-	if len(tools) == 0 {
+func cloneSyscalls(syscalls []Syscall) []Syscall {
+	if len(syscalls) == 0 {
 		return nil
 	}
-	out := make([]Tool, len(tools))
-	for i, tool := range tools {
-		out[i] = tool
-		out[i].Settings = append(json.RawMessage(nil), tool.Settings...)
-		out[i].Tools = cloneTools(tool.Tools)
+	out := make([]Syscall, len(syscalls))
+	for i, grant := range syscalls {
+		out[i] = grant
+		out[i].Settings = append(json.RawMessage(nil), grant.Settings...)
+		out[i].Syscalls = cloneSyscalls(grant.Syscalls)
 	}
 	return out
 }

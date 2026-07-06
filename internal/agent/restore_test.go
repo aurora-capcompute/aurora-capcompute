@@ -31,9 +31,9 @@ func TestRestoreQuarantinesStaleManifests(t *testing.T) {
 			Message: "old work", Status: ProcessFailed,
 			CreatedAt: now, UpdatedAt: now,
 			Manifest: Manifest{
-				Version: ManifestVersion,
-				Program: "program@1",
-				Tools:   []Tool{{Name: "gone", Type: "core.gone"}},
+				Version:  ManifestVersion,
+				Program:  "program@1",
+				Syscalls: []Syscall{{Name: "gone", Type: "core.gone"}},
 			},
 			ProgramDigest: "stale-digest",
 		},
@@ -61,13 +61,13 @@ func TestRestoreQuarantinesStaleManifests(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get quarantined run: %v", err)
 	}
-	if len(snap.Manifest.Tools) != 1 || snap.Manifest.Tools[0].Type != "core.gone" {
+	if len(snap.Manifest.Syscalls) != 1 || snap.Manifest.Syscalls[0].Type != "core.gone" {
 		t.Fatalf("quarantined manifest = %+v", snap.Manifest)
 	}
 
 	// Re-driving it fails at manifest/driver build, not silently.
 	if _, err := runtime.Retry("run_old", RetryRestart); err == nil {
-		proc := waitForRunFailed(t, runtime, "run_old")
+		proc := waitForProcessFailed(t, runtime, "run_old")
 		if proc.Error == "" {
 			t.Fatal("retried quarantined run finished without an error")
 		}

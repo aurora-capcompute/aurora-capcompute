@@ -13,8 +13,8 @@ import (
 // DTOs
 
 type Manifest = agent.Manifest
-type Tool = agent.Tool
-type AgentSettings = agent.AgentSettings
+type Syscall = agent.Syscall
+type SpawnSettings = agent.SpawnSettings
 type SessionSummary = agent.SessionSummary
 type SessionSnapshot = agent.SessionSnapshot
 type HistoryMessage = agent.HistoryMessage
@@ -118,7 +118,7 @@ const (
 	DefaultTenantID    = agent.DefaultTenantID
 	DefaultProgramID   = agent.DefaultProgramID
 	ManifestVersion    = agent.ManifestVersion
-	AgentToolType      = agent.AgentToolType
+	SpawnType          = agent.SpawnType
 	OnFailureReport    = agent.OnFailureReport
 	OnFailurePropagate = agent.OnFailurePropagate
 )

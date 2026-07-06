@@ -33,7 +33,7 @@ func TestValidateManifestUsesInjectedProvider(t *testing.T) {
 	manifest, err := ValidateManifest(Manifest{
 		Version: ManifestVersion,
 		Program: "program",
-		Tools: []Tool{{
+		Syscalls: []Syscall{{
 			Name: " custom ",
 			Type: "core.custom",
 		}},
@@ -41,11 +41,11 @@ func TestValidateManifestUsesInjectedProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("validate: %v", err)
 	}
-	if manifest.Tools[0].Name != "custom" {
+	if manifest.Syscalls[0].Name != "custom" {
 		t.Fatalf("manifest = %+v", manifest)
 	}
-	if string(manifest.Tools[0].Settings) != "{}" {
-		t.Fatalf("settings = %s", manifest.Tools[0].Settings)
+	if string(manifest.Syscalls[0].Settings) != "{}" {
+		t.Fatalf("settings = %s", manifest.Syscalls[0].Settings)
 	}
 }
 
@@ -54,25 +54,25 @@ func TestValidateManifestRejectsMissingProviderAndUnknownType(t *testing.T) {
 		t.Fatal("expected missing provider error")
 	}
 	if _, err := ValidateManifest(Manifest{
-		Version: ManifestVersion,
-		Tools:   []Tool{{Name: "x", Type: "unknown"}},
+		Version:  ManifestVersion,
+		Syscalls: []Syscall{{Name: "x", Type: "unknown"}},
 	}, &testDispatchers{}); err == nil {
 		t.Fatal("expected unsupported type error")
 	}
 }
 
-// A core.agent tool requires a program (settings.code) and recurses into its tools.
+// A core.spawn grant requires a program and recurses into its syscalls.
 func TestValidateManifestValidatesNestedAgent(t *testing.T) {
 	_, err := ValidateManifest(Manifest{
 		Version: ManifestVersion,
 		Program: "root",
-		Tools: []Tool{{
+		Syscalls: []Syscall{{
 			Name:     "scout",
-			Type:     AgentToolType,
+			Type:     SpawnType,
 			Settings: json.RawMessage(`{}`),
 		}},
 	}, &testDispatchers{})
 	if err == nil {
-		t.Fatal("expected error: agent tool without settings.code")
+		t.Fatal("expected error: spawn grant without settings.program")
 	}
 }

@@ -17,7 +17,7 @@ func buildJournal(t *testing.T, steps ...step) *logJournal {
 	log := newMemLog()
 	scope := eventlog.Scope{TenantID: "t", SessionID: "th"}
 	now := func() time.Time { return time.Unix(0, 0).UTC() }
-	j := newLogJournal(log, scope, "run1", 1, newProcessHistory(), 0, now, nil)
+	j := newLogJournal(log, scope, "proc1", 1, newProcessHistory(), 0, now, nil)
 	for _, s := range steps {
 		appendPair(t, j, sys.Syscall{Abi: sys.ABIVersion, Name: s.name}, s.result)
 	}

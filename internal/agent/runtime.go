@@ -194,7 +194,7 @@ func (r *Runtime) processDrivers(resolveCtx context.Context, cred ProcessContext
 // the delegation router (above tasks, so a delegated child's park suspends
 // the parent transparently instead of becoming a human-approvable task), then
 // the agent lifecycle outermost — its sys.input payload advertises every
-// capability beneath it, delegation tools included.
+// capability beneath it, spawn grants included.
 func (r *Runtime) wrapProtocol(cred ProcessContext, next sys.Dispatcher[ProcessContext]) (sys.Dispatcher[ProcessContext], error) {
 	r.mu.Lock()
 	proc := r.processes[cred.ProcessID]
@@ -212,8 +212,8 @@ func (r *Runtime) wrapProtocol(cred ProcessContext, next sys.Dispatcher[ProcessC
 	if proc == nil {
 		return nil, fmt.Errorf("%w: process %s", ErrNotFound, cred.ProcessID)
 	}
-	if agents := manifest.agentTools(); len(agents) > 0 {
-		router, err := newAgentRouter(next, agents, r)
+	if grants := manifest.spawnGrants(); len(grants) > 0 {
+		router, err := newSpawnRouter(next, grants, r)
 		if err != nil {
 			return nil, err
 		}

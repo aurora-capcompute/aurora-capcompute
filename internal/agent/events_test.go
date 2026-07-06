@@ -24,13 +24,13 @@ func TestFoldReconstructsLatestRunAndSessionState(t *testing.T) {
 
 	// Run goes running → completed; session state is derived from runs.
 	r1, _ := processStateEvent(now, StoredProcess{
-		TenantID: "t", ID: "run1", SessionID: "th1", Revision: 1,
+		TenantID: "t", ID: "proc1", SessionID: "th1", Revision: 1,
 		Message: "hello", Status: ProcessRunning,
 		CreatedAt: now, UpdatedAt: now,
 		Tags: map[string]string{"binding_ref": "ops"},
 	})
 	r2, _ := processStateEvent(now.Add(time.Second), StoredProcess{
-		TenantID: "t", ID: "run1", SessionID: "th1", Revision: 1,
+		TenantID: "t", ID: "proc1", SessionID: "th1", Revision: 1,
 		Message: "hello", Status: ProcessCompleted, Answer: "done",
 		CreatedAt: now, UpdatedAt: now.Add(time.Second),
 		Tags: map[string]string{"binding_ref": "ops"},
@@ -50,7 +50,7 @@ func TestFoldReconstructsLatestRunAndSessionState(t *testing.T) {
 	if proj.Session.ID != "th1" || proj.Session.Tags["binding_ref"] != "ops" {
 		t.Fatalf("session = %+v, want id=th1 binding_ref=ops", proj.Session)
 	}
-	proc := proj.Processes["run1"]
+	proc := proj.Processes["proc1"]
 	if proc.Status != ProcessCompleted || proc.Answer != "done" {
 		t.Fatalf("run folded to %+v, want completed/done", proc)
 	}
@@ -61,7 +61,7 @@ func TestFoldTaskLifecycle(t *testing.T) {
 	scope := eventlog.Scope{TenantID: "t", SessionID: "th1"}
 	now := time.Unix(0, 0).UTC()
 	rec := task.Record{
-		Scope:     task.Scope{TenantID: "t", SessionID: "th1", ProcessID: "run1", Revision: 1},
+		Scope:     task.Scope{TenantID: "t", SessionID: "th1", ProcessID: "proc1", Revision: 1},
 		ID:        "task1",
 		State:     task.StatePending,
 		TokenHash: []byte{1, 2, 3},
@@ -73,7 +73,7 @@ func TestFoldTaskLifecycle(t *testing.T) {
 	resolved.State = task.StateApproved
 	resolvedEv, _ := taskResolvedEvent(now.Add(time.Second), resolved)
 
-	executed, _ := taskExecutedEvent(now.Add(2*time.Second), "run1", 1, "task1")
+	executed, _ := taskExecutedEvent(now.Add(2*time.Second), "proc1", 1, "task1")
 	mustAppend(t, log, scope, created, resolvedEv, executed)
 
 	events, _ := log.Read(context.Background(), scope, 0)

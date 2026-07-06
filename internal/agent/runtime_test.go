@@ -196,7 +196,7 @@ func TestRuntimePassesManifestToDispatcherProvider(t *testing.T) {
 	}
 	proc, err := runtime.CreateProcess(session.ID, "finish", Manifest{
 		Version: ManifestVersion,
-		Tools: []Tool{{
+		Syscalls: []Syscall{{
 			Name: "custom.call", Type: "core.custom", Settings: json.RawMessage(`{"value":2}`),
 		}},
 	})
@@ -220,7 +220,7 @@ func TestRuntimePassesManifestToDispatcherProvider(t *testing.T) {
 	dispatchers.mu.Lock()
 	defer dispatchers.mu.Unlock()
 	if len(dispatchers.manifests) != 1 ||
-		string(dispatchers.manifests[0].Tools[0].Settings) != `{"value":2}` {
+		string(dispatchers.manifests[0].Syscalls[0].Settings) != `{"value":2}` {
 		t.Fatalf("dispatcher manifests = %+v", dispatchers.manifests)
 	}
 }
@@ -277,8 +277,8 @@ func TestRuntimeSetProgramsLifecycle(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 	proc, err := runtime.CreateProcess(session.ID, "finish", Manifest{
-		Version: ManifestVersion,
-		Tools:   []Tool{{Name: "custom.call", Type: "core.custom", Settings: json.RawMessage(`{"value":1}`)}},
+		Version:  ManifestVersion,
+		Syscalls: []Syscall{{Name: "custom.call", Type: "core.custom", Settings: json.RawMessage(`{"value":1}`)}},
 	})
 	if err != nil {
 		t.Fatalf("create run: %v", err)
@@ -463,7 +463,7 @@ func firstAndLaterUser(messages []struct {
 	return first, later
 }
 
-func onlyChildRun(t *testing.T, r *Runtime, parentID string) string {
+func onlyChildProcess(t *testing.T, r *Runtime, parentID string) string {
 	t.Helper()
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -522,9 +522,9 @@ func TestRuntimeCascadeResumeReusesChildRun(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 	proc, err := runtime.CreateProcess(session.ID, "parent task", Manifest{
-		Version: ManifestVersion,
-		Program: "program@1",
-		Tools:   []Tool{{Name: "child", Type: AgentToolType, Settings: json.RawMessage(`{"program":"program@1"}`)}},
+		Version:  ManifestVersion,
+		Program:  "program@1",
+		Syscalls: []Syscall{{Name: "child", Type: SpawnType, Settings: json.RawMessage(`{"program":"program@1"}`)}},
 	})
 	if err != nil {
 		t.Fatalf("create run: %v", err)
@@ -536,7 +536,7 @@ func TestRuntimeCascadeResumeReusesChildRun(t *testing.T) {
 
 	// Addressability: the parent recorded exactly one child, and that child links
 	// back to the parent.
-	childID := onlyChildRun(t, runtime, proc.ID)
+	childID := onlyChildProcess(t, runtime, proc.ID)
 	childParent, childAttempt := runField(t, runtime, childID)
 	if childParent != proc.ID {
 		t.Fatalf("child.parentProcessID = %q, want %q", childParent, proc.ID)
@@ -562,7 +562,7 @@ func TestRuntimeCascadeResumeReusesChildRun(t *testing.T) {
 	}
 	waitForStatus(t, runtime, proc.ID, ProcessCompleted)
 
-	reusedChildID := onlyChildRun(t, runtime, proc.ID)
+	reusedChildID := onlyChildProcess(t, runtime, proc.ID)
 	if reusedChildID != childID {
 		t.Fatalf("cascade spawned a new child %q, want reuse of %q", reusedChildID, childID)
 	}
@@ -656,9 +656,9 @@ func TestRuntimeApprovalCycle(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 	proc, err := runtime.CreateProcess(session.ID, "do the guarded thing", Manifest{
-		Version: ManifestVersion,
-		Program: "program@1",
-		Tools:   []Tool{{Name: "tool.y", Type: "core.custom"}},
+		Version:  ManifestVersion,
+		Program:  "program@1",
+		Syscalls: []Syscall{{Name: "tool.y", Type: "core.custom"}},
 	})
 	if err != nil {
 		t.Fatalf("create run: %v", err)
@@ -769,8 +769,8 @@ func TestRuntimeChildFailurePropagatesToParent(t *testing.T) {
 	proc, err := runtime.CreateProcess(session.ID, "parent task", Manifest{
 		Version: ManifestVersion,
 		Program: "program@1",
-		Tools: []Tool{{
-			Name: "child", Type: AgentToolType,
+		Syscalls: []Syscall{{
+			Name: "child", Type: SpawnType,
 			Settings: json.RawMessage(`{"program":"program@1","on_failure":"propagate"}`),
 		}},
 	})
@@ -780,13 +780,13 @@ func TestRuntimeChildFailurePropagatesToParent(t *testing.T) {
 
 	// With OnFailurePropagate, the failed child fails the parent run rather than
 	// surfacing as a recoverable observation.
-	failed := waitForRunFailed(t, runtime, proc.ID)
+	failed := waitForProcessFailed(t, runtime, proc.ID)
 	if !strings.Contains(failed.Error, "child") {
 		t.Fatalf("parent error = %q, want it to mention the failed child", failed.Error)
 	}
 	// The failure came from a real delegated child proc, not from the parent
 	// program merely failing to see the delegation tool.
-	childID := onlyChildRun(t, runtime, proc.ID)
+	childID := onlyChildProcess(t, runtime, proc.ID)
 	child, err := runtime.GetProcess(childID)
 	if err != nil {
 		t.Fatalf("get child: %v", err)
@@ -862,9 +862,9 @@ func (d *failThenSucceedDispatcher) Dispatch(_ context.Context, _ ProcessContext
 	}
 }
 
-// waitForRunFailed polls until the run reaches ProcessFailed, fataling if it
+// waitForProcessFailed polls until the run reaches ProcessFailed, fataling if it
 // reaches any other terminal state first.
-func waitForRunFailed(t *testing.T, runtime *Runtime, processID string) ProcessSnapshot {
+func waitForProcessFailed(t *testing.T, runtime *Runtime, processID string) ProcessSnapshot {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
@@ -990,11 +990,11 @@ func TestRuntimeCascadeResumeUsesResumeModeForFailedChild(t *testing.T) {
 	proc, err := runtime.CreateProcess(session.ID, "parent task", Manifest{
 		Version: ManifestVersion,
 		Program: "program@1",
-		Tools: []Tool{{
+		Syscalls: []Syscall{{
 			Name:     "child",
-			Type:     AgentToolType,
+			Type:     SpawnType,
 			Settings: json.RawMessage(`{"program":"program@1","on_failure":"propagate"}`),
-			Tools:    []Tool{{Name: "tool.x", Type: "core.custom"}},
+			Syscalls: []Syscall{{Name: "tool.x", Type: "core.custom"}},
 		}},
 	})
 	if err != nil {
@@ -1002,8 +1002,8 @@ func TestRuntimeCascadeResumeUsesResumeModeForFailedChild(t *testing.T) {
 	}
 
 	// Attempt 1: child fails → parent fails via OnFailurePropagate.
-	waitForRunFailed(t, runtime, proc.ID)
-	childID := onlyChildRun(t, runtime, proc.ID)
+	waitForProcessFailed(t, runtime, proc.ID)
+	childID := onlyChildProcess(t, runtime, proc.ID)
 
 	// Resume parent: the cascade must propagate RetryResume to the child so the
 	// child replays its shared prefix rather than restarting from scratch.
@@ -1056,14 +1056,14 @@ func TestRuntimeHardRetryForksFromBeginning(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 	proc, err := runtime.CreateProcess(session.ID, "task", Manifest{
-		Version: ManifestVersion,
-		Program: "program@1",
-		Tools:   []Tool{{Name: "tool.x", Type: "core.custom"}},
+		Version:  ManifestVersion,
+		Program:  "program@1",
+		Syscalls: []Syscall{{Name: "tool.x", Type: "core.custom"}},
 	})
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
-	failed := waitForRunFailed(t, runtime, proc.ID)
+	failed := waitForProcessFailed(t, runtime, proc.ID)
 	if failed.Error == "" {
 		t.Fatal("expected a failure error")
 	}
@@ -1326,7 +1326,7 @@ func startCompensationProcess(t *testing.T, runtime *Runtime) ProcessSnapshot {
 	proc, err := runtime.CreateProcess(session.ID, "place the order", Manifest{
 		Version: ManifestVersion,
 		Program: "program@1",
-		Tools: []Tool{
+		Syscalls: []Syscall{
 			{Name: "billing.charge", Type: "core.custom"},
 			{Name: "billing.refund", Type: "core.custom"},
 		},

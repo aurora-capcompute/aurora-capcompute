@@ -69,7 +69,7 @@ func (r *Runtime) restoreSession(proj Projection, journals map[string]map[uint64
 		}
 		// Quarantine, never refuse to boot: a historical process whose manifest no
 		// longer validates against the compiled driver set (a decommissioned
-		// tool type) is restored verbatim — visible, auditable — and any later
+		// driver type) is restored verbatim — visible, auditable — and any later
 		// execution attempt fails with the provider's error. Dispatcher
 		// upgrades thereby follow the same drain-and-deprecate story as
 		// program upgrades.

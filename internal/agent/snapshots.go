@@ -115,9 +115,9 @@ func copyTime(value *time.Time) *time.Time {
 }
 
 // visibleCapabilities drops capabilities marked Hidden (e.g. the LLM cognition
-// tool and the runtime's protocol calls) from the program's discoverable menu.
-// Hidden is set at build time on each published capability, so it works even
-// when a tool's published operation names differ from its local name.
+// syscall and the runtime's protocol calls) from the program's discoverable
+// menu. Hidden is set at build time on each published capability, so it works
+// even when a driver's published operation names differ from its local name.
 func visibleCapabilities(caps []sys.Capability) []sys.Capability {
 	visible := make([]sys.Capability, 0, len(caps))
 	for _, c := range caps {

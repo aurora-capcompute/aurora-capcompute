@@ -239,7 +239,7 @@ func runRollbackFlow(t *testing.T, crashAt int, failMidSection bool) matrixOutco
 		if proc, err := first.CreateProcess(session.ID, "place the order", Manifest{
 			Version: ManifestVersion,
 			Program: "program@1",
-			Tools: []Tool{
+			Syscalls: []Syscall{
 				{Name: "billing.charge", Type: "core.custom"},
 				{Name: "billing.refund", Type: "core.custom"},
 			},

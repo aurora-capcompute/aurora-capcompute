@@ -165,13 +165,13 @@ func (r *Runtime) callGraphLocked(processID string, visited map[string]bool) Pro
 		Answer:          proc.answer,
 		Error:           proc.err,
 	}
-	// Build a program→name index from the parent's agent tools as a backfill: a
-	// child process with an empty Name can infer it from the parent's `core.agent`
-	// tool whose program (settings.code) matches.
+	// Build a program→name index from the parent's spawn grants as a backfill: a
+	// child process with an empty Name can infer it from the parent's `core.spawn`
+	// grant whose program matches.
 	childNameByProgram := make(map[string]string)
-	for _, tool := range proc.manifest.agentTools() {
-		if s, err := decodeAgentSettings(tool); err == nil && s.Program != "" && tool.Name != "" {
-			childNameByProgram[s.Program] = tool.Name
+	for _, grant := range proc.manifest.spawnGrants() {
+		if s, err := decodeSpawnSettings(grant); err == nil && s.Program != "" && grant.Name != "" {
+			childNameByProgram[s.Program] = grant.Name
 		}
 	}
 	for _, childID := range proc.childProcessIDs {
