@@ -19,7 +19,7 @@ import (
 	"github.com/aurora-capcompute/capcompute/sched"
 	"github.com/aurora-capcompute/capcompute/sys/replay/tape/journaled"
 
-	"github.com/aurora-capcompute/aurora-capcompute/internal/eventlog"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
 )
 
 // activateProcess reconstructs the guest for one process revision: it

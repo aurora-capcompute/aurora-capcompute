@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/aurora-capcompute/aurora-capcompute/internal/eventlog"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
 )
 
 // SessionGraphProcess is a process within a session graph: its metadata and the flat

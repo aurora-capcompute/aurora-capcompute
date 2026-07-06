@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aurora-capcompute/aurora-capcompute/internal/eventlog"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/task"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 )
 
 // appendAll encodes and appends events to a stream, failing the test on error.

@@ -18,7 +18,7 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 	"github.com/aurora-capcompute/capcompute/sys/replay/tape/journaled"
 
-	"github.com/aurora-capcompute/aurora-capcompute/internal/task"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 )
 
 // TestFailureInsideSectionRollsBackThenRetryRecovers: the guest fails

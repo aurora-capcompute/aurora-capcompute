@@ -8,7 +8,7 @@ import (
 	"log/slog"
 	"sort"
 
-	"github.com/aurora-capcompute/aurora-capcompute/internal/task"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 )
 
 // Restore: rebuild in-memory state by folding each session's event stream.

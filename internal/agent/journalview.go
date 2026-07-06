@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aurora-capcompute/aurora-capcompute/internal/eventlog"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
 
 	"github.com/aurora-capcompute/capcompute/sys"
 	"github.com/aurora-capcompute/capcompute/sys/replay/tape/journaled"

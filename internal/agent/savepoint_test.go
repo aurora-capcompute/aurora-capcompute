@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aurora-capcompute/aurora-capcompute/internal/eventlog"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
 
 	"github.com/aurora-capcompute/capcompute/sys"
 )

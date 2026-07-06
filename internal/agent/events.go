@@ -7,8 +7,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/aurora-capcompute/aurora-capcompute/internal/eventlog"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/task"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 )
 
 // Domain event kinds appended to a session's eventlog stream. Lifecycle payloads

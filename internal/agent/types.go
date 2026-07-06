@@ -12,9 +12,9 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 	"github.com/aurora-capcompute/capcompute/sys/replay/tape/journaled"
 
-	"github.com/aurora-capcompute/aurora-capcompute/internal/eventlog"
-	internalhost "github.com/aurora-capcompute/aurora-capcompute/internal/host"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/task"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
+	internalhost "github.com/aurora-capcompute/aurora-capcompute/internal/agent/host"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 )
 
 var (

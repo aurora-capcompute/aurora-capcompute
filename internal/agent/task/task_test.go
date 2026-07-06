@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aurora-capcompute/aurora-capcompute/internal/task"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 	"github.com/aurora-capcompute/capcompute/sys"
 	"github.com/aurora-capcompute/capcompute/sys/replay"
 	"github.com/aurora-capcompute/capcompute/sys/replay/tape/journaled"
