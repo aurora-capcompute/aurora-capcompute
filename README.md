@@ -155,9 +155,10 @@ Manifest validation requires the same dispatcher provider used by the runtime:
 validated, err := aurora.ValidateManifest(manifest, dispatcherProvider)
 ```
 
-Aurora defines only the generic tool envelope (`name`, `type`, `settings`,
-nested `tools` for `core.agent` sub-agents). The provider decides which types
-and settings are valid.
+Aurora defines only the generic grant envelope (`syscall`, `settings`, and
+`programs` — nested manifests — for `core.spawn`); nothing is named, and each
+driver publishes its canonical capability names. The provider decides which
+syscalls and settings are valid.
 
 ## Verification
 
