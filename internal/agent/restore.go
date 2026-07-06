@@ -180,7 +180,7 @@ func (r *Runtime) restoreSession(proj Projection, journals map[string]map[uint64
 	}
 
 	if session.activeProcessID != "" && r.processes[session.activeProcessID] == nil {
-		slog.Info("clearing active process from session due to program digest mismatch",
+		slog.Info("clearing active process from session: the process was not restored",
 			"session_id", session.id, "process_id", session.activeProcessID)
 		session.activeProcessID = ""
 	}

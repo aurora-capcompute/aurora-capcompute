@@ -99,10 +99,13 @@ type ProgramProvider interface {
 }
 ```
 
-The runtime copies the bytes, computes SHA-256 digests, and pins each process
-to its program digest. Filesystem, object-store, embedded, and remote loaders belong in
-application or adapter modules. Programs can be hot-swapped at runtime with
-`Runtime.SetPrograms`.
+The runtime copies the bytes, computes SHA-256 digests, and immutably binds
+each process to the (name, digest) it was created from — a process is an audit
+target, so it never resumes or restarts under different bytes. Filesystem,
+object-store, embedded, and remote loaders belong in application or adapter
+modules. Programs can be hot-swapped at runtime with `Runtime.SetPrograms`;
+swapped bytes serve new processes, while in-flight processes of the old digest
+are stranded (killable, auditable — never silently migrated).
 
 ## Dispatcher provider
 

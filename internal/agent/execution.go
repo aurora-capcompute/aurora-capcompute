@@ -49,6 +49,9 @@ func (r *Runtime) activateProcess(ctx context.Context, pid string) (*capcompute.
 	if proc == nil {
 		return nil, fmt.Errorf("%w: no process for pid %s", ErrNotFound, pid)
 	}
+	if err := r.programBinding(proc); err != nil {
+		return nil, err
+	}
 	if kernel == nil {
 		return nil, fmt.Errorf("program %q is unavailable", programID)
 	}

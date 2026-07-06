@@ -223,6 +223,31 @@ func (r *Runtime) wrapProtocol(cred ProcessContext, next sys.Dispatcher[ProcessC
 	return newLifecycleDispatcher(next, message, history, manifest, attempt), nil
 }
 
+// programBinding checks that the process's program is loaded with the exact
+// bytes the process was created from. A process is an audit target: its
+// journal, effects, and conclusions attest to one program, so it never
+// resumes or restarts under different bytes. New bytes run in new processes,
+// bound by their own manifest.
+func (r *Runtime) programBinding(proc *processState) error {
+	artifact, err := r.programs.Resolve(proc.manifest.Program)
+	if err != nil {
+		return fmt.Errorf("program %q is not loaded", proc.manifest.Program)
+	}
+	if artifact.Digest != proc.programDigest {
+		return fmt.Errorf(
+			"program %q content changed (loaded %s, process bound to %s): a process is immutable — spawn a new process from the new program, or kill this one to settle its effects",
+			proc.manifest.Program, shortDigest(artifact.Digest), shortDigest(proc.programDigest))
+	}
+	return nil
+}
+
+func shortDigest(digest string) string {
+	if len(digest) > 12 {
+		return digest[:12]
+	}
+	return digest
+}
+
 // journalFor returns the process's live journal view.
 func (r *Runtime) journalFor(_ context.Context, cred ProcessContext) (journaled.Journal, error) {
 	r.mu.Lock()
@@ -275,8 +300,10 @@ func (r *Runtime) compileProgram(ctx context.Context, id string, wasm []byte, di
 // time; the control plane uses it to hot-load programs from Program CRDs without a
 // restart. Compilation happens outside the runtime mutex so dispatch is only
 // briefly paused for the swap. If any program fails to compile, no change is
-// applied. Removing a program that an in-flight process is using is best-effort:
-// that process fails on its next step.
+// applied. Processes are immutably bound to the (name, digest) they were created
+// from: replacing or removing an artifact strands its processes — retries are
+// refused and any execution attempt fails — while they remain auditable and can
+// be killed to settle their effects. The new artifact runs in new processes.
 func (r *Runtime) SetPrograms(ctx context.Context, sources []ProgramSource) error {
 	current := r.programs.digests()
 	desired := make(map[string]struct{}, len(sources))
@@ -697,6 +724,14 @@ func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, erro
 		return r.spawnSettleLocked(proc, ProcessRunning, func() {
 			r.settleRollback(processID)
 		}), nil
+	}
+
+	// Every branch below relaunches the guest; the settlement above stays
+	// available regardless of the binding. A process is an audit target: it
+	// never resumes or restarts under different program bytes.
+	if err := r.programBinding(proc); err != nil {
+		r.mu.Unlock()
+		return ProcessSnapshot{}, fmt.Errorf("%w: %v", ErrConflict, err)
 	}
 
 	if mode == RetryRestart {
