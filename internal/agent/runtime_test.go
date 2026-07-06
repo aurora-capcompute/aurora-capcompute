@@ -435,7 +435,7 @@ func (cascadeDispatcher) Dispatch(_ context.Context, _ ProcessContext, syscall s
 		// The parent already delegated and is now observing the child's result.
 		return chatActions(`{"actions":[{"action":"final","content":{"answer":"parent-done"}}]}`), nil
 	default:
-		return chatActions(`{"actions":[{"action":"spawn","content":{"program":"program@1","message":"do subtask"}}]}`), nil
+		return chatActions(`{"actions":[{"action":"sys.spawn","content":{"program":"program@1","message":"do subtask"}}]}`), nil
 	}
 }
 
@@ -734,7 +734,7 @@ func (failingChildDispatcher) Dispatch(_ context.Context, _ ProcessContext, sysc
 			return chatActions(`{"actions":[{"action":"missing.tool","content":{}}]}`), nil
 		}
 	}
-	return chatActions(`{"actions":[{"action":"spawn","content":{"program":"program@1","message":"do subtask"}}]}`), nil
+	return chatActions(`{"actions":[{"action":"sys.spawn","content":{"program":"program@1","message":"do subtask"}}]}`), nil
 }
 
 func TestRuntimeChildFailurePropagatesToParent(t *testing.T) {
@@ -952,7 +952,7 @@ func (d *cascadeResumeDispatcherImpl) Dispatch(_ context.Context, _ ProcessConte
 		if laterUser {
 			return chatActions(`{"actions":[{"action":"final","content":{"answer":"parent-done"}}]}`), nil
 		}
-		return chatActions(`{"actions":[{"action":"spawn","content":{"program":"program@1","message":"do subtask"}}]}`), nil
+		return chatActions(`{"actions":[{"action":"sys.spawn","content":{"program":"program@1","message":"do subtask"}}]}`), nil
 	default:
 		return sys.Fail("unsupported call: " + syscall.Name), nil
 	}
@@ -1402,7 +1402,7 @@ func TestAbortRetriesImmediately(t *testing.T) {
 }
 
 // TestAbortParksOnDurableRetryTimer: a positive retry delay parks the process
-// on a host-authored pending timer.set task; resolving it (as the timer
+// on a host-authored pending sys.timer task; resolving it (as the timer
 // service would) re-runs the task to completion.
 func TestAbortParksOnDurableRetryTimer(t *testing.T) {
 	disp := &compensationDispatcher{abortContent: `{"reason":"provider busy","retry_seconds":3600}`}
@@ -1423,7 +1423,7 @@ func TestAbortParksOnDurableRetryTimer(t *testing.T) {
 	}
 	var retry *TaskSnapshot
 	for i := range tasks {
-		if tasks[i].State == task.StatePending && tasks[i].Syscall.Name == "timer.set" {
+		if tasks[i].State == task.StatePending && tasks[i].Syscall.Name == TimerSyscall {
 			retry = &tasks[i]
 		}
 	}

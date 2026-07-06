@@ -62,10 +62,6 @@ import (
 )
 
 const (
-	// abortRetryCall is the syscall shape of the host-authored retry task. It
-	// matches the timer driver's contract, so the distribution's existing timer
-	// service arms and fires abort retries with no special handling.
-	abortRetryCall = "timer.set"
 	// maxAbortRetryDelay caps a guest-supplied retry delay.
 	maxAbortRetryDelay = 24 * time.Hour
 	// defaultMaxAbortRetries bounds how many times a process may abort-and-retry
@@ -657,7 +653,7 @@ func (r *Runtime) retrySection(processID string, forkOffset int, mode RetryMode)
 	}
 }
 
-// parkForRetry authors the durable retry timer: a pending timer.set task whose
+// parkForRetry authors the durable retry timer: a pending sys.timer task whose
 // fire time is the rollback plus the abort's delay. The distribution's timer
 // service arms and fires it like any timer task — restart-safe for free — and
 // its resolution resumes the process, which then re-runs the aborted section.
@@ -679,11 +675,14 @@ func (r *Runtime) parkForRetry(ctx context.Context, cred ProcessContext, state *
 		Scope:           cred.taskScope(),
 		ID:              taskID,
 		JournalPosition: state.ScopeEnd,
-		Syscall:         sys.Syscall{Abi: sys.ABIVersion, Name: abortRetryCall, Args: args},
-		Summary:         retrySummary(state.Reason),
-		State:           task.StatePending,
-		CreatedAt:       now,
-		ExpiresAt:       &expires,
+		// The retry task speaks sys.timer — the runtime's own syscall — so
+		// the distribution's timer service arms and fires abort retries with
+		// no special handling.
+		Syscall:   sys.Syscall{Abi: sys.ABIVersion, Name: TimerSyscall, Args: args},
+		Summary:   retrySummary(state.Reason),
+		State:     task.StatePending,
+		CreatedAt: now,
+		ExpiresAt: &expires,
 	}
 	task.StampToken(&record, r.taskSecret)
 	if err := r.tasks.Create(ctx, record); err != nil {

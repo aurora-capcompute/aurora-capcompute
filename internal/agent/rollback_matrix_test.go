@@ -187,7 +187,7 @@ func fireRetryTimers(runtime *Runtime, processID string) {
 		return
 	}
 	for _, pending := range tasks {
-		if pending.State != task.StatePending || pending.Syscall.Name != "timer.set" {
+		if pending.State != task.StatePending || pending.Syscall.Name != TimerSyscall {
 			continue
 		}
 		_, _ = runtime.ResolveTask(pending.ID, pending.ResolutionToken, task.Resolution{

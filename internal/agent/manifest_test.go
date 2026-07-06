@@ -58,8 +58,7 @@ func TestValidateManifestRejectsMissingProviderAndUnknownSyscall(t *testing.T) {
 	}
 }
 
-// Nothing is named, so a syscall may be granted once — except core.mcp,
-// whose grants are distinguished by server.
+// Nothing is named, so a syscall may be granted once.
 func TestValidateManifestRefusesDuplicateSyscalls(t *testing.T) {
 	if _, err := ValidateManifest(Manifest{
 		Version:  ManifestVersion,
@@ -67,18 +66,26 @@ func TestValidateManifestRefusesDuplicateSyscalls(t *testing.T) {
 	}, &testDispatchers{}); err == nil {
 		t.Fatal("expected duplicate syscall error")
 	}
+}
+
+// A sys.timer grant is the runtime's own: its settings validate here, not
+// against a driver registration.
+func TestValidateManifestValidatesTimerGrant(t *testing.T) {
 	if _, err := ValidateManifest(Manifest{
-		Version: ManifestVersion,
-		Syscalls: []Syscall{
-			{Syscall: "core.mcp", Settings: json.RawMessage(`{"server_id":"a"}`)},
-			{Syscall: "core.mcp", Settings: json.RawMessage(`{"server_id":"b"}`)},
-		},
+		Version:  ManifestVersion,
+		Syscalls: []Syscall{{Syscall: TimerSyscall, Settings: json.RawMessage(`{"max_duration_ms":60000}`)}},
 	}, &testDispatchers{}); err != nil {
-		t.Fatalf("two MCP servers must coexist: %v", err)
+		t.Fatalf("timer grant rejected: %v", err)
+	}
+	if _, err := ValidateManifest(Manifest{
+		Version:  ManifestVersion,
+		Syscalls: []Syscall{{Syscall: TimerSyscall, Settings: json.RawMessage(`{"max_duration_ms":-1}`)}},
+	}, &testDispatchers{}); err == nil {
+		t.Fatal("negative max_duration_ms accepted")
 	}
 }
 
-// A core.spawn grant carries programs — each a manifest of its own, program
+// A sys.spawn grant carries programs — each a manifest of its own, program
 // required, no version, recursively validated — and no settings.
 func TestValidateManifestValidatesSpawnPrograms(t *testing.T) {
 	valid := Manifest{

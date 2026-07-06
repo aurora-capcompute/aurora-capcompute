@@ -11,14 +11,25 @@ import (
 
 const ManifestVersion = 4
 
-// SpawnSyscall is the syscall granting process spawning. Its grant carries
-// Programs — the manifests of the only programs this process may spawn, each
-// with its own recursive grant set — and the runtime serves it as the
-// `spawn` capability.
-const SpawnSyscall = "core.spawn"
+// The runtime-served syscalls a manifest may grant. Both live in the sys
+// namespace because they are the runtime's own, not leaf I/O drivers:
+// SpawnSyscall's grant carries Programs — the manifests of the only programs
+// this process may spawn, each with its own recursive grant set — and
+// TimerSyscall yields the durable timer tasks the runtime itself leans on
+// for abort-retry parks.
+const (
+	SpawnSyscall = sys.SyscallSpawn
+	TimerSyscall = sys.SyscallTimer
+)
+
+// TimerSettings is the Settings shape of a sys.timer grant.
+type TimerSettings struct {
+	// MaxDurationMS bounds the requested duration (0 = a default of 24h).
+	MaxDurationMS int64 `json:"max_duration_ms,omitempty"`
+}
 
 // Manifest is one process node. Program/SystemPrompt configure the node;
-// Syscalls is its grant set. A spawnable child inside a core.spawn grant is
+// Syscalls is its grant set. A spawnable child inside a sys.spawn grant is
 // itself a Manifest — the recursion that makes the whole grant tree one
 // shape — carrying no Version of its own: the root's governs.
 type Manifest struct {
@@ -39,9 +50,9 @@ type Manifest struct {
 
 // Syscall is one granted syscall. The manifest names nothing: a grant says
 // which syscall the process gets and how it is configured, and each driver
-// publishes its canonical capability names (timer.set, memory.get/put/list,
-// internet.read, openai.*, mcp.<server>.<tool>). A core.spawn grant carries
-// Programs instead of Settings.
+// publishes its canonical capability names (internet.read,
+// memory.get/put/list, openai.*) — the runtime-served sys.* grants are their
+// own names. A sys.spawn grant carries Programs instead of Settings.
 type Syscall struct {
 	Syscall  string          `json:"syscall"`
 	Settings json.RawMessage `json:"settings,omitempty"`
@@ -59,24 +70,29 @@ const (
 // a leaf I/O driver.
 func (s Syscall) isSpawn() bool { return s.Syscall == SpawnSyscall }
 
-// LeafSyscalls returns the node's non-spawn grants. Dispatcher providers
-// build these via the registry; the core.spawn grant is served by the
-// runtime instead.
+// runtimeServed reports whether the runtime itself serves the granted
+// syscall, rather than a driver built by the dispatcher provider.
+func (s Syscall) runtimeServed() bool {
+	return s.Syscall == SpawnSyscall || s.Syscall == TimerSyscall
+}
+
+// LeafSyscalls returns the node's driver grants. Dispatcher providers build
+// these via the registry; the sys.* grants are served by the runtime.
 func (m Manifest) LeafSyscalls() []Syscall {
 	out := make([]Syscall, 0, len(m.Syscalls))
 	for _, s := range m.Syscalls {
-		if !s.isSpawn() {
+		if !s.runtimeServed() {
 			out = append(out, s)
 		}
 	}
 	return out
 }
 
-// spawnGrant returns the node's core.spawn grant, if any. Validation
-// guarantees at most one.
-func (m Manifest) spawnGrant() (Syscall, bool) {
+// grant returns the node's grant of one syscall, if present. Validation
+// guarantees at most one per syscall.
+func (m Manifest) grant(syscall string) (Syscall, bool) {
 	for _, s := range m.Syscalls {
-		if s.isSpawn() {
+		if s.Syscall == syscall {
 			return s, true
 		}
 	}
@@ -102,7 +118,7 @@ func ValidateManifest(manifest Manifest, provider DispatcherProvider) (Manifest,
 }
 
 // validateNode normalizes one manifest node — the root, or a spawnable
-// program inside a core.spawn grant — and recurses into its grant set.
+// program inside a sys.spawn grant — and recurses into its grant set.
 func validateNode(node *Manifest, provider DispatcherProvider) error {
 	node.Program = strings.TrimSpace(node.Program)
 	node.SystemPrompt = strings.TrimSpace(node.SystemPrompt)
@@ -115,10 +131,9 @@ func validateNode(node *Manifest, provider DispatcherProvider) error {
 	return validateSyscalls(node.Syscalls, provider)
 }
 
-// validateSyscalls normalizes a grant set: leaf grants against their driver
-// registrations, the spawn grant into its spawnable programs. Nothing is
-// named, so a syscall may be granted once — except core.mcp, whose grants
-// are distinguished by the server they bridge.
+// validateSyscalls normalizes a grant set: driver grants against their
+// registrations, the runtime-served ones (spawn's programs, the timer's
+// bound) in place. Nothing is named, so a syscall may be granted once.
 func validateSyscalls(syscalls []Syscall, provider DispatcherProvider) error {
 	seen := make(map[string]struct{}, len(syscalls))
 	for i := range syscalls {
@@ -127,13 +142,12 @@ func validateSyscalls(syscalls []Syscall, provider DispatcherProvider) error {
 		if grant.Syscall == "" {
 			return fmt.Errorf("%w: grant %d: a syscall is required", ErrInvalid, i)
 		}
-		key := grant.Syscall
 		if grant.isSpawn() {
 			if len(grant.Settings) > 0 {
-				return fmt.Errorf("%w: core.spawn carries programs, not settings", ErrInvalid)
+				return fmt.Errorf("%w: %s carries programs, not settings", ErrInvalid, SpawnSyscall)
 			}
 			if len(grant.Programs) == 0 {
-				return fmt.Errorf("%w: core.spawn requires at least one program", ErrInvalid)
+				return fmt.Errorf("%w: %s requires at least one program", ErrInvalid, SpawnSyscall)
 			}
 			programs := make(map[string]struct{}, len(grant.Programs))
 			for j := range grant.Programs {
@@ -152,35 +166,32 @@ func validateSyscalls(syscalls []Syscall, provider DispatcherProvider) error {
 				}
 				programs[child.Program] = struct{}{}
 			}
+		} else if grant.Syscall == TimerSyscall {
+			var settings TimerSettings
+			if len(grant.Settings) > 0 {
+				if err := json.Unmarshal(grant.Settings, &settings); err != nil {
+					return fmt.Errorf("%w: sys.timer settings: %v", ErrInvalid, err)
+				}
+			}
+			if settings.MaxDurationMS < 0 {
+				return fmt.Errorf("%w: sys.timer max_duration_ms must not be negative", ErrInvalid)
+			}
 		} else {
 			if len(grant.Programs) > 0 {
-				return fmt.Errorf("%w: syscall %q: only core.spawn carries programs", ErrInvalid, grant.Syscall)
+				return fmt.Errorf("%w: syscall %q: only %s carries programs", ErrInvalid, grant.Syscall, SpawnSyscall)
 			}
 			normalized, err := provider.Normalize(grant.Syscall, grant.Settings)
 			if err != nil {
 				return fmt.Errorf("%w: syscall %q settings: %v", ErrInvalid, grant.Syscall, err)
 			}
 			grant.Settings = append(json.RawMessage(nil), normalized...)
-			if grant.Syscall == "core.mcp" {
-				key += "/" + mcpServerID(grant.Settings)
-			}
 		}
-		if _, exists := seen[key]; exists {
-			return fmt.Errorf("%w: duplicate syscall %q", ErrInvalid, key)
+		if _, exists := seen[grant.Syscall]; exists {
+			return fmt.Errorf("%w: duplicate syscall %q", ErrInvalid, grant.Syscall)
 		}
-		seen[key] = struct{}{}
+		seen[grant.Syscall] = struct{}{}
 	}
 	return nil
-}
-
-// mcpServerID reads the server a core.mcp grant bridges — the discriminator
-// that lets one process reach several MCP servers.
-func mcpServerID(settings json.RawMessage) string {
-	var s struct {
-		ServerID string `json:"server_id"`
-	}
-	_ = json.Unmarshal(settings, &s)
-	return s.ServerID
 }
 
 func cloneManifest(manifest Manifest) Manifest {

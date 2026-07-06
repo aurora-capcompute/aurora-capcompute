@@ -187,6 +187,11 @@ func (r *Runtime) processDrivers(resolveCtx context.Context, cred ProcessContext
 	if err != nil {
 		return nil, err
 	}
+	if grant, ok := manifest.grant(TimerSyscall); ok {
+		// sys.timer is the runtime's own, served below the task layer so its
+		// yield becomes a durable timer task.
+		base = newTimerDispatcher(base, grant)
+	}
 	return newProgressDispatcher(base, r.publish, cred.SessionID, cred.ProcessID), nil
 }
 
@@ -212,7 +217,7 @@ func (r *Runtime) wrapProtocol(cred ProcessContext, next sys.Dispatcher[ProcessC
 	if proc == nil {
 		return nil, fmt.Errorf("%w: process %s", ErrNotFound, cred.ProcessID)
 	}
-	if grant, ok := manifest.spawnGrant(); ok {
+	if grant, ok := manifest.grant(SpawnSyscall); ok {
 		next = newSpawnRouter(next, grant, r)
 	}
 	return newLifecycleDispatcher(next, message, history, manifest, attempt), nil

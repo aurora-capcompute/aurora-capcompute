@@ -25,10 +25,6 @@ type spawnRouter struct {
 	runtime  *Runtime
 }
 
-// SpawnCapability is the canonical name the guest dispatches to spawn one of
-// its granted programs.
-const SpawnCapability = "spawn"
-
 type spawnArgs struct {
 	Program      string `json:"program"`
 	Message      string `json:"message"`
@@ -44,7 +40,7 @@ func newSpawnRouter(next sys.Dispatcher[ProcessContext], grant Syscall, runtime 
 }
 
 func (r *spawnRouter) Dispatch(ctx context.Context, cred ProcessContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
-	if syscall.Name != SpawnCapability {
+	if syscall.Name != SpawnSyscall {
 		return r.next.Dispatch(ctx, cred, syscall, auth)
 	}
 	var args spawnArgs
@@ -107,7 +103,7 @@ func (r *spawnRouter) capability() sys.Capability {
 		`{"type":"object","properties":{"program":{"type":"string","enum":%s},"message":{"type":"string","description":"Task description for the child process"},"system_prompt":{"type":"string","description":"Optional system prompt override"}},"required":["program","message"],"additionalProperties":false}`,
 		enum)
 	return sys.Capability{
-		Name:        SpawnCapability,
+		Name:        SpawnSyscall,
 		Description: desc.String(),
 		InputSchema: json.RawMessage(schema),
 		Hidden:      r.hidden,
