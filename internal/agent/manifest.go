@@ -9,69 +9,58 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-const ManifestVersion = 3
+const ManifestVersion = 4
 
-// SpawnType is the syscall `type` for spawning a child process. A grant of
-// this type is not a leaf I/O driver: the runtime serves it by spawning a
-// child process that runs the named program under the grant's own syscall
-// set — the limitations the child lives inside.
-const SpawnType = "core.spawn"
+// SpawnSyscall is the syscall granting process spawning. Its grant carries
+// Programs — the manifests of the only programs this process may spawn, each
+// with its own recursive grant set — and the runtime serves it as the
+// `spawn` capability.
+const SpawnSyscall = "core.spawn"
 
-// Manifest is one process node (root or child). Program/SystemPrompt
-// configure this node; Syscalls is its grant set — every capability the
-// process may dispatch, leaf I/O drivers and `core.spawn` grants alike, one
-// shape for both.
+// Manifest is one process node. Program/SystemPrompt configure the node;
+// Syscalls is its grant set. A spawnable child inside a core.spawn grant is
+// itself a Manifest — the recursion that makes the whole grant tree one
+// shape — carrying no Version of its own: the root's governs.
 type Manifest struct {
-	Version int    `json:"version"`
-	Name    string `json:"name,omitempty"`
+	Version int    `json:"version,omitempty"`
 	Program string `json:"program,omitempty"`
 	// BindingRef is an opaque application correlation reference (e.g. the
 	// name of the control-plane binding that produced this manifest). The
-	// runtime never interprets it; it only propagates it to spawned child
-	// manifests, like Tags on sessions.
+	// runtime never interprets it.
 	BindingRef   string `json:"binding_ref,omitempty"`
 	SystemPrompt string `json:"system_prompt,omitempty"`
-	// OnFailure selects how a failure of this node (when it is a spawned
-	// child) is handled: OnFailureReport (default) surfaces it to the parent
+	// OnFailure selects how this node's failure (when it is a spawned child)
+	// is handled: OnFailureReport (default) surfaces it to the parent
 	// program as a recoverable failed observation; OnFailurePropagate fails
 	// the parent outright.
 	OnFailure string    `json:"on_failure,omitempty"`
-	Syscalls  []Syscall `json:"syscalls"`
+	Syscalls  []Syscall `json:"syscalls,omitempty"`
 }
 
-// Syscall is one granted capability in a process's manifest. `Type` selects
-// the driver implementation; `Name` is the syscall name the program
-// dispatches. For a `core.spawn` grant, Settings decodes to SpawnSettings —
-// the program to run and its policies — and Syscalls holds the child's own
-// grant set.
+// Syscall is one granted syscall. The manifest names nothing: a grant says
+// which syscall the process gets and how it is configured, and each driver
+// publishes its canonical capability names (timer.set, memory.get/put/list,
+// internet.read, openai.*, mcp.<server>.<tool>). A core.spawn grant carries
+// Programs instead of Settings.
 type Syscall struct {
-	Name     string          `json:"name"`
-	Type     string          `json:"type"`
+	Syscall  string          `json:"syscall"`
 	Settings json.RawMessage `json:"settings,omitempty"`
-	Syscalls []Syscall       `json:"syscalls,omitempty"`
+	Programs []Manifest      `json:"programs,omitempty"`
 	Hidden   bool            `json:"hidden,omitempty"`
 }
 
-// SpawnSettings is the Settings shape of a `core.spawn` grant.
-type SpawnSettings struct {
-	Program      string `json:"program,omitempty"`
-	BindingRef   string `json:"binding_ref,omitempty"`
-	SystemPrompt string `json:"system_prompt,omitempty"`
-	OnFailure    string `json:"on_failure,omitempty"`
-}
-
-// Child failure-handling modes for SpawnSettings.OnFailure.
+// Child failure-handling modes for Manifest.OnFailure.
 const (
 	OnFailureReport    = "report"
 	OnFailurePropagate = "propagate"
 )
 
-// isSpawn reports whether a grant spawns a child process rather than naming
+// isSpawn reports whether a grant spawns child processes rather than naming
 // a leaf I/O driver.
-func (s Syscall) isSpawn() bool { return s.Type == SpawnType }
+func (s Syscall) isSpawn() bool { return s.Syscall == SpawnSyscall }
 
 // LeafSyscalls returns the node's non-spawn grants. Dispatcher providers
-// build these via the registry; `core.spawn` grants are served by the
+// build these via the registry; the core.spawn grant is served by the
 // runtime instead.
 func (m Manifest) LeafSyscalls() []Syscall {
 	out := make([]Syscall, 0, len(m.Syscalls))
@@ -83,33 +72,19 @@ func (m Manifest) LeafSyscalls() []Syscall {
 	return out
 }
 
-// spawnGrants returns the node's `core.spawn` grants (served by the spawn
-// router).
-func (m Manifest) spawnGrants() []Syscall {
-	out := make([]Syscall, 0, len(m.Syscalls))
+// spawnGrant returns the node's core.spawn grant, if any. Validation
+// guarantees at most one.
+func (m Manifest) spawnGrant() (Syscall, bool) {
 	for _, s := range m.Syscalls {
 		if s.isSpawn() {
-			out = append(out, s)
+			return s, true
 		}
 	}
-	return out
-}
-
-func decodeSpawnSettings(grant Syscall) (SpawnSettings, error) {
-	var settings SpawnSettings
-	if len(grant.Settings) > 0 {
-		if err := json.Unmarshal(grant.Settings, &settings); err != nil {
-			return SpawnSettings{}, err
-		}
-	}
-	settings.Program = strings.TrimSpace(settings.Program)
-	settings.BindingRef = strings.TrimSpace(settings.BindingRef)
-	settings.SystemPrompt = strings.TrimSpace(settings.SystemPrompt)
-	return settings, nil
+	return Syscall{}, false
 }
 
 type DispatcherProvider interface {
-	Normalize(syscallType string, settings json.RawMessage) (json.RawMessage, error)
+	Normalize(syscall string, settings json.RawMessage) (json.RawMessage, error)
 	NewDispatcher(context.Context, ProcessContext, Manifest) (sys.Dispatcher[ProcessContext], error)
 }
 
@@ -120,60 +95,92 @@ func ValidateManifest(manifest Manifest, provider DispatcherProvider) (Manifest,
 	if manifest.Version != ManifestVersion {
 		return Manifest{}, fmt.Errorf("%w: manifest version must be %d", ErrInvalid, ManifestVersion)
 	}
-	manifest.SystemPrompt = strings.TrimSpace(manifest.SystemPrompt)
-	manifest.Program = strings.TrimSpace(manifest.Program)
-	if err := validateSyscalls(manifest.Syscalls, provider); err != nil {
+	if err := validateNode(&manifest, provider); err != nil {
 		return Manifest{}, err
 	}
 	return cloneManifest(manifest), nil
 }
 
-// validateSyscalls normalizes leaf grants and recursively validates spawn
-// grants, enforcing unique names within each node.
+// validateNode normalizes one manifest node — the root, or a spawnable
+// program inside a core.spawn grant — and recurses into its grant set.
+func validateNode(node *Manifest, provider DispatcherProvider) error {
+	node.Program = strings.TrimSpace(node.Program)
+	node.SystemPrompt = strings.TrimSpace(node.SystemPrompt)
+	node.BindingRef = strings.TrimSpace(node.BindingRef)
+	switch node.OnFailure {
+	case "", OnFailureReport, OnFailurePropagate:
+	default:
+		return fmt.Errorf("%w: on_failure must be %q or %q", ErrInvalid, OnFailureReport, OnFailurePropagate)
+	}
+	return validateSyscalls(node.Syscalls, provider)
+}
+
+// validateSyscalls normalizes a grant set: leaf grants against their driver
+// registrations, the spawn grant into its spawnable programs. Nothing is
+// named, so a syscall may be granted once — except core.mcp, whose grants
+// are distinguished by the server they bridge.
 func validateSyscalls(syscalls []Syscall, provider DispatcherProvider) error {
 	seen := make(map[string]struct{}, len(syscalls))
 	for i := range syscalls {
 		grant := &syscalls[i]
-		grant.Name = strings.TrimSpace(grant.Name)
-		grant.Type = strings.TrimSpace(grant.Type)
-		if grant.Type == "" {
-			return fmt.Errorf("%w: syscall %d type is required", ErrInvalid, i)
+		grant.Syscall = strings.TrimSpace(grant.Syscall)
+		if grant.Syscall == "" {
+			return fmt.Errorf("%w: grant %d: a syscall is required", ErrInvalid, i)
 		}
+		key := grant.Syscall
 		if grant.isSpawn() {
-			settings, err := decodeSpawnSettings(*grant)
-			if err != nil {
-				return fmt.Errorf("%w: spawn grant %d settings: %v", ErrInvalid, i, err)
+			if len(grant.Settings) > 0 {
+				return fmt.Errorf("%w: core.spawn carries programs, not settings", ErrInvalid)
 			}
-			if settings.Program == "" {
-				return fmt.Errorf("%w: spawn grant %q requires settings.program", ErrInvalid, grant.Name)
+			if len(grant.Programs) == 0 {
+				return fmt.Errorf("%w: core.spawn requires at least one program", ErrInvalid)
 			}
-			if grant.Name == "" {
-				grant.Name = settings.Program
-			}
-			switch settings.OnFailure {
-			case "", OnFailureReport, OnFailurePropagate:
-			default:
-				return fmt.Errorf("%w: spawn grant %q on_failure must be %q or %q", ErrInvalid, grant.Name, OnFailureReport, OnFailurePropagate)
-			}
-			if err := validateSyscalls(grant.Syscalls, provider); err != nil {
-				return fmt.Errorf("spawn grant %q: %w", grant.Name, err)
+			programs := make(map[string]struct{}, len(grant.Programs))
+			for j := range grant.Programs {
+				child := &grant.Programs[j]
+				if child.Version != 0 {
+					return fmt.Errorf("%w: spawnable program %d carries a version; the root's governs", ErrInvalid, j)
+				}
+				if err := validateNode(child, provider); err != nil {
+					return fmt.Errorf("spawnable program %d: %w", j, err)
+				}
+				if child.Program == "" {
+					return fmt.Errorf("%w: spawnable program %d requires a program", ErrInvalid, j)
+				}
+				if _, dup := programs[child.Program]; dup {
+					return fmt.Errorf("%w: duplicate spawnable program %q", ErrInvalid, child.Program)
+				}
+				programs[child.Program] = struct{}{}
 			}
 		} else {
-			if grant.Name == "" {
-				return fmt.Errorf("%w: syscall %d name is required", ErrInvalid, i)
+			if len(grant.Programs) > 0 {
+				return fmt.Errorf("%w: syscall %q: only core.spawn carries programs", ErrInvalid, grant.Syscall)
 			}
-			normalized, err := provider.Normalize(grant.Type, grant.Settings)
+			normalized, err := provider.Normalize(grant.Syscall, grant.Settings)
 			if err != nil {
-				return fmt.Errorf("%w: syscall %q (%s) settings: %v", ErrInvalid, grant.Name, grant.Type, err)
+				return fmt.Errorf("%w: syscall %q settings: %v", ErrInvalid, grant.Syscall, err)
 			}
 			grant.Settings = append(json.RawMessage(nil), normalized...)
+			if grant.Syscall == "core.mcp" {
+				key += "/" + mcpServerID(grant.Settings)
+			}
 		}
-		if _, exists := seen[grant.Name]; exists {
-			return fmt.Errorf("%w: duplicate syscall name %q", ErrInvalid, grant.Name)
+		if _, exists := seen[key]; exists {
+			return fmt.Errorf("%w: duplicate syscall %q", ErrInvalid, key)
 		}
-		seen[grant.Name] = struct{}{}
+		seen[key] = struct{}{}
 	}
 	return nil
+}
+
+// mcpServerID reads the server a core.mcp grant bridges — the discriminator
+// that lets one process reach several MCP servers.
+func mcpServerID(settings json.RawMessage) string {
+	var s struct {
+		ServerID string `json:"server_id"`
+	}
+	_ = json.Unmarshal(settings, &s)
+	return s.ServerID
 }
 
 func cloneManifest(manifest Manifest) Manifest {
@@ -190,7 +197,12 @@ func cloneSyscalls(syscalls []Syscall) []Syscall {
 	for i, grant := range syscalls {
 		out[i] = grant
 		out[i].Settings = append(json.RawMessage(nil), grant.Settings...)
-		out[i].Syscalls = cloneSyscalls(grant.Syscalls)
+		if len(grant.Programs) > 0 {
+			out[i].Programs = make([]Manifest, len(grant.Programs))
+			for j, child := range grant.Programs {
+				out[i].Programs[j] = cloneManifest(child)
+			}
+		}
 	}
 	return out
 }

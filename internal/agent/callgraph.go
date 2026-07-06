@@ -156,7 +156,7 @@ func (r *Runtime) callGraphLocked(processID string, visited map[string]bool) Pro
 	visited[processID] = true
 	node := ProcessGraphNode{
 		ProcessID:       proc.id,
-		Name:            proc.manifest.Name,
+		Name:            proc.manifest.Program,
 		SessionID:       proc.sessionID,
 		ParentProcessID: proc.parentProcessID,
 		Status:          proc.status,
@@ -165,23 +165,8 @@ func (r *Runtime) callGraphLocked(processID string, visited map[string]bool) Pro
 		Answer:          proc.answer,
 		Error:           proc.err,
 	}
-	// Build a program→name index from the parent's spawn grants as a backfill: a
-	// child process with an empty Name can infer it from the parent's `core.spawn`
-	// grant whose program matches.
-	childNameByProgram := make(map[string]string)
-	for _, grant := range proc.manifest.spawnGrants() {
-		if s, err := decodeSpawnSettings(grant); err == nil && s.Program != "" && grant.Name != "" {
-			childNameByProgram[s.Program] = grant.Name
-		}
-	}
 	for _, childID := range proc.childProcessIDs {
-		childNode := r.callGraphLocked(childID, visited)
-		if childNode.Name == "" {
-			if cr := r.processes[childID]; cr != nil {
-				childNode.Name = childNameByProgram[cr.manifest.Program]
-			}
-		}
-		node.Children = append(node.Children, childNode)
+		node.Children = append(node.Children, r.callGraphLocked(childID, visited))
 	}
 	return node
 }

@@ -212,12 +212,8 @@ func (r *Runtime) wrapProtocol(cred ProcessContext, next sys.Dispatcher[ProcessC
 	if proc == nil {
 		return nil, fmt.Errorf("%w: process %s", ErrNotFound, cred.ProcessID)
 	}
-	if grants := manifest.spawnGrants(); len(grants) > 0 {
-		router, err := newSpawnRouter(next, grants, r)
-		if err != nil {
-			return nil, err
-		}
-		next = router
+	if grant, ok := manifest.spawnGrant(); ok {
+		next = newSpawnRouter(next, grant, r)
 	}
 	return newLifecycleDispatcher(next, message, history, manifest, attempt), nil
 }

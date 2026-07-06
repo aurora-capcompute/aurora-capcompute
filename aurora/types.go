@@ -14,7 +14,6 @@ import (
 
 type Manifest = agent.Manifest
 type Syscall = agent.Syscall
-type SpawnSettings = agent.SpawnSettings
 type SessionSummary = agent.SessionSummary
 type SessionSnapshot = agent.SessionSnapshot
 type HistoryMessage = agent.HistoryMessage
@@ -118,7 +117,8 @@ const (
 	DefaultTenantID    = agent.DefaultTenantID
 	DefaultProgramID   = agent.DefaultProgramID
 	ManifestVersion    = agent.ManifestVersion
-	SpawnType          = agent.SpawnType
+	SpawnSyscall       = agent.SpawnSyscall
+	SpawnCapability    = agent.SpawnCapability
 	OnFailureReport    = agent.OnFailureReport
 	OnFailurePropagate = agent.OnFailurePropagate
 )

@@ -33,7 +33,7 @@ func TestRestoreQuarantinesStaleManifests(t *testing.T) {
 			Manifest: Manifest{
 				Version:  ManifestVersion,
 				Program:  "program@1",
-				Syscalls: []Syscall{{Name: "gone", Type: "core.gone"}},
+				Syscalls: []Syscall{{Syscall: "core.gone"}},
 			},
 			ProgramDigest: "stale-digest",
 		},
@@ -61,7 +61,7 @@ func TestRestoreQuarantinesStaleManifests(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get quarantined run: %v", err)
 	}
-	if len(snap.Manifest.Syscalls) != 1 || snap.Manifest.Syscalls[0].Type != "core.gone" {
+	if len(snap.Manifest.Syscalls) != 1 || snap.Manifest.Syscalls[0].Syscall != "core.gone" {
 		t.Fatalf("quarantined manifest = %+v", snap.Manifest)
 	}
 

@@ -197,7 +197,7 @@ func TestRuntimePassesManifestToDispatcherProvider(t *testing.T) {
 	proc, err := runtime.CreateProcess(session.ID, "finish", Manifest{
 		Version: ManifestVersion,
 		Syscalls: []Syscall{{
-			Name: "custom.call", Type: "core.custom", Settings: json.RawMessage(`{"value":2}`),
+			Syscall: "core.custom", Settings: json.RawMessage(`{"value":2}`),
 		}},
 	})
 	if err != nil {
@@ -278,7 +278,7 @@ func TestRuntimeSetProgramsLifecycle(t *testing.T) {
 	}
 	proc, err := runtime.CreateProcess(session.ID, "finish", Manifest{
 		Version:  ManifestVersion,
-		Syscalls: []Syscall{{Name: "custom.call", Type: "core.custom", Settings: json.RawMessage(`{"value":1}`)}},
+		Syscalls: []Syscall{{Syscall: "core.custom", Settings: json.RawMessage(`{"value":1}`)}},
 	})
 	if err != nil {
 		t.Fatalf("create run: %v", err)
@@ -435,7 +435,7 @@ func (cascadeDispatcher) Dispatch(_ context.Context, _ ProcessContext, syscall s
 		// The parent already delegated and is now observing the child's result.
 		return chatActions(`{"actions":[{"action":"final","content":{"answer":"parent-done"}}]}`), nil
 	default:
-		return chatActions(`{"actions":[{"action":"child","content":{"message":"do subtask"}}]}`), nil
+		return chatActions(`{"actions":[{"action":"spawn","content":{"program":"program@1","message":"do subtask"}}]}`), nil
 	}
 }
 
@@ -524,7 +524,7 @@ func TestRuntimeCascadeResumeReusesChildRun(t *testing.T) {
 	proc, err := runtime.CreateProcess(session.ID, "parent task", Manifest{
 		Version:  ManifestVersion,
 		Program:  "program@1",
-		Syscalls: []Syscall{{Name: "child", Type: SpawnType, Settings: json.RawMessage(`{"program":"program@1"}`)}},
+		Syscalls: []Syscall{{Syscall: SpawnSyscall, Programs: []Manifest{{Program: "program@1"}}}},
 	})
 	if err != nil {
 		t.Fatalf("create run: %v", err)
@@ -658,7 +658,7 @@ func TestRuntimeApprovalCycle(t *testing.T) {
 	proc, err := runtime.CreateProcess(session.ID, "do the guarded thing", Manifest{
 		Version:  ManifestVersion,
 		Program:  "program@1",
-		Syscalls: []Syscall{{Name: "tool.y", Type: "core.custom"}},
+		Syscalls: []Syscall{{Syscall: "core.custom"}},
 	})
 	if err != nil {
 		t.Fatalf("create run: %v", err)
@@ -734,7 +734,7 @@ func (failingChildDispatcher) Dispatch(_ context.Context, _ ProcessContext, sysc
 			return chatActions(`{"actions":[{"action":"missing.tool","content":{}}]}`), nil
 		}
 	}
-	return chatActions(`{"actions":[{"action":"child","content":{"message":"do subtask"}}]}`), nil
+	return chatActions(`{"actions":[{"action":"spawn","content":{"program":"program@1","message":"do subtask"}}]}`), nil
 }
 
 func TestRuntimeChildFailurePropagatesToParent(t *testing.T) {
@@ -770,8 +770,8 @@ func TestRuntimeChildFailurePropagatesToParent(t *testing.T) {
 		Version: ManifestVersion,
 		Program: "program@1",
 		Syscalls: []Syscall{{
-			Name: "child", Type: SpawnType,
-			Settings: json.RawMessage(`{"program":"program@1","on_failure":"propagate"}`),
+			Syscall:  SpawnSyscall,
+			Programs: []Manifest{{Program: "program@1", OnFailure: OnFailurePropagate}},
 		}},
 	})
 	if err != nil {
@@ -952,7 +952,7 @@ func (d *cascadeResumeDispatcherImpl) Dispatch(_ context.Context, _ ProcessConte
 		if laterUser {
 			return chatActions(`{"actions":[{"action":"final","content":{"answer":"parent-done"}}]}`), nil
 		}
-		return chatActions(`{"actions":[{"action":"child","content":{"message":"do subtask"}}]}`), nil
+		return chatActions(`{"actions":[{"action":"spawn","content":{"program":"program@1","message":"do subtask"}}]}`), nil
 	default:
 		return sys.Fail("unsupported call: " + syscall.Name), nil
 	}
@@ -991,10 +991,12 @@ func TestRuntimeCascadeResumeUsesResumeModeForFailedChild(t *testing.T) {
 		Version: ManifestVersion,
 		Program: "program@1",
 		Syscalls: []Syscall{{
-			Name:     "child",
-			Type:     SpawnType,
-			Settings: json.RawMessage(`{"program":"program@1","on_failure":"propagate"}`),
-			Syscalls: []Syscall{{Name: "tool.x", Type: "core.custom"}},
+			Syscall: SpawnSyscall,
+			Programs: []Manifest{{
+				Program:   "program@1",
+				OnFailure: OnFailurePropagate,
+				Syscalls:  []Syscall{{Syscall: "core.custom"}},
+			}},
 		}},
 	})
 	if err != nil {
@@ -1058,7 +1060,7 @@ func TestRuntimeHardRetryForksFromBeginning(t *testing.T) {
 	proc, err := runtime.CreateProcess(session.ID, "task", Manifest{
 		Version:  ManifestVersion,
 		Program:  "program@1",
-		Syscalls: []Syscall{{Name: "tool.x", Type: "core.custom"}},
+		Syscalls: []Syscall{{Syscall: "core.custom"}},
 	})
 	if err != nil {
 		t.Fatalf("create run: %v", err)
@@ -1324,12 +1326,9 @@ func startCompensationProcess(t *testing.T, runtime *Runtime) ProcessSnapshot {
 		t.Fatalf("create session: %v", err)
 	}
 	proc, err := runtime.CreateProcess(session.ID, "place the order", Manifest{
-		Version: ManifestVersion,
-		Program: "program@1",
-		Syscalls: []Syscall{
-			{Name: "billing.charge", Type: "core.custom"},
-			{Name: "billing.refund", Type: "core.custom"},
-		},
+		Version:  ManifestVersion,
+		Program:  "program@1",
+		Syscalls: []Syscall{{Syscall: "core.custom"}},
 	})
 	if err != nil {
 		t.Fatalf("create process: %v", err)

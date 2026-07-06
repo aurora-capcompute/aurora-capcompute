@@ -10,182 +10,207 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-// spawnRouter is the dispatcher for `core.spawn` grants. Each grant names a
-// program and carries the child's own syscall set; dispatching it spawns a
-// tracked child process, forwards the message, and returns the child's
-// answer (or propagates a yield for HITL). It sits above the task layer — a
-// spawned child's park suspends the parent transparently, it never becomes a
-// human-approvable task — and below the savepoint markers and replay, so
-// spawn results are journaled effects.
+// spawnRouter serves the spawn syscall. The manifest's core.spawn grant
+// lists the only programs this process may spawn — each a full manifest of
+// its own, the recursive grant tree — and dispatching `spawn` starts the
+// requested program as a tracked child process, forwards the message, and
+// returns the child's answer (or propagates a yield for HITL). It sits above
+// the task layer — a spawned child's park suspends the parent transparently,
+// it never becomes a human-approvable task — and below the savepoint markers
+// and replay, so spawn results are journaled effects.
 type spawnRouter struct {
 	next     sys.Dispatcher[ProcessContext]
-	children map[string]spawnChild
-}
-
-type spawnChild struct {
-	grant    Syscall
-	settings SpawnSettings
+	programs []Manifest
+	hidden   bool
 	runtime  *Runtime
 }
 
-type delegateArgs struct {
+// SpawnCapability is the canonical name the guest dispatches to spawn one of
+// its granted programs.
+const SpawnCapability = "spawn"
+
+type spawnArgs struct {
+	Program      string `json:"program"`
 	Message      string `json:"message"`
 	SystemPrompt string `json:"system_prompt,omitempty"`
 }
 
-type delegateResult struct {
+type spawnResult struct {
 	Answer string `json:"answer"`
 }
 
-func newSpawnRouter(next sys.Dispatcher[ProcessContext], grants []Syscall, runtime *Runtime) (*spawnRouter, error) {
-	m := make(map[string]spawnChild, len(grants))
-	for _, grant := range grants {
-		settings, err := decodeSpawnSettings(grant)
-		if err != nil {
-			return nil, fmt.Errorf("spawn grant %q settings: %w", grant.Name, err)
-		}
-		m[grant.Name] = spawnChild{grant: grant, settings: settings, runtime: runtime}
-	}
-	return &spawnRouter{next: next, children: m}, nil
+func newSpawnRouter(next sys.Dispatcher[ProcessContext], grant Syscall, runtime *Runtime) *spawnRouter {
+	return &spawnRouter{next: next, programs: grant.Programs, hidden: grant.Hidden, runtime: runtime}
 }
 
 func (r *spawnRouter) Dispatch(ctx context.Context, cred ProcessContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
-	if child, ok := r.children[syscall.Name]; ok {
-		return child.dispatch(ctx, cred, syscall)
+	if syscall.Name != SpawnCapability {
+		return r.next.Dispatch(ctx, cred, syscall, auth)
 	}
-	return r.next.Dispatch(ctx, cred, syscall, auth)
+	var args spawnArgs
+	if err := json.Unmarshal(syscall.Args, &args); err != nil {
+		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode spawn args: %v", err)), nil
+	}
+	spec, ok := r.program(args.Program)
+	if !ok {
+		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf(
+			"spawn: program %q is not granted (granted: %s)", args.Program, strings.Join(r.programNames(), ", "))), nil
+	}
+	if strings.TrimSpace(args.Message) == "" {
+		return sys.FailCode(sys.ErrnoInvalidArgs, "spawn: a message is required"), nil
+	}
+	return r.spawn(ctx, cred, spec, args)
+}
+
+func (r *spawnRouter) program(name string) (Manifest, bool) {
+	for _, spec := range r.programs {
+		if spec.Program == name {
+			return spec, true
+		}
+	}
+	return Manifest{}, false
+}
+
+func (r *spawnRouter) programNames() []string {
+	names := make([]string, 0, len(r.programs))
+	for _, spec := range r.programs {
+		names = append(names, spec.Program)
+	}
+	return names
 }
 
 func (r *spawnRouter) Capabilities() []sys.Capability {
-	caps := r.next.Capabilities()
-	for name, child := range r.children {
-		caps = append(caps, spawnCapability(name, child))
-	}
-	return caps
+	return append(r.next.Capabilities(), r.capability())
 }
 
-// onChildFailure applies the child's failure-mode policy. OnFailurePropagate
-// forces the parent run to fail (a failed result alone only surfaces a
-// recoverable observation to the program); otherwise the failure is reported to
-// the parent program as a recoverable failed observation.
-func (c *spawnChild) onChildFailure(parentProcessID string, err error) (sys.SyscallResult, error) {
-	if c.settings.OnFailure == OnFailurePropagate {
-		c.runtime.requestProcessFailure(parentProcessID, fmt.Errorf("child %q failed: %w", c.grant.Name, err))
+// capability publishes the spawn menu: the granted programs and what each
+// can do, with the program enum in the schema so a well-formed call can only
+// name a granted one.
+func (r *spawnRouter) capability() sys.Capability {
+	var desc strings.Builder
+	desc.WriteString("Spawn a child process running one of the granted programs and wait for its answer. Programs:")
+	for i, spec := range r.programs {
+		if i > 0 {
+			desc.WriteString(";")
+		}
+		desc.WriteString(" " + spec.Program + " (")
+		if grants := visibleGrantNames(spec); len(grants) > 0 {
+			desc.WriteString("can use: " + strings.Join(grants, ", "))
+		} else {
+			desc.WriteString("pure computation")
+		}
+		desc.WriteString(")")
+	}
+	desc.WriteString(".")
+	enum, _ := json.Marshal(r.programNames())
+	schema := fmt.Sprintf(
+		`{"type":"object","properties":{"program":{"type":"string","enum":%s},"message":{"type":"string","description":"Task description for the child process"},"system_prompt":{"type":"string","description":"Optional system prompt override"}},"required":["program","message"],"additionalProperties":false}`,
+		enum)
+	return sys.Capability{
+		Name:        SpawnCapability,
+		Description: desc.String(),
+		InputSchema: json.RawMessage(schema),
+		Hidden:      r.hidden,
+	}
+}
+
+// visibleGrantNames summarizes a spawnable program's non-hidden grants for
+// the spawn menu.
+func visibleGrantNames(spec Manifest) []string {
+	out := make([]string, 0, len(spec.Syscalls))
+	for _, grant := range spec.Syscalls {
+		if !grant.Hidden {
+			out = append(out, grant.Syscall)
+		}
+	}
+	return out
+}
+
+// onChildFailure applies the spawnable program's failure-mode policy.
+// OnFailurePropagate forces the parent process to fail (a failed result
+// alone only surfaces a recoverable observation to the program); otherwise
+// the failure is reported to the parent program as a recoverable failed
+// observation.
+func (r *spawnRouter) onChildFailure(parentProcessID string, spec Manifest, err error) (sys.SyscallResult, error) {
+	if spec.OnFailure == OnFailurePropagate {
+		r.runtime.requestProcessFailure(parentProcessID, fmt.Errorf("child %q failed: %w", spec.Program, err))
 	}
 	return sys.Fail(err.Error()), nil
 }
 
-func (c *spawnChild) dispatch(ctx context.Context, parent ProcessContext, syscall sys.Syscall) (sys.SyscallResult, error) {
-	var args delegateArgs
-	if err := json.Unmarshal(syscall.Args, &args); err != nil {
-		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode spawn args: %v", err)), nil
-	}
-
+func (r *spawnRouter) spawn(ctx context.Context, parent ProcessContext, spec Manifest, args spawnArgs) (sys.SyscallResult, error) {
 	// Deep cascade resume: when the parent process is being restarted (or
 	// re-driven after a child's HITL approval), re-execution re-issues the
 	// same deterministic sequence of spawn calls. Rather than spawning a
 	// fresh child each time, reuse the existing child process recorded at
 	// this position (in spawn order).
-	if childID, sessionID, cascadeMode, reuse, ok := c.runtime.nextCascadeChild(parent.ProcessID); ok {
+	if childID, sessionID, cascadeMode, reuse, ok := r.runtime.nextCascadeChild(parent.ProcessID); ok {
 		if reuse {
 			// HITL reconnect: the child already finished (e.g. after its approval was
 			// resolved while the parent was suspended). Reuse its terminal result
 			// directly instead of re-running it, which would fork a new revision and
 			// re-create the child's approval task.
-			snap, err := c.runtime.GetProcess(childID)
+			snap, err := r.runtime.GetProcess(childID)
 			if err != nil {
 				return sys.Fail(fmt.Sprintf("reconnect child: %v", err)), nil
 			}
 			answer, _, procErr := childTerminal(snap)
 			if procErr != nil {
-				return c.onChildFailure(parent.ProcessID, procErr)
+				return r.onChildFailure(parent.ProcessID, spec, procErr)
 			}
-			return delegationResult(answer)
+			return spawnAnswer(answer)
 		}
-		if _, err := c.runtime.Retry(childID, cascadeMode); err != nil {
+		if _, err := r.runtime.Retry(childID, cascadeMode); err != nil {
 			return sys.Fail(fmt.Sprintf("cascade retry child: %v", err)), nil
 		}
-		answer, parked, err := c.runtime.waitForCompletion(ctx, childID, sessionID)
+		answer, parked, err := r.runtime.waitForCompletion(ctx, childID, sessionID)
 		if err != nil {
-			return c.onChildFailure(parent.ProcessID, err)
+			return r.onChildFailure(parent.ProcessID, spec, err)
 		}
 		if parked {
-			return sys.Yield(fmt.Sprintf("waiting on child %s", c.grant.Name)), nil
+			return sys.Yield(fmt.Sprintf("waiting on child %s", spec.Program)), nil
 		}
-		return delegationResult(answer)
+		return spawnAnswer(answer)
 	}
 
-	childManifest := buildChildManifest(c.grant, c.settings, args.SystemPrompt)
-	slog.Info("spawning child process in parent session", "parent", parent.ProcessID, "child", c.grant.Name)
-	proc, err := c.runtime.createChildProcess(parent.ProcessID, parent.SessionID, args.Message, childManifest)
+	childManifest := buildChildManifest(spec, args.SystemPrompt)
+	slog.Info("spawning child process in parent session", "parent", parent.ProcessID, "child", spec.Program)
+	proc, err := r.runtime.createChildProcess(parent.ProcessID, parent.SessionID, args.Message, childManifest)
 	if err != nil {
 		return sys.Fail(fmt.Sprintf("create child process: %v", err)), nil
 	}
-	answer, parked, err := c.runtime.waitForCompletion(ctx, proc.ID, parent.SessionID)
+	answer, parked, err := r.runtime.waitForCompletion(ctx, proc.ID, parent.SessionID)
 	if err != nil {
-		return c.onChildFailure(parent.ProcessID, err)
+		return r.onChildFailure(parent.ProcessID, spec, err)
 	}
 	if parked {
 		// The child parked for human approval. Yield so the parent process suspends
 		// durably; the child→parent finish hook re-drives this call once the child
 		// finishes, and the reconnect branch above returns its answer.
-		return sys.Yield(fmt.Sprintf("waiting on child %s", c.grant.Name)), nil
+		return sys.Yield(fmt.Sprintf("waiting on child %s", spec.Program)), nil
 	}
-	return delegationResult(answer)
+	return spawnAnswer(answer)
 }
 
-// delegationResult marshals a child's answer into the delegate result envelope.
-func delegationResult(answer string) (sys.SyscallResult, error) {
-	result, err := json.Marshal(delegateResult{Answer: answer})
+// spawnAnswer marshals a child's answer into the spawn result envelope.
+func spawnAnswer(answer string) (sys.SyscallResult, error) {
+	result, err := json.Marshal(spawnResult{Answer: answer})
 	if err != nil {
 		return sys.SyscallResult{}, err
 	}
 	return sys.Result(result), nil
 }
 
-// buildChildManifest lifts a `core.spawn` grant into a Manifest for the
-// child process: program/system_prompt come from the grant's SpawnSettings,
-// the grant set from its nested Syscalls.
-func buildChildManifest(grant Syscall, settings SpawnSettings, systemPromptOverride string) Manifest {
-	prompt := settings.SystemPrompt
+// buildChildManifest turns a spawnable program's manifest into the child's
+// own: a clone with the version filled in (the root's governs the tree) and
+// the per-spawn system prompt override applied.
+func buildChildManifest(spec Manifest, systemPromptOverride string) Manifest {
+	child := cloneManifest(spec)
+	child.Version = ManifestVersion
 	if systemPromptOverride != "" {
-		prompt = systemPromptOverride
+		child.SystemPrompt = systemPromptOverride
 	}
-	return Manifest{
-		Version:      ManifestVersion,
-		Name:         grant.Name,
-		Program:      settings.Program,
-		BindingRef:   settings.BindingRef,
-		SystemPrompt: prompt,
-		OnFailure:    settings.OnFailure,
-		Syscalls:     cloneSyscalls(grant.Syscalls),
-	}
-}
-
-func spawnCapability(name string, child spawnChild) sys.Capability {
-	var desc strings.Builder
-	desc.WriteString("Spawn the ")
-	desc.WriteString(name)
-	desc.WriteString(" agent with a task and wait for its answer.")
-	visible := make([]string, 0, len(child.grant.Syscalls))
-	for _, s := range child.grant.Syscalls {
-		if !s.Hidden {
-			visible = append(visible, s.Name)
-		}
-	}
-	if len(visible) > 0 {
-		desc.WriteString(" It can: ")
-		desc.WriteString(strings.Join(visible, ", "))
-		desc.WriteString(".")
-	} else {
-		desc.WriteString(" Pure computation, no external syscalls.")
-	}
-	return sys.Capability{
-		Name:        name,
-		Description: desc.String(),
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"message":{"type":"string","description":"Task description for the child agent"},"system_prompt":{"type":"string","description":"Optional system prompt override"}},"required":["message"],"additionalProperties":false}`),
-		Hidden:      child.grant.Hidden,
-	}
+	return child
 }
 
 // nextCascadeChild returns the next existing child to reuse when a parent process
