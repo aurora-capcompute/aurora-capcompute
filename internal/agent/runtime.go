@@ -332,7 +332,7 @@ func (r *Runtime) SetPrograms(ctx context.Context, sources []ProgramSource) erro
 		if cur, ok := current[id]; ok && cur == digestOf(src.Wasm) {
 			continue // unchanged
 		}
-		record, err := loadProgram(ctx, id, src.Wasm)
+		record, err := loadProgram(id, src.Wasm, src.Interface)
 		if err != nil {
 			shutdownFresh()
 			return err

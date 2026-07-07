@@ -12,27 +12,25 @@ import (
 	"sync"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
-
-	"github.com/aurora-capcompute/capcompute/sys"
-	"github.com/aurora-capcompute/capcompute/sys/wire"
-
-	extism "github.com/extism/go-sdk"
 )
 
 const DefaultProgramID = "aurora-default@1"
 
+// ProgramSource is a program as an app loads it: the wasm bytes and the
+// interface manifest that ships beside them (the `<name>.json` next to
+// `<name>.wasm`). The interface is declarative data — the runtime never
+// executes the program to discover it.
 type ProgramSource struct {
-	ID   string
-	Wasm []byte
+	ID        string
+	Wasm      []byte
+	Interface json.RawMessage
 }
 
-// ProgramInterface is a program's bundled self-description, extracted from the
-// wasm's pure `describe` export at registration: what the process's input
-// message must look like and what its answer will look like, each as a JSON
-// Schema. Conversational programs declare `{"type":"string"}`; structured
-// programs declare object schemas and callers pass/receive JSON text. The
-// interface travels inside the wasm, so the program's content digest — and the
-// process↔program immutability law — covers it.
+// ProgramInterface is a program's declared contract: what its input message and
+// its answer look like (JSON Schemas), plus a one-line description. A caller —
+// model or human — reads it to know what to pass a program. Conversational
+// programs declare `{"type":"string"}`; structured programs declare object
+// schemas and callers pass/receive JSON text.
 type ProgramInterface struct {
 	Description string          `json:"description"`
 	Input       json.RawMessage `json:"input"`
@@ -75,89 +73,41 @@ func digestOf(wasm []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// describedProgram is the content-derived half of a registry record: the
-// interface a program's bytes declare and the schemas compiled from it.
-type describedProgram struct {
-	iface  ProgramInterface
-	input  *jsonschema.Schema
-	output *jsonschema.Schema
-}
-
-// interfaceCache memoizes interface extraction by content digest. A program's
-// interface is a pure function of its bytes (same wasm → same describe output →
-// same schemas), so extracting it — which instantiates the wasm — is done once
-// per digest and reused for every later load of those bytes: a runtime restart,
-// an artifact removed and re-added, the many runtimes a test binary spins up.
-var interfaceCache = struct {
-	mu sync.Mutex
-	m  map[string]describedProgram
-}{m: make(map[string]describedProgram)}
-
-// describe extracts (and caches) a program's interface and compiled schemas for
-// the given content digest.
-func describe(ctx context.Context, digest string, wasm []byte) (describedProgram, error) {
-	interfaceCache.mu.Lock()
-	cached, ok := interfaceCache.m[digest]
-	interfaceCache.mu.Unlock()
-	if ok {
-		return cached, nil
-	}
-	// Extract off-lock: instantiating the wasm is slow, and a duplicate race to
-	// describe the same new digest is harmless — both compute the same result.
-	iface, err := describeProgram(ctx, wasm)
-	if err != nil {
-		return describedProgram{}, err
-	}
-	input, err := compileSchema("input", iface.Input)
-	if err != nil {
-		return describedProgram{}, fmt.Errorf("interface: %w", err)
-	}
-	output, err := compileSchema("output", iface.Output)
-	if err != nil {
-		return describedProgram{}, fmt.Errorf("interface: %w", err)
-	}
-	described := describedProgram{iface: iface, input: input, output: output}
-	interfaceCache.mu.Lock()
-	interfaceCache.m[digest] = described
-	interfaceCache.mu.Unlock()
-	return described, nil
-}
-
-// loadProgram builds one registry record: copy the bytes, digest them, extract
-// the bundled interface, and compile its schemas — so registration refuses a
-// program that cannot describe itself.
-func loadProgram(ctx context.Context, id string, wasm []byte) (programRecord, error) {
+// loadProgram builds one registry record from a program's bytes and its
+// declared interface manifest: copy the bytes, digest them, parse and validate
+// the interface, and compile its schemas. No wasm execution — the interface is
+// data the app supplies, not something the program computes.
+func loadProgram(id string, wasm []byte, ifaceRaw json.RawMessage) (programRecord, error) {
 	wasm = append([]byte(nil), wasm...)
-	digest := digestOf(wasm)
-	described, err := describe(ctx, digest, wasm)
+	iface, err := parseInterface(ifaceRaw)
 	if err != nil {
 		return programRecord{}, fmt.Errorf("program %q: %w", id, err)
 	}
+	input, err := compileSchema("input", iface.Input)
+	if err != nil {
+		return programRecord{}, fmt.Errorf("program %q interface: %w", id, err)
+	}
+	output, err := compileSchema("output", iface.Output)
+	if err != nil {
+		return programRecord{}, fmt.Errorf("program %q interface: %w", id, err)
+	}
 	return programRecord{
-		source:   ProgramSource{ID: id, Wasm: wasm},
-		artifact: ProgramArtifact{ID: id, Digest: digest, ProgramInterface: described.iface},
-		input:    described.input,
-		output:   described.output,
+		source:   ProgramSource{ID: id, Wasm: wasm, Interface: append(json.RawMessage(nil), ifaceRaw...)},
+		artifact: ProgramArtifact{ID: id, Digest: digestOf(wasm), ProgramInterface: iface},
+		input:    input,
+		output:   output,
 	}, nil
 }
 
-// describeProgram calls the wasm's `describe` export. The call is pure by
-// construction: the syscall import is bound to a stub that refuses, so a
-// program that tries to dispatch during describe fails to register.
-func describeProgram(ctx context.Context, wasm []byte) (ProgramInterface, error) {
-	plugin, err := extism.NewPlugin(ctx, extism.Manifest{
-		Wasm: []extism.Wasm{extism.WasmData{Data: wasm}},
-	}, extism.PluginConfig{EnableWasi: true}, []extism.HostFunction{describeStub()})
-	if err != nil {
-		return ProgramInterface{}, fmt.Errorf("instantiate: %w", err)
-	}
-	defer plugin.Close(context.Background())
-	_, out, err := plugin.Call("describe", nil)
-	if err != nil {
-		return ProgramInterface{}, fmt.Errorf("describe: %w", err)
+// parseInterface decodes and lightly validates a program's interface manifest:
+// a description is required, and both schemas must be present (they compile
+// separately). A program that ships without a well-formed interface is refused.
+func parseInterface(raw json.RawMessage) (ProgramInterface, error) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return ProgramInterface{}, fmt.Errorf("an interface manifest is required (description + input/output schemas)")
 	}
 	var iface ProgramInterface
-	if err := json.Unmarshal(out, &iface); err != nil {
+	if err := json.Unmarshal(raw, &iface); err != nil {
 		return ProgramInterface{}, fmt.Errorf("decode interface: %w", err)
 	}
 	iface.Description = strings.TrimSpace(iface.Description)
@@ -165,30 +115,6 @@ func describeProgram(ctx context.Context, wasm []byte) (ProgramInterface, error)
 		return ProgramInterface{}, fmt.Errorf("interface: a description is required")
 	}
 	return iface, nil
-}
-
-// describeStub serves the guest's syscall import during describe with a
-// refusal, keeping the call pure without leaving the import unsatisfied.
-func describeStub() extism.HostFunction {
-	host := extism.NewHostFunctionWithStack(
-		"syscall",
-		func(_ context.Context, plugin *extism.CurrentPlugin, stack []uint64) {
-			offset, err := plugin.WriteBytes(wire.EncodeResponse(wire.Response{
-				Abi:     sys.ABIVersion,
-				Status:  wire.StatusFailed,
-				Code:    string(sys.ErrnoDenied),
-				Message: "describe is pure: syscalls are unavailable",
-			}))
-			if err != nil {
-				panic(fmt.Errorf("write describe stub response: %w", err))
-			}
-			stack[0] = offset
-		},
-		[]extism.ValueType{extism.ValueTypePTR},
-		[]extism.ValueType{extism.ValueTypePTR},
-	)
-	host.SetNamespace("extism:host/compute")
-	return host
 }
 
 // compileSchema compiles one interface schema document.
@@ -248,7 +174,7 @@ func loadPrograms(ctx context.Context, provider ProgramProvider) (*loadedProgram
 		if _, exists := loaded.programs[id]; exists {
 			return nil, fmt.Errorf("%w: duplicate program %q", ErrInvalid, id)
 		}
-		record, err := loadProgram(ctx, id, source.Wasm)
+		record, err := loadProgram(id, source.Wasm, source.Interface)
 		if err != nil {
 			return nil, err
 		}
@@ -305,6 +231,7 @@ func (r *loadedPrograms) Source(id string) (ProgramSource, error) {
 	}
 	source := record.source
 	source.Wasm = append([]byte(nil), source.Wasm...)
+	source.Interface = append(json.RawMessage(nil), source.Interface...)
 	return source, nil
 }
 
@@ -339,7 +266,7 @@ func (r *loadedPrograms) answerValidator(id string) func(string) error {
 	return func(answer string) error { return r.ValidateOutput(id, answer) }
 }
 
-// Interface returns a registered program's bundled interface, if it is loaded.
+// Interface returns a registered program's declared interface, if it is loaded.
 func (r *loadedPrograms) Interface(id string) (ProgramInterface, bool) {
 	record, err := r.record(id)
 	if err != nil {

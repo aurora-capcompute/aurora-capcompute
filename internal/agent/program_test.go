@@ -9,14 +9,31 @@ import (
 	"testing"
 )
 
+// testStringInterface is the interface a conversational test program declares:
+// string message in, string answer out.
+var testStringInterface = json.RawMessage(
+	`{"description":"a test program","input":{"type":"string"},"output":{"type":"string"}}`)
+
 type staticPrograms struct {
 	defaultID string
 	sources   []ProgramSource
 }
 
 func (b staticPrograms) DefaultID() string { return b.defaultID }
+
+// List defaults each real source to the string interface, so a test that only
+// cares about behavior can supply just wasm; a test probing interface handling
+// sets Interface explicitly (empty wasm is left alone for the invalid-source
+// cases).
 func (b staticPrograms) List(context.Context) ([]ProgramSource, error) {
-	return b.sources, nil
+	out := make([]ProgramSource, len(b.sources))
+	for i, src := range b.sources {
+		if len(src.Interface) == 0 && len(src.Wasm) > 0 {
+			src.Interface = testStringInterface
+		}
+		out[i] = src
+	}
+	return out, nil
 }
 
 // fakeRecord builds a registry record without wasm — for the bookkeeping tests
@@ -29,12 +46,15 @@ func fakeRecord(id string, wasm []byte) programRecord {
 	}
 }
 
+// Loading copies the bytes, pins the content digest, and parses the interface
+// manifest that ships with them — no wasm execution, so fake bytes suffice.
 func TestLoadProgramsCopiesBytesAndPinsDigestAndInterface(t *testing.T) {
-	wasm := buildProgram(t)
-	raw := append([]byte(nil), wasm...)
+	raw := []byte("wasm-bytes")
+	iface := json.RawMessage(
+		`{"description":"echoes","input":{"type":"string"},"output":{"type":"string"}}`)
 	programs, err := loadPrograms(context.Background(), staticPrograms{
 		defaultID: "program@1",
-		sources:   []ProgramSource{{ID: "program@1", Wasm: raw}},
+		sources:   []ProgramSource{{ID: "program@1", Wasm: raw, Interface: iface}},
 	})
 	if err != nil {
 		t.Fatalf("load programs: %v", err)
@@ -44,10 +64,10 @@ func TestLoadProgramsCopiesBytesAndPinsDigestAndInterface(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve source: %v", err)
 	}
-	if !bytes.Equal(source.Wasm, wasm) {
+	if !bytes.Equal(source.Wasm, []byte("wasm-bytes")) {
 		t.Fatal("source bytes changed under the registry")
 	}
-	sum := sha256.Sum256(wasm)
+	sum := sha256.Sum256([]byte("wasm-bytes"))
 	artifact, err := programs.Resolve("program@1")
 	if err != nil {
 		t.Fatalf("resolve artifact: %v", err)
@@ -55,16 +75,14 @@ func TestLoadProgramsCopiesBytesAndPinsDigestAndInterface(t *testing.T) {
 	if artifact.Digest != hex.EncodeToString(sum[:]) {
 		t.Fatalf("digest = %q", artifact.Digest)
 	}
-	// The bundled interface was extracted from the wasm's describe export.
-	if artifact.Description == "" || len(artifact.Input) == 0 || len(artifact.Output) == 0 {
-		t.Fatalf("interface not extracted: %+v", artifact.ProgramInterface)
+	if artifact.Description != "echoes" || len(artifact.Input) == 0 || len(artifact.Output) == 0 {
+		t.Fatalf("interface not parsed: %+v", artifact.ProgramInterface)
 	}
 }
 
 // A program that lists at least one source must name a valid default; sources
-// must carry bytes and unique ids; and each program's bytes must be a real
-// wasm that can describe itself — checks that gate registration before any
-// process runs.
+// must carry bytes and unique ids; and each must ship a well-formed interface
+// manifest — checks that gate registration before any process runs.
 func TestLoadProgramsRejectsInvalidProviders(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -75,8 +93,11 @@ func TestLoadProgramsRejectsInvalidProviders(t *testing.T) {
 			{ID: "program@1", Wasm: []byte("one")},
 			{ID: "program@1", Wasm: []byte("two")},
 		}}},
-		{name: "undescribable", provider: staticPrograms{defaultID: "program@1", sources: []ProgramSource{
-			{ID: "program@1", Wasm: []byte("not wasm")},
+		{name: "missing interface", provider: staticPrograms{defaultID: "program@1", sources: []ProgramSource{
+			{ID: "program@1", Wasm: []byte("w"), Interface: json.RawMessage(`{}`)},
+		}}},
+		{name: "malformed interface", provider: staticPrograms{defaultID: "program@1", sources: []ProgramSource{
+			{ID: "program@1", Wasm: []byte("w"), Interface: json.RawMessage(`not json`)},
 		}}},
 	}
 	for _, test := range tests {
@@ -88,12 +109,10 @@ func TestLoadProgramsRejectsInvalidProviders(t *testing.T) {
 	}
 }
 
-// A provider that lists a describable program but names no default is refused
-// once the program has passed the interface extraction.
+// A provider that lists a well-formed program but names no default is refused.
 func TestLoadProgramsRequiresDefault(t *testing.T) {
-	wasm := buildProgram(t)
 	if _, err := loadPrograms(context.Background(), staticPrograms{
-		sources: []ProgramSource{{ID: "program@1", Wasm: wasm}},
+		sources: []ProgramSource{{ID: "program@1", Wasm: []byte("w")}},
 	}); err == nil {
 		t.Fatal("expected missing-default error")
 	}

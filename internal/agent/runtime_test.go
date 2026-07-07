@@ -264,7 +264,7 @@ func TestRuntimeSetProgramsLifecycle(t *testing.T) {
 	}
 
 	// Hot-register the program.
-	if err := runtime.SetPrograms(context.Background(), []ProgramSource{{ID: "program@1", Wasm: wasm}}); err != nil {
+	if err := runtime.SetPrograms(context.Background(), []ProgramSource{{ID: "program@1", Wasm: wasm, Interface: testStringInterface}}); err != nil {
 		t.Fatalf("set programs: %v", err)
 	}
 	if got := runtime.Programs(); len(got) != 1 || got[0].ID != "program@1" {
@@ -286,7 +286,7 @@ func TestRuntimeSetProgramsLifecycle(t *testing.T) {
 	waitForStatus(t, runtime, proc.ID, ProcessCompleted)
 
 	// Re-applying the same set is a no-op; removing it leaves an empty registry.
-	if err := runtime.SetPrograms(context.Background(), []ProgramSource{{ID: "program@1", Wasm: wasm}}); err != nil {
+	if err := runtime.SetPrograms(context.Background(), []ProgramSource{{ID: "program@1", Wasm: wasm, Interface: testStringInterface}}); err != nil {
 		t.Fatalf("re-apply: %v", err)
 	}
 	if len(runtime.Programs()) != 1 {
@@ -313,7 +313,7 @@ func TestProcessImmutablyBoundToProgramBytes(t *testing.T) {
 
 	// Replace program@1: same name, different content digest.
 	if err := runtime.SetPrograms(context.Background(), []ProgramSource{
-		{ID: "program@1", Wasm: buildEchoProgram(t)},
+		{ID: "program@1", Wasm: buildEchoProgram(t), Interface: testStringInterface},
 	}); err != nil {
 		t.Fatalf("set programs: %v", err)
 	}
@@ -397,7 +397,7 @@ var (
 	programError error
 )
 
-// buildProgram compiles the Rust agent program from the sibling aurora-brains
+// buildProgram compiles the Rust agent program from the sibling aurora-brains checkout
 // workspace to wasm32-wasip1 — the same artifact a real assembly deploys.
 // Tests that need a guest skip when the Rust toolchain is unavailable.
 func buildProgram(t *testing.T) []byte {
@@ -411,14 +411,14 @@ func buildProgram(t *testing.T) []byte {
 		cmd := exec.CommandContext(ctx, "cargo", "build",
 			"--release",
 			"--target", "wasm32-wasip1",
-			"-p", "agent-brain",
+			"-p", "agent",
 		)
 		cmd.Dir = "../../../aurora-brains"
 		if out, err := cmd.CombinedOutput(); err != nil {
 			programError = fmt.Errorf("build program: %v\n%s", err, out)
 			return
 		}
-		wasmPath := filepath.Join(cmd.Dir, "target", "wasm32-wasip1", "release", "agent_brain.wasm")
+		wasmPath := filepath.Join(cmd.Dir, "target", "wasm32-wasip1", "release", "agent.wasm")
 		raw, err := os.ReadFile(wasmPath)
 		if err != nil {
 			programError = fmt.Errorf("read program: %v", err)
@@ -451,14 +451,14 @@ func buildEchoProgram(t *testing.T) []byte {
 		cmd := exec.CommandContext(ctx, "cargo", "build",
 			"--release",
 			"--target", "wasm32-wasip1",
-			"-p", "echo-brain",
+			"-p", "echo",
 		)
 		cmd.Dir = "../../../aurora-brains"
 		if out, err := cmd.CombinedOutput(); err != nil {
 			echoError = fmt.Errorf("build echo program: %v\n%s", err, out)
 			return
 		}
-		wasmPath := filepath.Join(cmd.Dir, "target", "wasm32-wasip1", "release", "echo_brain.wasm")
+		wasmPath := filepath.Join(cmd.Dir, "target", "wasm32-wasip1", "release", "echo.wasm")
 		raw, err := os.ReadFile(wasmPath)
 		if err != nil {
 			echoError = fmt.Errorf("read echo program: %v", err)
@@ -1203,7 +1203,7 @@ func TestRuntimeHardRetryForksFromBeginning(t *testing.T) {
 // compensationDispatchers drives the guest-registered rollback story: the model
 // charges and registers billing.refund with the charge's concrete result as
 // args, then aborts. The runtime must execute the registration on abort and
-// apply the abort's retry policy. On a retried attempt (the brain announces
+// apply the abort's retry policy. On a retried attempt (the program announces
 // "attempt N" in its system prompt) the model finishes instead.
 type compensationDispatchers struct{ d *compensationDispatcher }
 
