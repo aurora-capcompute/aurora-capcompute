@@ -81,15 +81,57 @@ type Manifest struct {
 // the flow monitor stamps them onto every result and accumulates them into the
 // run's taint; Forbid lists labels that may not flow into the grant's calls, so
 // a run that has observed a forbidden label is refused before the driver runs.
-// They are declarable only on leaf driver grants — the data I/O — not on the
-// runtime-served sys.* grants, which are control, not sources or sinks.
+// Each is a FlowLabels: a flat array applies to every operation the grant
+// publishes, or an object targets specific operations by name (memory.put,
+// net.http, …). They are declarable only on leaf driver grants — the data I/O —
+// not on the runtime-served sys.* grants, which are control, not sources/sinks.
 type Syscall struct {
 	Syscall  string          `json:"syscall"`
 	Settings json.RawMessage `json:"settings,omitempty"`
 	Programs []Manifest      `json:"programs,omitempty"`
 	Hidden   bool            `json:"hidden,omitempty"`
-	Labels   []string        `json:"labels,omitempty"`
-	Forbid   []string        `json:"forbid,omitempty"`
+	Labels   FlowLabels      `json:"labels,omitempty"`
+	Forbid   FlowLabels      `json:"forbid,omitempty"`
+}
+
+// FlowLabels is a grant's per-operation label policy — the value of `labels` or
+// `forbid` on a leaf grant. It maps a published operation name (memory.get,
+// net.http, …) to its label set; the reserved key "*" applies to every
+// operation the grant publishes. On the wire it accepts either a flat array
+// (sugar for {"*": [...]}, the whole grant) or an object of per-operation label
+// lists, and round-trips back to the array form when only "*" is set.
+type FlowLabels map[string][]string
+
+func (f *FlowLabels) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		*f = nil
+		return nil
+	}
+	if trimmed[0] == '[' {
+		var all []string
+		if err := json.Unmarshal(trimmed, &all); err != nil {
+			return err
+		}
+		*f = FlowLabels{"*": all}
+		return nil
+	}
+	var byOp map[string][]string
+	if err := json.Unmarshal(trimmed, &byOp); err != nil {
+		return err
+	}
+	*f = FlowLabels(byOp)
+	return nil
+}
+
+func (f FlowLabels) MarshalJSON() ([]byte, error) {
+	if len(f) == 0 {
+		return []byte("null"), nil
+	}
+	if all, ok := f["*"]; ok && len(f) == 1 {
+		return json.Marshal(all)
+	}
+	return json.Marshal(map[string][]string(f))
 }
 
 // isSpawn reports whether a grant spawns child processes rather than naming
@@ -224,10 +266,10 @@ func validateSyscalls(syscalls []Syscall, provider DispatcherProvider) error {
 				return fmt.Errorf("%w: syscall %q settings: %v", ErrInvalid, grant.Syscall, err)
 			}
 			grant.Settings = append(json.RawMessage(nil), normalized...)
-			if grant.Labels, err = normalizeLabels("labels", grant.Labels); err != nil {
+			if grant.Labels, err = normalizeFlowLabels("labels", grant.Labels); err != nil {
 				return fmt.Errorf("%w: syscall %q: %v", ErrInvalid, grant.Syscall, err)
 			}
-			if grant.Forbid, err = normalizeLabels("forbid", grant.Forbid); err != nil {
+			if grant.Forbid, err = normalizeFlowLabels("forbid", grant.Forbid); err != nil {
 				return fmt.Errorf("%w: syscall %q: %v", ErrInvalid, grant.Syscall, err)
 			}
 		}
@@ -280,6 +322,47 @@ func normalizeLabels(what string, labels []string) ([]string, error) {
 	return out, nil
 }
 
+// normalizeFlowLabels canonicalizes a per-operation label policy: each
+// operation's label list is normalized (normalizeLabels), operation keys are
+// trimmed, and operations that normalize to no labels are dropped. Operation
+// names are not checked against the grant's published capabilities here — the
+// registry does that when it builds the driver, where the names are known.
+func normalizeFlowLabels(what string, policy FlowLabels) (FlowLabels, error) {
+	if len(policy) == 0 {
+		return nil, nil
+	}
+	out := make(FlowLabels, len(policy))
+	for op, labels := range policy {
+		op = strings.TrimSpace(op)
+		if op == "" {
+			return nil, fmt.Errorf("%s: an operation name is required (or \"*\" for every operation)", what)
+		}
+		normalized, err := normalizeLabels(what, labels)
+		if err != nil {
+			return nil, err
+		}
+		if len(normalized) == 0 {
+			continue
+		}
+		out[op] = normalized
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
+func cloneFlowLabels(policy FlowLabels) FlowLabels {
+	if len(policy) == 0 {
+		return nil
+	}
+	out := make(FlowLabels, len(policy))
+	for op, labels := range policy {
+		out[op] = append([]string(nil), labels...)
+	}
+	return out
+}
+
 func cloneManifest(manifest Manifest) Manifest {
 	out := manifest
 	out.Syscalls = cloneSyscalls(manifest.Syscalls)
@@ -294,8 +377,8 @@ func cloneSyscalls(syscalls []Syscall) []Syscall {
 	for i, grant := range syscalls {
 		out[i] = grant
 		out[i].Settings = append(json.RawMessage(nil), grant.Settings...)
-		out[i].Labels = append([]string(nil), grant.Labels...)
-		out[i].Forbid = append([]string(nil), grant.Forbid...)
+		out[i].Labels = cloneFlowLabels(grant.Labels)
+		out[i].Forbid = cloneFlowLabels(grant.Forbid)
 		if len(grant.Programs) > 0 {
 			out[i].Programs = make([]Manifest, len(grant.Programs))
 			for j, child := range grant.Programs {

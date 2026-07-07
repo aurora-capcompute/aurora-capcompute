@@ -132,36 +132,45 @@ func TestValidateManifestValidatesSpawnPrograms(t *testing.T) {
 	}
 }
 
-// Data-flow labels/forbid are declarable on leaf driver grants (normalized —
-// trimmed, de-duplicated, sorted) and rejected on the runtime-served sys.*
-// control grants and for the reserved "syscall:" namespace.
+// Data-flow labels/forbid are declarable on leaf driver grants — a flat array
+// (every operation) or a per-operation object — normalized (trimmed, deduped,
+// sorted), and rejected on the runtime-served sys.* grants and the reserved
+// "syscall:" namespace. Parsed from JSON to exercise the polymorphic decode.
 func TestValidateManifestLabelsForbid(t *testing.T) {
-	m, err := ValidateManifest(Manifest{
-		Version: ManifestVersion,
-		Syscalls: []Syscall{{
-			Syscall: "core.custom",
-			Labels:  []string{" untrusted_web ", "untrusted_web", ""},
-			Forbid:  []string{"secret", "pii"},
-		}},
-	}, &testDispatchers{})
+	raw := `{"version":4,"syscalls":[
+		{"syscall":"core.custom",
+		 "labels":[" untrusted_web ","untrusted_web",""],
+		 "forbid":{"memory.put":["secret","secret"],"*":["pii"]}}]}`
+	var manifest Manifest
+	if err := json.Unmarshal([]byte(raw), &manifest); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	m, err := ValidateManifest(manifest, &testDispatchers{})
 	if err != nil {
 		t.Fatalf("validate: %v", err)
 	}
 	grant := m.Syscalls[0]
-	if len(grant.Labels) != 1 || grant.Labels[0] != "untrusted_web" {
-		t.Fatalf("labels = %v, want [untrusted_web] (trimmed + deduped)", grant.Labels)
+	if got := grant.Labels["*"]; len(got) != 1 || got[0] != "untrusted_web" {
+		t.Fatalf("labels[*] = %v, want [untrusted_web] (array sugar, trimmed + deduped)", got)
 	}
-	if len(grant.Forbid) != 2 || grant.Forbid[0] != "pii" || grant.Forbid[1] != "secret" {
-		t.Fatalf("forbid = %v, want sorted [pii secret]", grant.Forbid)
+	if got := grant.Forbid["memory.put"]; len(got) != 1 || got[0] != "secret" {
+		t.Fatalf("forbid[memory.put] = %v, want [secret]", got)
+	}
+	if got := grant.Forbid["*"]; len(got) != 1 || got[0] != "pii" {
+		t.Fatalf("forbid[*] = %v, want [pii]", got)
+	}
+	// A "*"-only policy round-trips back to the array form.
+	if out, _ := json.Marshal(grant.Labels); string(out) != `["untrusted_web"]` {
+		t.Fatalf("labels marshal = %s, want the array sugar", out)
 	}
 
 	cases := []struct {
 		name  string
 		grant Syscall
 	}{
-		{"reserved label prefix", Syscall{Syscall: "core.custom", Labels: []string{"syscall:core.custom"}}},
-		{"labels on spawn", Syscall{Syscall: SpawnSyscall, Labels: []string{"x"}, Programs: []Manifest{{Program: "p"}}}},
-		{"forbid on timer", Syscall{Syscall: TimerSyscall, Forbid: []string{"x"}}},
+		{"reserved label prefix", Syscall{Syscall: "core.custom", Labels: FlowLabels{"*": {"syscall:core.custom"}}}},
+		{"labels on spawn", Syscall{Syscall: SpawnSyscall, Labels: FlowLabels{"*": {"x"}}, Programs: []Manifest{{Program: "p"}}}},
+		{"forbid on timer", Syscall{Syscall: TimerSyscall, Forbid: FlowLabels{"*": {"x"}}}},
 	}
 	for _, tc := range cases {
 		if _, err := ValidateManifest(Manifest{
