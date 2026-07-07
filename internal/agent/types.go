@@ -132,7 +132,7 @@ type sessionState struct {
 type processState struct {
 	id          string
 	sessionID   string
-	message     string
+	input       string
 	history     []HistoryMessage
 	status      ProcessStatus
 	attempt     int
@@ -231,9 +231,8 @@ func processPID(processID string, revision uint64) string {
 }
 
 type agentInput struct {
-	Message      string           `json:"message"`
+	Input        string           `json:"input"`
 	History      []HistoryMessage `json:"history,omitempty"`
-	SystemPrompt string           `json:"system_prompt,omitempty"`
 	Capabilities []sys.Capability `json:"capabilities,omitempty"`
 	// Attempt is which run of this process the guest is on (1 = first). A
 	// retried process — including an abort-retry — sees a higher attempt, so a
@@ -260,7 +259,7 @@ type SessionSnapshot struct {
 type ProcessSnapshot struct {
 	ID            string        `json:"id"`
 	SessionID     string        `json:"session_id"`
-	Message       string        `json:"message"`
+	Input         string        `json:"input"`
 	Status        ProcessStatus `json:"status"`
 	Attempt       int           `json:"attempt"`
 	Revision      uint64        `json:"revision"`

@@ -254,15 +254,15 @@ func (r *loadedPrograms) Source(id string) (ProgramSource, error) {
 	return source, nil
 }
 
-// ValidateInput checks a process input message against the program's declared
-// input schema.
-func (r *loadedPrograms) ValidateInput(id, message string) error {
+// ValidateInput checks a process input against the program's declared input
+// schema.
+func (r *loadedPrograms) ValidateInput(id, input string) error {
 	record, err := r.record(id)
 	if err != nil {
 		return err
 	}
-	if err := validateText(record.input, message); err != nil {
-		return fmt.Errorf("%w: message rejected by program %q input schema: %v", ErrInvalid, record.artifact.ID, err)
+	if err := validateText(record.input, input); err != nil {
+		return fmt.Errorf("%w: input rejected by program %q input schema: %v", ErrInvalid, record.artifact.ID, err)
 	}
 	return nil
 }

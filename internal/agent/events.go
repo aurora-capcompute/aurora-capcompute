@@ -155,7 +155,7 @@ func deriveStoredSession(processes map[string]StoredProcess) StoredSession {
 	session := StoredSession{
 		TenantID:  ordered[0].TenantID,
 		ID:        ordered[0].SessionID,
-		Title:     sessionTitle(ordered[0].Message),
+		Title:     sessionTitle(ordered[0].Input),
 		CreatedAt: ordered[0].CreatedAt,
 		UpdatedAt: ordered[0].UpdatedAt,
 		Tags:      cloneTags(ordered[0].Tags),

@@ -90,7 +90,7 @@ func (r *Runtime) restoreSession(proj Projection, journals map[string]map[uint64
 		proc := &processState{
 			id:                sr.ID,
 			sessionID:         sr.SessionID,
-			message:           sr.Message,
+			input:             sr.Input,
 			status:            status,
 			attempt:           sr.Attempt,
 			revision:          sr.Revision,
@@ -130,7 +130,7 @@ func (r *Runtime) restoreSession(proj Projection, journals map[string]map[uint64
 		session.processIDs = append(session.processIDs, proc.id)
 		if proc.status == ProcessCompleted {
 			session.history = append(session.history,
-				HistoryMessage{Role: "user", Content: proc.message},
+				HistoryMessage{Role: "user", Content: proc.input},
 				HistoryMessage{Role: "assistant", Content: proc.answer},
 			)
 		}

@@ -14,7 +14,7 @@ import (
 // spawnRouter serves the spawn syscall. The manifest's core.spawn grant
 // lists the only programs this process may spawn — each a full manifest of
 // its own, the recursive grant tree — and dispatching `spawn` starts the
-// requested program as a tracked child process, forwards the message, and
+// requested program as a tracked child process, forwards the input, and
 // returns the child's answer (or propagates a yield for HITL). It sits above
 // the task layer — a spawned child's park suspends the parent transparently,
 // it never becomes a human-approvable task — and below the savepoint markers
@@ -27,9 +27,8 @@ type spawnRouter struct {
 }
 
 type spawnArgs struct {
-	Program      string `json:"program"`
-	Message      string `json:"message"`
-	SystemPrompt string `json:"system_prompt,omitempty"`
+	Program string          `json:"program"`
+	Input   json.RawMessage `json:"input"`
 }
 
 type spawnResult struct {
@@ -53,16 +52,46 @@ func (r *spawnRouter) Dispatch(ctx context.Context, cred ProcessContext, syscall
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf(
 			"spawn: program %q is not granted (granted: %s)", args.Program, strings.Join(r.programNames(), ", "))), nil
 	}
-	if strings.TrimSpace(args.Message) == "" {
-		return sys.FailCode(sys.ErrnoInvalidArgs, "spawn: a message is required"), nil
-	}
-	// Validate the message against the child program's declared input schema
-	// before spawning — a mismatch is a recoverable observation the parent can
-	// correct, not a born-invalid child.
-	if err := r.runtime.programs.ValidateInput(args.Program, args.Message); err != nil {
+	// The spawn ADT types `input` per the child's declared input schema; collapse
+	// it to the canonical process-input string (the inverse of the string-first
+	// rule) before validating and spawning.
+	input, err := spawnInputToMessage(args.Input)
+	if err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("spawn: %v", err)), nil
 	}
-	return r.spawn(ctx, cred, spec, args)
+	if strings.TrimSpace(input) == "" {
+		return sys.FailCode(sys.ErrnoInvalidArgs, "spawn: an input is required"), nil
+	}
+	// Validate the input against the child program's declared input schema
+	// before spawning — a mismatch is a recoverable observation the parent can
+	// correct, not a born-invalid child.
+	if err := r.runtime.programs.ValidateInput(args.Program, input); err != nil {
+		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("spawn: %v", err)), nil
+	}
+	return r.spawn(ctx, cred, spec, input)
+}
+
+// spawnInputToMessage collapses the typed spawn `input` value into the canonical
+// process-input string — the inverse of the string-first rule (validateText in
+// program.go): a JSON string input carries its plain text; any other JSON value
+// carries its compact text, which the child re-parses under the same rule.
+func spawnInputToMessage(input json.RawMessage) (string, error) {
+	trimmed := bytes.TrimSpace(input)
+	if len(trimmed) == 0 {
+		return "", fmt.Errorf("an input is required")
+	}
+	if trimmed[0] == '"' {
+		var text string
+		if err := json.Unmarshal(trimmed, &text); err != nil {
+			return "", fmt.Errorf("decode input string: %w", err)
+		}
+		return text, nil
+	}
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, trimmed); err != nil {
+		return "", fmt.Errorf("invalid input JSON: %w", err)
+	}
+	return buf.String(), nil
 }
 
 func (r *spawnRouter) program(name string) (Manifest, bool) {
@@ -86,15 +115,17 @@ func (r *spawnRouter) Capabilities() []sys.Capability {
 	return append(r.next.Capabilities(), r.capability())
 }
 
-// capability publishes the spawn menu: for each granted program, what it does
-// (its bundled description), what it can use (its visible grants), and the
-// shape of the message it expects and the answer it returns (its interface
-// schemas). The program enum in the arg schema keeps a well-formed call
-// naming a granted program; the per-program interface tells the caller what
-// to put in `message`.
+// capability publishes the spawn menu as a typed ADT: for each granted program,
+// what it does (its bundled description), what it can use (its visible grants),
+// and the shape of the input it expects and the answer it returns (its interface
+// schemas). The arg schema is a oneOf over the programs — each branch pins
+// `program` to a const and types `input` with that program's declared input
+// schema — so a well-formed call names a granted program and carries an input
+// matching it. (The kernel Validator enforces this schema before dispatch.)
 func (r *spawnRouter) capability() sys.Capability {
 	var desc strings.Builder
 	desc.WriteString("Spawn a child process running one of the granted programs and wait for its answer. Programs:")
+	branches := make([]json.RawMessage, 0, len(r.programs))
 	for i, spec := range r.programs {
 		if i > 0 {
 			desc.WriteString(";")
@@ -109,21 +140,43 @@ func (r *spawnRouter) capability() sys.Capability {
 		} else {
 			desc.WriteString(" [pure computation]")
 		}
+		// This program's declared input schema types its `input` branch; a
+		// not-yet-loaded program falls back to a permissive schema (Dispatch
+		// then fails cleanly with "program is not registered").
+		inputSchema := json.RawMessage(`{}`)
 		if known {
 			desc.WriteString(" input=" + compactSchema(iface.Input) + " output=" + compactSchema(iface.Output))
+			if len(iface.Input) > 0 {
+				inputSchema = iface.Input
+			}
 		}
+		branches = append(branches, spawnBranchSchema(spec.Program, inputSchema))
 	}
-	desc.WriteString("\nPass `message` in the form the chosen program's input schema declares: plain text for a string schema, or a JSON document for a structured one.")
-	enum, _ := json.Marshal(r.programNames())
-	schema := fmt.Sprintf(
-		`{"type":"object","properties":{"program":{"type":"string","enum":%s},"message":{"type":"string","description":"Input for the child process, matching its declared input schema (see the menu)"},"system_prompt":{"type":"string","description":"Optional system prompt override"}},"required":["program","message"],"additionalProperties":false}`,
-		enum)
+	desc.WriteString("\nCall {\"program\":\"<name>\",\"input\":<value>} where input matches the chosen program's declared input schema: a JSON string for a string schema, a JSON document for a structured one.")
 	return sys.Capability{
 		Name:        SpawnSyscall,
 		Description: desc.String(),
-		InputSchema: json.RawMessage(schema),
+		InputSchema: spawnADTSchema(branches),
 		Hidden:      r.hidden,
 	}
+}
+
+// spawnBranchSchema is one oneOf branch of the spawn ADT: the program pinned to
+// a const and `input` typed by that program's declared input schema, embedded
+// verbatim (it is already independently schema-compilable, which the kernel
+// Validator requires).
+func spawnBranchSchema(program string, inputSchema json.RawMessage) json.RawMessage {
+	programConst, _ := json.Marshal(program)
+	return json.RawMessage(fmt.Sprintf(
+		`{"type":"object","properties":{"program":{"const":%s},"input":%s},"required":["program","input"],"additionalProperties":false}`,
+		programConst, inputSchema))
+}
+
+// spawnADTSchema wraps the per-program branches in a discriminated oneOf — the
+// input schema the guest is shown and the kernel Validator enforces.
+func spawnADTSchema(branches []json.RawMessage) json.RawMessage {
+	arr, _ := json.Marshal(branches)
+	return json.RawMessage(fmt.Sprintf(`{"oneOf":%s}`, arr))
 }
 
 // compactSchema renders an interface schema for the spawn menu, collapsing
@@ -151,7 +204,7 @@ func visibleGrantNames(spec Manifest) []string {
 	return out
 }
 
-func (r *spawnRouter) spawn(ctx context.Context, parent ProcessContext, spec Manifest, args spawnArgs) (sys.SyscallResult, error) {
+func (r *spawnRouter) spawn(ctx context.Context, parent ProcessContext, spec Manifest, input string) (sys.SyscallResult, error) {
 	// Deep cascade resume: when the parent process is being restarted (or
 	// re-driven after a child's HITL approval), re-execution re-issues the
 	// same deterministic sequence of spawn calls. Rather than spawning a
@@ -186,9 +239,9 @@ func (r *spawnRouter) spawn(ctx context.Context, parent ProcessContext, spec Man
 		return spawnAnswer(answer)
 	}
 
-	childManifest := buildChildManifest(spec, args.SystemPrompt)
+	childManifest := buildChildManifest(spec)
 	slog.Info("spawning child process in parent session", "parent", parent.ProcessID, "child", spec.Program)
-	proc, err := r.runtime.createChildProcess(parent.ProcessID, parent.SessionID, args.Message, childManifest)
+	proc, err := r.runtime.createChildProcess(parent.ProcessID, parent.SessionID, input, childManifest)
 	if err != nil {
 		return sys.Fail(fmt.Sprintf("create child process: %v", err)), nil
 	}
@@ -215,14 +268,12 @@ func spawnAnswer(answer string) (sys.SyscallResult, error) {
 }
 
 // buildChildManifest turns a spawnable program's manifest into the child's
-// own: a clone with the version filled in (the root's governs the tree) and
-// the per-spawn system prompt override applied.
-func buildChildManifest(spec Manifest, systemPromptOverride string) Manifest {
+// own: a clone with the version filled in (the root's governs the tree). The
+// embedded manifest is a 1-level projection — a complete manifest for that
+// program — so nothing else needs to be synthesized.
+func buildChildManifest(spec Manifest) Manifest {
 	child := cloneManifest(spec)
 	child.Version = ManifestVersion
-	if systemPromptOverride != "" {
-		child.Settings.SystemPrompt = systemPromptOverride
-	}
 	return child
 }
 
@@ -276,9 +327,9 @@ func (r *Runtime) nextCascadeChild(parentProcessID string) (childID, sessionID s
 	return childID, child.sessionID, mode, false, true
 }
 
-func (r *Runtime) createChildProcess(parentProcessID string, sessionID string, message string, manifest Manifest) (ProcessSnapshot, error) {
-	if message == "" {
-		return ProcessSnapshot{}, fmt.Errorf("%w: message is required", ErrInvalid)
+func (r *Runtime) createChildProcess(parentProcessID string, sessionID string, input string, manifest Manifest) (ProcessSnapshot, error) {
+	if input == "" {
+		return ProcessSnapshot{}, fmt.Errorf("%w: input is required", ErrInvalid)
 	}
 	program, err := r.programs.Resolve(manifest.Program)
 	if err != nil {
@@ -307,7 +358,7 @@ func (r *Runtime) createChildProcess(parentProcessID string, sessionID string, m
 	proc := &processState{
 		id:              processID,
 		sessionID:       sessionID,
-		message:         message,
+		input:           input,
 		history:         append([]HistoryMessage(nil), session.history...),
 		status:          ProcessQueued,
 		attempt:         1,
@@ -322,7 +373,7 @@ func (r *Runtime) createChildProcess(parentProcessID string, sessionID string, m
 	r.processes[processID] = proc
 	session.processIDs = append(session.processIDs, processID)
 	if len(session.processIDs) == 1 {
-		session.title = sessionTitle(message)
+		session.title = sessionTitle(input)
 	}
 	prevActiveProcessID := session.activeProcessID
 	session.activeProcessID = processID

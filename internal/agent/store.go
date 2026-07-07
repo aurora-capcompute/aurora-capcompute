@@ -30,7 +30,7 @@ type StoredProcess struct {
 	ID            string
 	SessionID     string
 	Revision      uint64
-	Message       string
+	Input         string
 	Status        ProcessStatus
 	Attempt       int
 	CreatedAt     time.Time

@@ -555,7 +555,7 @@ func (cascadeDispatcher) Dispatch(_ context.Context, _ ProcessContext, syscall s
 		// The parent already delegated and is now observing the child's result.
 		return chatActions(`{"actions":[{"action":"final","content":{"answer":"parent-done"}}]}`), nil
 	default:
-		return chatActions(`{"actions":[{"action":"sys.spawn","content":{"program":"program@1","message":"do subtask"}}]}`), nil
+		return chatActions(`{"actions":[{"action":"sys.spawn","content":{"program":"program@1","input":"do subtask"}}]}`), nil
 	}
 }
 
@@ -855,7 +855,7 @@ func (failingChildDispatcher) Dispatch(_ context.Context, _ ProcessContext, sysc
 		}
 	}
 	// A hard spawn: the parent must abort if the child fails.
-	return chatActions(`{"actions":[{"action":"sys.spawn","content":{"program":"program@1","message":"do subtask"},"hard":true}]}`), nil
+	return chatActions(`{"actions":[{"action":"sys.spawn","content":{"program":"program@1","input":"do subtask"},"hard":true}]}`), nil
 }
 
 func TestRuntimeHardSpawnFailsParentOnChildFailure(t *testing.T) {
@@ -1073,7 +1073,7 @@ func (d *cascadeResumeDispatcherImpl) Dispatch(_ context.Context, _ ProcessConte
 		if laterUser {
 			return chatActions(`{"actions":[{"action":"final","content":{"answer":"parent-done"}}]}`), nil
 		}
-		return chatActions(`{"actions":[{"action":"sys.spawn","content":{"program":"program@1","message":"do subtask"},"hard":true}]}`), nil
+		return chatActions(`{"actions":[{"action":"sys.spawn","content":{"program":"program@1","input":"do subtask"},"hard":true}]}`), nil
 	default:
 		return sys.Fail("unsupported call: " + syscall.Name), nil
 	}

@@ -27,8 +27,8 @@ func (r *Runtime) sessionSummaryLocked(session *sessionState) SessionSummary {
 	}
 }
 
-func sessionTitle(message string) string {
-	fields := strings.Fields(message)
+func sessionTitle(input string) string {
+	fields := strings.Fields(input)
 	if len(fields) == 0 {
 		return "New session"
 	}
@@ -62,7 +62,7 @@ func (r *Runtime) processSnapshotLocked(proc *processState) ProcessSnapshot {
 	return ProcessSnapshot{
 		ID:              proc.id,
 		SessionID:       proc.sessionID,
-		Message:         proc.message,
+		Input:           proc.input,
 		Status:          proc.status,
 		Attempt:         proc.attempt,
 		Revision:        proc.revision,
@@ -147,7 +147,7 @@ func (r *Runtime) storedProcessLocked(proc *processState) StoredProcess {
 		ID:                proc.id,
 		SessionID:         proc.sessionID,
 		Revision:          proc.revision,
-		Message:           proc.message,
+		Input:             proc.input,
 		Status:            proc.status,
 		Attempt:           proc.attempt,
 		CreatedAt:         proc.createdAt,

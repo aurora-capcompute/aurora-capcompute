@@ -28,7 +28,7 @@ func TestRestoreQuarantinesStaleManifests(t *testing.T) {
 	store.seed(
 		StoredProcess{
 			TenantID: "local", ID: "run_old", SessionID: "ses_old", Revision: 1,
-			Message: "old work", Status: ProcessFailed,
+			Input: "old work", Status: ProcessFailed,
 			CreatedAt: now, UpdatedAt: now,
 			Manifest: Manifest{
 				Version:  ManifestVersion,

@@ -317,7 +317,7 @@ func (r *Runtime) finishLocked(proc *processState, status ProcessStatus, answer 
 		session.updatedAt = now
 		if status == ProcessCompleted && proc.parentProcessID == "" {
 			session.history = append(session.history,
-				HistoryMessage{Role: "user", Content: proc.message},
+				HistoryMessage{Role: "user", Content: proc.input},
 				HistoryMessage{Role: "assistant", Content: answer},
 			)
 		}

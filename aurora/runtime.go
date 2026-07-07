@@ -8,7 +8,7 @@ type Runtime interface {
 	Programs() []ProgramArtifact
 	SetPrograms(ctx context.Context, programs []ProgramSource) error
 	GetSession(sessionID string) (SessionSnapshot, error)
-	CreateProcess(sessionID string, message string, manifest Manifest) (ProcessSnapshot, error)
+	CreateProcess(sessionID string, input string, manifest Manifest) (ProcessSnapshot, error)
 	GetProcess(processID string) (ProcessSnapshot, error)
 	Journal(processID string) ([]JournalEntry, error)
 	JournalRevisions(processID string) (map[uint64][]JournalEntry, error)

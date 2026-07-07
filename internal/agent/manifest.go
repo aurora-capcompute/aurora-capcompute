@@ -28,28 +28,22 @@ type TimerSettings struct {
 	MaxDurationMS int64 `json:"max_duration_ms,omitempty"`
 }
 
-// Manifest is one process node: Program names it, Settings configures it, and
-// Syscalls is its grant set. A spawnable child inside a sys.spawn grant is
-// itself a Manifest — the recursion that makes the whole grant tree one
-// shape — carrying no Version of its own: the root's governs. A child's
-// failure is a recoverable observation to its parent's cognition; a program
-// that must abort on it makes the spawn a hard call.
+// Manifest is one process node: Program names it and Syscalls is its grant
+// set. A spawnable child inside a sys.spawn grant is itself a Manifest — the
+// recursion that makes the whole grant tree one shape — carrying no Version
+// of its own: the root's governs. A child's failure is a recoverable
+// observation to its parent's cognition; a program that must abort on it makes
+// the spawn a hard call. A program node carries no persona and no settings: a
+// process runs on exactly the input its interface declares, and the only
+// configuration lives on the syscall grants (dispatcher constructor settings).
 type Manifest struct {
 	Version int    `json:"version,omitempty"`
 	Program string `json:"program,omitempty"`
 	// BindingRef is an opaque application correlation reference (e.g. the
 	// name of the control-plane binding that produced this manifest). The
 	// runtime never interprets it.
-	BindingRef string          `json:"binding_ref,omitempty"`
-	Settings   ProgramSettings `json:"settings,omitzero"`
-	Syscalls   []Syscall       `json:"syscalls,omitempty"`
-}
-
-// ProgramSettings configures a program node, distinct from its grants: the base
-// system prompt the process runs under (a spawned child's default, which the
-// parent may override per spawn).
-type ProgramSettings struct {
-	SystemPrompt string `json:"system_prompt,omitempty"`
+	BindingRef string    `json:"binding_ref,omitempty"`
+	Syscalls   []Syscall `json:"syscalls,omitempty"`
 }
 
 // Syscall is one granted syscall. The manifest names nothing: a grant says
@@ -119,7 +113,6 @@ func ValidateManifest(manifest Manifest, provider DispatcherProvider) (Manifest,
 // program inside a sys.spawn grant — and recurses into its grant set.
 func validateNode(node *Manifest, provider DispatcherProvider) error {
 	node.Program = strings.TrimSpace(node.Program)
-	node.Settings.SystemPrompt = strings.TrimSpace(node.Settings.SystemPrompt)
 	node.BindingRef = strings.TrimSpace(node.BindingRef)
 	return validateSyscalls(node.Syscalls, provider)
 }

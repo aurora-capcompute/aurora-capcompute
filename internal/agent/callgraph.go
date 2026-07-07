@@ -14,7 +14,7 @@ import (
 // numbers.
 type SessionGraphProcess struct {
 	ProcessID       string         `json:"process_id"`
-	Message         string         `json:"message"`
+	Input           string         `json:"input"`
 	ParentProcessID string         `json:"parent_process_id,omitempty"`
 	Status          ProcessStatus  `json:"status"`
 	Answer          string         `json:"answer,omitempty"`
@@ -46,12 +46,12 @@ func (r *Runtime) SessionGraph(sessionID string) (SessionGraph, error) {
 	}
 	graph := SessionGraph{SessionID: session.id, Title: session.title}
 	type runMeta struct {
-		id, message, parentProcessID string
-		status                       ProcessStatus
-		answer, err                  string
-		attempt                      int
-		currentRevision              uint64
-		childProcessIDs              []string
+		id, input, parentProcessID string
+		status                     ProcessStatus
+		answer, err                string
+		attempt                    int
+		currentRevision            uint64
+		childProcessIDs            []string
 	}
 	metas := make([]runMeta, 0, len(session.processIDs))
 	for _, processID := range session.processIDs {
@@ -60,7 +60,7 @@ func (r *Runtime) SessionGraph(sessionID string) (SessionGraph, error) {
 			continue
 		}
 		metas = append(metas, runMeta{
-			id: proc.id, message: proc.message, parentProcessID: proc.parentProcessID,
+			id: proc.id, input: proc.input, parentProcessID: proc.parentProcessID,
 			status: proc.status, answer: proc.answer, err: proc.err,
 			attempt: proc.attempt, currentRevision: proc.revision,
 			childProcessIDs: append([]string(nil), proc.childProcessIDs...),
@@ -108,7 +108,7 @@ func (r *Runtime) SessionGraph(sessionID string) (SessionGraph, error) {
 		})
 		graph.Processes = append(graph.Processes, SessionGraphProcess{
 			ProcessID:       meta.id,
-			Message:         meta.message,
+			Input:           meta.input,
 			ParentProcessID: meta.parentProcessID,
 			Status:          meta.status,
 			Answer:          meta.answer,

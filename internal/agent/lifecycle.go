@@ -69,12 +69,11 @@ type compensateArgs struct {
 // grant set, so even the runtime's own protocol calls are granted explicitly
 // rather than smuggled past the reference monitor.
 type lifecycleDispatcher struct {
-	next         sys.Dispatcher[ProcessContext]
-	message      string
-	history      []HistoryMessage
-	systemPrompt string
-	manifest     Manifest
-	attempt      int
+	next     sys.Dispatcher[ProcessContext]
+	input    string
+	history  []HistoryMessage
+	manifest Manifest
+	attempt  int
 	// validateAnswer checks a finished answer against the program's declared
 	// output schema; a rejected answer comes back as a failed result the guest
 	// can react to.
@@ -83,7 +82,7 @@ type lifecycleDispatcher struct {
 
 func newLifecycleDispatcher(
 	next sys.Dispatcher[ProcessContext],
-	message string,
+	input string,
 	history []HistoryMessage,
 	manifest Manifest,
 	attempt int,
@@ -91,9 +90,8 @@ func newLifecycleDispatcher(
 ) *lifecycleDispatcher {
 	return &lifecycleDispatcher{
 		next:           next,
-		message:        message,
+		input:          input,
 		history:        history,
-		systemPrompt:   manifest.Settings.SystemPrompt,
 		manifest:       manifest,
 		attempt:        attempt,
 		validateAnswer: validateAnswer,
@@ -104,9 +102,8 @@ func (l *lifecycleDispatcher) Dispatch(ctx context.Context, cred ProcessContext,
 	switch syscall.Name {
 	case callSysInput:
 		payload, err := json.Marshal(agentInput{
-			Message:      l.message,
+			Input:        l.input,
 			History:      l.history,
-			SystemPrompt: l.systemPrompt,
 			Capabilities: visibleCapabilities(l.next.Capabilities()),
 			Attempt:      l.attempt,
 		})
@@ -168,7 +165,7 @@ func (l *lifecycleDispatcher) Capabilities() []sys.Capability {
 	return appendMissing(l.next.Capabilities(),
 		sys.Capability{
 			Name:        callSysInput,
-			Description: "fetch this process's input: message, history, system prompt, and the visible capability menu",
+			Description: "fetch this process's input, prior history, and the visible capability menu",
 			Hidden:      true,
 		},
 		sys.Capability{

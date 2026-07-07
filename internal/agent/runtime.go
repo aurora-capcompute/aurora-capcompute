@@ -204,12 +204,12 @@ func (r *Runtime) wrapProtocol(cred ProcessContext, next sys.Dispatcher[ProcessC
 	r.mu.Lock()
 	proc := r.processes[cred.ProcessID]
 	var manifest Manifest
-	var message string
+	var input string
 	var history []HistoryMessage
 	var attempt int
 	if proc != nil {
 		manifest = cloneManifest(proc.manifest)
-		message = proc.message
+		input = proc.input
 		history = append([]HistoryMessage(nil), proc.history...)
 		attempt = proc.attempt
 	}
@@ -220,7 +220,7 @@ func (r *Runtime) wrapProtocol(cred ProcessContext, next sys.Dispatcher[ProcessC
 	if grant, ok := manifest.grant(SpawnSyscall); ok {
 		next = newSpawnRouter(next, grant, r)
 	}
-	return newLifecycleDispatcher(next, message, history, manifest, attempt, r.programs.answerValidator(manifest.Program)), nil
+	return newLifecycleDispatcher(next, input, history, manifest, attempt, r.programs.answerValidator(manifest.Program)), nil
 }
 
 // programBinding checks that the process's program is loaded with the exact
@@ -426,9 +426,9 @@ func (r *Runtime) GetSession(sessionID string) (SessionSnapshot, error) {
 	return r.sessionSnapshotLocked(session), nil
 }
 
-func (r *Runtime) CreateProcess(sessionID string, message string, manifest Manifest) (ProcessSnapshot, error) {
-	if message == "" {
-		return ProcessSnapshot{}, fmt.Errorf("%w: message is required", ErrInvalid)
+func (r *Runtime) CreateProcess(sessionID string, input string, manifest Manifest) (ProcessSnapshot, error) {
+	if input == "" {
+		return ProcessSnapshot{}, fmt.Errorf("%w: input is required", ErrInvalid)
 	}
 	if strings.TrimSpace(manifest.Program) == "" {
 		manifest.Program = r.programs.DefaultID()
@@ -441,7 +441,7 @@ func (r *Runtime) CreateProcess(sessionID string, message string, manifest Manif
 	if err != nil {
 		return ProcessSnapshot{}, err
 	}
-	if err := r.programs.ValidateInput(manifest.Program, message); err != nil {
+	if err := r.programs.ValidateInput(manifest.Program, input); err != nil {
 		return ProcessSnapshot{}, err
 	}
 	processID, err := r.idSource("proc_")
@@ -467,7 +467,7 @@ func (r *Runtime) CreateProcess(sessionID string, message string, manifest Manif
 	proc := &processState{
 		id:            processID,
 		sessionID:     sessionID,
-		message:       message,
+		input:         input,
 		history:       append([]HistoryMessage(nil), session.history...),
 		status:        ProcessQueued,
 		attempt:       1,
@@ -481,7 +481,7 @@ func (r *Runtime) CreateProcess(sessionID string, message string, manifest Manif
 	r.processes[processID] = proc
 	session.processIDs = append(session.processIDs, processID)
 	if len(session.processIDs) == 1 {
-		session.title = sessionTitle(message)
+		session.title = sessionTitle(input)
 	}
 	session.activeProcessID = processID
 	session.updatedAt = now

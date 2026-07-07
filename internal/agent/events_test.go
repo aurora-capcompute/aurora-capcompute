@@ -25,13 +25,13 @@ func TestFoldReconstructsLatestRunAndSessionState(t *testing.T) {
 	// Run goes running → completed; session state is derived from runs.
 	r1, _ := processStateEvent(now, StoredProcess{
 		TenantID: "t", ID: "proc1", SessionID: "th1", Revision: 1,
-		Message: "hello", Status: ProcessRunning,
+		Input: "hello", Status: ProcessRunning,
 		CreatedAt: now, UpdatedAt: now,
 		Tags: map[string]string{"binding_ref": "ops"},
 	})
 	r2, _ := processStateEvent(now.Add(time.Second), StoredProcess{
 		TenantID: "t", ID: "proc1", SessionID: "th1", Revision: 1,
-		Message: "hello", Status: ProcessCompleted, Answer: "done",
+		Input: "hello", Status: ProcessCompleted, Answer: "done",
 		CreatedAt: now, UpdatedAt: now.Add(time.Second),
 		Tags: map[string]string{"binding_ref": "ops"},
 	})
