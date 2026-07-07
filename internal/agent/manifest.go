@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/aurora-capcompute/capcompute/sys"
@@ -74,11 +75,21 @@ type Manifest struct {
 // memory.get/put/list, openai.*) — the runtime-served sys.* grants are their
 // own names. A sys.spawn grant carries Programs (its spawnable children) and
 // may carry Settings (a SpawnSettings gating what those children inherit).
+//
+// Labels and Forbid declare this grant's data-flow policy (DIFC): Labels are
+// the source classes the grant's results carry ("untrusted_web", "secret") —
+// the flow monitor stamps them onto every result and accumulates them into the
+// run's taint; Forbid lists labels that may not flow into the grant's calls, so
+// a run that has observed a forbidden label is refused before the driver runs.
+// They are declarable only on leaf driver grants — the data I/O — not on the
+// runtime-served sys.* grants, which are control, not sources or sinks.
 type Syscall struct {
 	Syscall  string          `json:"syscall"`
 	Settings json.RawMessage `json:"settings,omitempty"`
 	Programs []Manifest      `json:"programs,omitempty"`
 	Hidden   bool            `json:"hidden,omitempty"`
+	Labels   []string        `json:"labels,omitempty"`
+	Forbid   []string        `json:"forbid,omitempty"`
 }
 
 // isSpawn reports whether a grant spawns child processes rather than naming
@@ -161,6 +172,11 @@ func validateSyscalls(syscalls []Syscall, provider DispatcherProvider) error {
 		if grant.Syscall == "" {
 			return fmt.Errorf("%w: grant %d: a syscall is required", ErrInvalid, i)
 		}
+		// Data-flow labels/forbid classify data I/O; they belong on leaf driver
+		// grants only, never on the runtime-served sys.* control syscalls.
+		if grant.runtimeServed() && (len(grant.Labels) > 0 || len(grant.Forbid) > 0) {
+			return fmt.Errorf("%w: %s: labels/forbid may only be declared on leaf driver grants", ErrInvalid, grant.Syscall)
+		}
 		if grant.isSpawn() {
 			if len(grant.Programs) == 0 {
 				return fmt.Errorf("%w: %s requires at least one program", ErrInvalid, SpawnSyscall)
@@ -208,6 +224,12 @@ func validateSyscalls(syscalls []Syscall, provider DispatcherProvider) error {
 				return fmt.Errorf("%w: syscall %q settings: %v", ErrInvalid, grant.Syscall, err)
 			}
 			grant.Settings = append(json.RawMessage(nil), normalized...)
+			if grant.Labels, err = normalizeLabels("labels", grant.Labels); err != nil {
+				return fmt.Errorf("%w: syscall %q: %v", ErrInvalid, grant.Syscall, err)
+			}
+			if grant.Forbid, err = normalizeLabels("forbid", grant.Forbid); err != nil {
+				return fmt.Errorf("%w: syscall %q: %v", ErrInvalid, grant.Syscall, err)
+			}
 		}
 		if _, exists := seen[grant.Syscall]; exists {
 			return fmt.Errorf("%w: duplicate syscall %q", ErrInvalid, grant.Syscall)
@@ -230,6 +252,34 @@ func normalizeSpawnSettings(raw json.RawMessage) (json.RawMessage, error) {
 	return json.Marshal(settings)
 }
 
+// normalizeLabels canonicalizes a grant's label or forbid set: trim, drop
+// empties, de-duplicate, and sort. The "syscall:<name>" namespace is reserved
+// for the automatic provenance the Labeler stamps, so a manifest may not
+// declare it. An empty set normalizes to nil (omitted on the wire).
+func normalizeLabels(what string, labels []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(labels))
+	out := make([]string, 0, len(labels))
+	for _, label := range labels {
+		label = strings.TrimSpace(label)
+		if label == "" {
+			continue
+		}
+		if strings.HasPrefix(label, "syscall:") {
+			return nil, fmt.Errorf("%s label %q uses the reserved \"syscall:\" prefix", what, label)
+		}
+		if _, dup := seen[label]; dup {
+			continue
+		}
+		seen[label] = struct{}{}
+		out = append(out, label)
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
 func cloneManifest(manifest Manifest) Manifest {
 	out := manifest
 	out.Syscalls = cloneSyscalls(manifest.Syscalls)
@@ -244,6 +294,8 @@ func cloneSyscalls(syscalls []Syscall) []Syscall {
 	for i, grant := range syscalls {
 		out[i] = grant
 		out[i].Settings = append(json.RawMessage(nil), grant.Settings...)
+		out[i].Labels = append([]string(nil), grant.Labels...)
+		out[i].Forbid = append([]string(nil), grant.Forbid...)
 		if len(grant.Programs) > 0 {
 			out[i].Programs = make([]Manifest, len(grant.Programs))
 			for j, child := range grant.Programs {

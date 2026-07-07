@@ -131,3 +131,44 @@ func TestValidateManifestValidatesSpawnPrograms(t *testing.T) {
 		}
 	}
 }
+
+// Data-flow labels/forbid are declarable on leaf driver grants (normalized —
+// trimmed, de-duplicated, sorted) and rejected on the runtime-served sys.*
+// control grants and for the reserved "syscall:" namespace.
+func TestValidateManifestLabelsForbid(t *testing.T) {
+	m, err := ValidateManifest(Manifest{
+		Version: ManifestVersion,
+		Syscalls: []Syscall{{
+			Syscall: "core.custom",
+			Labels:  []string{" untrusted_web ", "untrusted_web", ""},
+			Forbid:  []string{"secret", "pii"},
+		}},
+	}, &testDispatchers{})
+	if err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	grant := m.Syscalls[0]
+	if len(grant.Labels) != 1 || grant.Labels[0] != "untrusted_web" {
+		t.Fatalf("labels = %v, want [untrusted_web] (trimmed + deduped)", grant.Labels)
+	}
+	if len(grant.Forbid) != 2 || grant.Forbid[0] != "pii" || grant.Forbid[1] != "secret" {
+		t.Fatalf("forbid = %v, want sorted [pii secret]", grant.Forbid)
+	}
+
+	cases := []struct {
+		name  string
+		grant Syscall
+	}{
+		{"reserved label prefix", Syscall{Syscall: "core.custom", Labels: []string{"syscall:core.custom"}}},
+		{"labels on spawn", Syscall{Syscall: SpawnSyscall, Labels: []string{"x"}, Programs: []Manifest{{Program: "p"}}}},
+		{"forbid on timer", Syscall{Syscall: TimerSyscall, Forbid: []string{"x"}}},
+	}
+	for _, tc := range cases {
+		if _, err := ValidateManifest(Manifest{
+			Version:  ManifestVersion,
+			Syscalls: []Syscall{tc.grant},
+		}, &testDispatchers{}); err == nil {
+			t.Fatalf("%s: expected validation error", tc.name)
+		}
+	}
+}
