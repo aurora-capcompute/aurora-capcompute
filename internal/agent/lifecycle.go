@@ -93,7 +93,7 @@ func newLifecycleDispatcher(
 		next:           next,
 		message:        message,
 		history:        history,
-		systemPrompt:   manifest.SystemPrompt,
+		systemPrompt:   manifest.Settings.SystemPrompt,
 		manifest:       manifest,
 		attempt:        attempt,
 		validateAnswer: validateAnswer,

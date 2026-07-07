@@ -221,7 +221,7 @@ func buildChildManifest(spec Manifest, systemPromptOverride string) Manifest {
 	child := cloneManifest(spec)
 	child.Version = ManifestVersion
 	if systemPromptOverride != "" {
-		child.SystemPrompt = systemPromptOverride
+		child.Settings.SystemPrompt = systemPromptOverride
 	}
 	return child
 }
