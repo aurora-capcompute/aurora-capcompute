@@ -75,6 +75,10 @@ type lifecycleDispatcher struct {
 	systemPrompt string
 	manifest     Manifest
 	attempt      int
+	// validateAnswer checks a finished answer against the program's declared
+	// output schema; a rejected answer comes back as a failed result the guest
+	// can react to.
+	validateAnswer func(string) error
 }
 
 func newLifecycleDispatcher(
@@ -83,14 +87,16 @@ func newLifecycleDispatcher(
 	history []HistoryMessage,
 	manifest Manifest,
 	attempt int,
+	validateAnswer func(string) error,
 ) *lifecycleDispatcher {
 	return &lifecycleDispatcher{
-		next:         next,
-		message:      message,
-		history:      history,
-		systemPrompt: manifest.SystemPrompt,
-		manifest:     manifest,
-		attempt:      attempt,
+		next:           next,
+		message:        message,
+		history:        history,
+		systemPrompt:   manifest.SystemPrompt,
+		manifest:       manifest,
+		attempt:        attempt,
+		validateAnswer: validateAnswer,
 	}
 }
 
@@ -110,7 +116,20 @@ func (l *lifecycleDispatcher) Dispatch(ctx context.Context, cred ProcessContext,
 		return sys.Result(payload), nil
 	case callSysOutput:
 		// The answer travels in syscall.Args and is recorded on the journal; the
-		// host reads it back from there. Acknowledge so the guest can return.
+		// host reads it back from there. Validate it against the program's
+		// declared output schema before acknowledging: a rejected answer is a
+		// failed result the guest can react to (correct the answer, publish
+		// again), journaled like any other failed observation — nothing is
+		// recorded as the terminal answer until it satisfies the interface.
+		if l.validateAnswer != nil {
+			var args finishArgs
+			if err := json.Unmarshal(syscall.Args, &args); err != nil {
+				return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode sys.output: %v", err)), nil
+			}
+			if err := l.validateAnswer(args.Answer); err != nil {
+				return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
+			}
+		}
 		return sys.Result(json.RawMessage(`{"ok":true}`)), nil
 	case callSysCompensate:
 		// Deferred: journal the registration, never execute it. The undo is a

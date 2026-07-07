@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -322,7 +323,7 @@ func TestRollbackViewSemantics(t *testing.T) {
 // policy; malformed args are rejected at dispatch and empty args are a bare
 // "roll back now, no retry".
 func TestLifecycleAbortArgs(t *testing.T) {
-	l := newLifecycleDispatcher(stubNext{}, "msg", nil, Manifest{}, 1)
+	l := newLifecycleDispatcher(stubNext{}, "msg", nil, Manifest{}, 1, nil)
 	dispatch := func(args string) sys.SyscallResult {
 		t.Helper()
 		result, err := l.Dispatch(context.Background(), ProcessContext{},
@@ -341,6 +342,36 @@ func TestLifecycleAbortArgs(t *testing.T) {
 	}
 	if r := dispatch(`{"reason":`); r.Status() != sys.StatusFailed || r.Errno() != sys.ErrnoInvalidArgs {
 		t.Fatalf("malformed abort = %v/%v, want failed/invalid_args", r.Status(), r.Errno())
+	}
+}
+
+// TestLifecycleValidatesAnswer: sys.output runs the program's output-schema
+// hook, so an answer that violates the interface comes back as a failed
+// result the guest can react to — nothing is recorded as terminal until the
+// answer satisfies the schema. A nil hook (unbound program) acknowledges.
+func TestLifecycleValidatesAnswer(t *testing.T) {
+	reject := func(answer string) error {
+		if answer == "bad" {
+			return fmt.Errorf("answer rejected by output schema")
+		}
+		return nil
+	}
+	l := newLifecycleDispatcher(stubNext{}, "msg", nil, Manifest{}, 1, reject)
+	output := func(args string) sys.SyscallResult {
+		t.Helper()
+		result, err := l.Dispatch(context.Background(), ProcessContext{},
+			sys.Syscall{Abi: sys.ABIVersion, Name: callSysOutput, Args: json.RawMessage(args)},
+			sys.Authorization{})
+		if err != nil {
+			t.Fatalf("dispatch: %v", err)
+		}
+		return result
+	}
+	if r := output(`{"answer":"good"}`); r.Status() != sys.StatusResult {
+		t.Fatalf("valid answer = %v, want acknowledged", r.Status())
+	}
+	if r := output(`{"answer":"bad"}`); r.Status() != sys.StatusFailed || r.Errno() != sys.ErrnoInvalidArgs {
+		t.Fatalf("invalid answer = %v/%v, want failed/invalid_args", r.Status(), r.Errno())
 	}
 }
 

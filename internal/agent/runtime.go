@@ -220,7 +220,7 @@ func (r *Runtime) wrapProtocol(cred ProcessContext, next sys.Dispatcher[ProcessC
 	if grant, ok := manifest.grant(SpawnSyscall); ok {
 		next = newSpawnRouter(next, grant, r)
 	}
-	return newLifecycleDispatcher(next, message, history, manifest, attempt), nil
+	return newLifecycleDispatcher(next, message, history, manifest, attempt, r.programs.answerValidator(manifest.Program)), nil
 }
 
 // programBinding checks that the process's program is loaded with the exact
@@ -308,14 +308,18 @@ func (r *Runtime) SetPrograms(ctx context.Context, sources []ProgramSource) erro
 	current := r.programs.digests()
 	desired := make(map[string]struct{}, len(sources))
 
-	// Compile additions/replacements outside the lock; fail atomically.
+	// Load (describe + schema compile) and compile additions/replacements
+	// outside the lock; fail atomically.
 	type compiled struct {
-		id     string
-		wasm   []byte
-		digest string
+		record programRecord
 		kernel *capcompute.Kernel[string, ProcessContext]
 	}
 	var fresh []compiled
+	shutdownFresh := func() {
+		for _, c := range fresh {
+			_ = c.kernel.Shutdown(context.Background())
+		}
+	}
 	for _, src := range sources {
 		id := strings.TrimSpace(src.ID)
 		if id == "" || len(src.Wasm) == 0 {
@@ -325,19 +329,20 @@ func (r *Runtime) SetPrograms(ctx context.Context, sources []ProgramSource) erro
 			return fmt.Errorf("%w: duplicate program %q", ErrInvalid, id)
 		}
 		desired[id] = struct{}{}
-		wasm := append([]byte(nil), src.Wasm...)
-		digest := digestOf(wasm)
-		if cur, ok := current[id]; ok && cur == digest {
+		if cur, ok := current[id]; ok && cur == digestOf(src.Wasm) {
 			continue // unchanged
 		}
-		kernel, err := r.compileProgram(ctx, id, wasm, digest)
+		record, err := loadProgram(ctx, id, src.Wasm)
 		if err != nil {
-			for _, c := range fresh {
-				_ = c.kernel.Shutdown(context.Background())
-			}
+			shutdownFresh()
 			return err
 		}
-		fresh = append(fresh, compiled{id: id, wasm: wasm, digest: digest, kernel: kernel})
+		kernel, err := r.compileProgram(ctx, id, record.source.Wasm, record.artifact.Digest)
+		if err != nil {
+			shutdownFresh()
+			return err
+		}
+		fresh = append(fresh, compiled{record: record, kernel: kernel})
 	}
 
 	// Swap under the runtime mutex (which guards r.kernels), collecting the
@@ -346,18 +351,17 @@ func (r *Runtime) SetPrograms(ctx context.Context, sources []ProgramSource) erro
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
-		for _, c := range fresh {
-			_ = c.kernel.Shutdown(context.Background())
-		}
+		shutdownFresh()
 		return fmt.Errorf("%w: runtime is closed", ErrConflict)
 	}
 	var retired []*capcompute.Kernel[string, ProcessContext]
 	for _, c := range fresh {
-		if old := r.kernels[c.id]; old != nil {
+		id := c.record.artifact.ID
+		if old := r.kernels[id]; old != nil {
 			retired = append(retired, old)
 		}
-		r.kernels[c.id] = c.kernel
-		r.programs.put(c.id, c.wasm, c.digest)
+		r.kernels[id] = c.kernel
+		r.programs.put(c.record)
 	}
 	for id := range current {
 		if _, keep := desired[id]; keep {
@@ -431,6 +435,9 @@ func (r *Runtime) CreateProcess(sessionID string, message string, manifest Manif
 	}
 	program, err := r.programs.Resolve(manifest.Program)
 	if err != nil {
+		return ProcessSnapshot{}, err
+	}
+	if err := r.programs.ValidateInput(manifest.Program, message); err != nil {
 		return ProcessSnapshot{}, err
 	}
 	processID, err := r.idSource("proc_")

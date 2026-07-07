@@ -28,6 +28,7 @@ type Event = agent.Event
 type JournalEvent = agent.JournalEvent
 type ProgressEvent = agent.ProgressEvent
 type ProgramArtifact = agent.ProgramArtifact
+type ProgramInterface = agent.ProgramInterface
 
 // Status types
 

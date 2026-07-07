@@ -107,6 +107,19 @@ modules. Programs can be hot-swapped at runtime with `Runtime.SetPrograms`;
 swapped bytes serve new processes, while in-flight processes of the old digest
 are stranded (killable, auditable — never silently migrated).
 
+**Programs describe themselves.** At registration the runtime extracts each
+program's bundled interface — a description plus JSON Schemas for its input
+message and its answer — by calling the wasm's pure `describe` export with
+syscalls stubbed out (a program that cannot describe itself is refused). The
+interface rides on `ProgramArtifact` (surfaced through `Programs()`), enriches
+the `sys.spawn` menu so a delegating agent knows what to pass each granted
+program, and validates every input message (at `CreateProcess` and `sys.spawn`)
+and answer (at `sys.output`) against the schemas. Validation is string-first: a
+payload that satisfies the schema as a plain string is accepted as-is (the
+conversational case), otherwise it must parse as JSON and satisfy the schema
+(the structured case) — so a natural-language program declares
+`{"type":"string"}` and a structured one declares an object schema.
+
 ## Dispatcher provider
 
 A dispatcher provider owns capability-specific settings and implementation:

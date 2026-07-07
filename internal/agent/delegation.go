@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -55,6 +56,12 @@ func (r *spawnRouter) Dispatch(ctx context.Context, cred ProcessContext, syscall
 	if strings.TrimSpace(args.Message) == "" {
 		return sys.FailCode(sys.ErrnoInvalidArgs, "spawn: a message is required"), nil
 	}
+	// Validate the message against the child program's declared input schema
+	// before spawning — a mismatch is a recoverable observation the parent can
+	// correct, not a born-invalid child.
+	if err := r.runtime.programs.ValidateInput(args.Program, args.Message); err != nil {
+		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("spawn: %v", err)), nil
+	}
 	return r.spawn(ctx, cred, spec, args)
 }
 
@@ -79,9 +86,12 @@ func (r *spawnRouter) Capabilities() []sys.Capability {
 	return append(r.next.Capabilities(), r.capability())
 }
 
-// capability publishes the spawn menu: the granted programs and what each
-// can do, with the program enum in the schema so a well-formed call can only
-// name a granted one.
+// capability publishes the spawn menu: for each granted program, what it does
+// (its bundled description), what it can use (its visible grants), and the
+// shape of the message it expects and the answer it returns (its interface
+// schemas). The program enum in the arg schema keeps a well-formed call
+// naming a granted program; the per-program interface tells the caller what
+// to put in `message`.
 func (r *spawnRouter) capability() sys.Capability {
 	var desc strings.Builder
 	desc.WriteString("Spawn a child process running one of the granted programs and wait for its answer. Programs:")
@@ -89,18 +99,24 @@ func (r *spawnRouter) capability() sys.Capability {
 		if i > 0 {
 			desc.WriteString(";")
 		}
-		desc.WriteString(" " + spec.Program + " (")
-		if grants := visibleGrantNames(spec); len(grants) > 0 {
-			desc.WriteString("can use: " + strings.Join(grants, ", "))
-		} else {
-			desc.WriteString("pure computation")
+		desc.WriteString("\n- " + spec.Program)
+		iface, known := r.runtime.programs.Interface(spec.Program)
+		if known && iface.Description != "" {
+			desc.WriteString(": " + iface.Description)
 		}
-		desc.WriteString(")")
+		if grants := visibleGrantNames(spec); len(grants) > 0 {
+			desc.WriteString(" [can use: " + strings.Join(grants, ", ") + "]")
+		} else {
+			desc.WriteString(" [pure computation]")
+		}
+		if known {
+			desc.WriteString(" input=" + compactSchema(iface.Input) + " output=" + compactSchema(iface.Output))
+		}
 	}
-	desc.WriteString(".")
+	desc.WriteString("\nPass `message` in the form the chosen program's input schema declares: plain text for a string schema, or a JSON document for a structured one.")
 	enum, _ := json.Marshal(r.programNames())
 	schema := fmt.Sprintf(
-		`{"type":"object","properties":{"program":{"type":"string","enum":%s},"message":{"type":"string","description":"Task description for the child process"},"system_prompt":{"type":"string","description":"Optional system prompt override"}},"required":["program","message"],"additionalProperties":false}`,
+		`{"type":"object","properties":{"program":{"type":"string","enum":%s},"message":{"type":"string","description":"Input for the child process, matching its declared input schema (see the menu)"},"system_prompt":{"type":"string","description":"Optional system prompt override"}},"required":["program","message"],"additionalProperties":false}`,
 		enum)
 	return sys.Capability{
 		Name:        SpawnSyscall,
@@ -108,6 +124,19 @@ func (r *spawnRouter) capability() sys.Capability {
 		InputSchema: json.RawMessage(schema),
 		Hidden:      r.hidden,
 	}
+}
+
+// compactSchema renders an interface schema for the spawn menu, collapsing
+// insignificant whitespace. An unknown or empty schema renders as "any".
+func compactSchema(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return "any"
+	}
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, raw); err != nil {
+		return string(raw)
+	}
+	return buf.String()
 }
 
 // visibleGrantNames summarizes a spawnable program's non-hidden grants for
