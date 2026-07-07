@@ -38,7 +38,10 @@ type ProgramInterface struct {
 }
 
 type ProgramArtifact struct {
-	ID     string `json:"id"`
+	ID string `json:"id"`
+	// Digest is the program's content identity: sha256 over the wasm bytes and
+	// the interface manifest together. A process binds to it, so changing either
+	// the code or the declared contract is a new program.
 	Digest string `json:"digest"`
 	ProgramInterface
 }
@@ -67,10 +70,26 @@ type loadedPrograms struct {
 	programs  map[string]programRecord
 }
 
-// digestOf returns the canonical content digest recorded for a program's wasm.
+// digestOf returns the sha256 of a program's wasm bytes — the integrity hash
+// the runtime hands the wasm engine.
 func digestOf(wasm []byte) string {
 	sum := sha256.Sum256(wasm)
 	return hex.EncodeToString(sum[:])
+}
+
+// programIdentity is a program's content identity: the digest a process is
+// bound to. It covers both the wasm bytes and the interface manifest, because
+// the interface is part of the program's contract — changing either the code or
+// the declared schema is a new program, and a process created under the old
+// identity is stranded (a legitimate audit target never runs under a changed
+// contract). The wasm's own digest (digestOf) stays the bytes' integrity hash.
+func programIdentity(wasm []byte, ifaceRaw json.RawMessage) string {
+	wasmSum := sha256.Sum256(wasm)
+	ifaceSum := sha256.Sum256(ifaceRaw)
+	both := sha256.New()
+	both.Write(wasmSum[:])
+	both.Write(ifaceSum[:])
+	return hex.EncodeToString(both.Sum(nil))
 }
 
 // loadProgram builds one registry record from a program's bytes and its
@@ -93,7 +112,7 @@ func loadProgram(id string, wasm []byte, ifaceRaw json.RawMessage) (programRecor
 	}
 	return programRecord{
 		source:   ProgramSource{ID: id, Wasm: wasm, Interface: append(json.RawMessage(nil), ifaceRaw...)},
-		artifact: ProgramArtifact{ID: id, Digest: digestOf(wasm), ProgramInterface: iface},
+		artifact: ProgramArtifact{ID: id, Digest: programIdentity(wasm, ifaceRaw), ProgramInterface: iface},
 		input:    input,
 		output:   output,
 	}, nil

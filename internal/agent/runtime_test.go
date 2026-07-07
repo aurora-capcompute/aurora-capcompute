@@ -346,6 +346,40 @@ func TestProcessImmutablyBoundToProgramBytes(t *testing.T) {
 	}
 }
 
+// TestProcessStrandedByInterfaceChange: the interface is part of a program's
+// contract, so editing it — even with the wasm byte-for-byte unchanged — is a
+// program change. A process created under the old interface is stranded: it can
+// neither resume nor restart, exactly as it would be under a bytes change.
+func TestProcessStrandedByInterfaceChange(t *testing.T) {
+	disp := &compensationDispatcher{failMidTurn: true}
+	runtime := newCompensationRuntime(t, disp)
+	proc := startCompensationProcess(t, runtime)
+	waitForStatus(t, runtime, proc.ID, ProcessFailed)
+
+	// Re-register program@1 with the SAME wasm but a different interface
+	// manifest (a reworded description is enough to change the identity).
+	same, err := runtime.programs.Source("program@1")
+	if err != nil {
+		t.Fatalf("source: %v", err)
+	}
+	edited := json.RawMessage(`{"description":"program@1, revised contract","input":{"type":"string"},"output":{"type":"string"}}`)
+	if err := runtime.SetPrograms(context.Background(), []ProgramSource{
+		{ID: "program@1", Wasm: same.Wasm, Interface: edited},
+	}); err != nil {
+		t.Fatalf("set programs: %v", err)
+	}
+
+	for _, mode := range []RetryMode{RetryResume, RetryRestart} {
+		_, err := runtime.Retry(proc.ID, mode)
+		if err == nil || !errors.Is(err, ErrConflict) {
+			t.Fatalf("retry %q under changed interface = %v, want ErrConflict", mode, err)
+		}
+		if !strings.Contains(err.Error(), "immutable") {
+			t.Fatalf("retry %q error = %q, want the immutability law named", mode, err)
+		}
+	}
+}
+
 func TestNewRuntimeRejectsInvalidProgramWasm(t *testing.T) {
 	store := newRuntimeStore()
 	_, err := NewRuntime(context.Background(), Config{

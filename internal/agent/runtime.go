@@ -158,7 +158,7 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		if err != nil {
 			return nil, err
 		}
-		kernel, err := runtime.compileProgram(ctx, artifact.ID, source.Wasm, artifact.Digest)
+		kernel, err := runtime.compileProgram(ctx, artifact.ID, source.Wasm)
 		if err != nil {
 			for _, opened := range runtime.kernels {
 				_ = opened.Shutdown(context.Background())
@@ -224,10 +224,11 @@ func (r *Runtime) wrapProtocol(cred ProcessContext, next sys.Dispatcher[ProcessC
 }
 
 // programBinding checks that the process's program is loaded with the exact
-// bytes the process was created from. A process is an audit target: its
-// journal, effects, and conclusions attest to one program, so it never
-// resumes or restarts under different bytes. New bytes run in new processes,
-// bound by their own manifest.
+// identity the process was created from — the same wasm bytes and the same
+// interface manifest. A process is an audit target: its journal, effects, and
+// conclusions attest to one program under one contract, so it never resumes or
+// restarts under changed code or a changed interface. The new program runs in
+// new processes, bound by their own manifest.
 func (r *Runtime) programBinding(proc *processState) error {
 	artifact, err := r.programs.Resolve(proc.manifest.Program)
 	if err != nil {
@@ -235,7 +236,7 @@ func (r *Runtime) programBinding(proc *processState) error {
 	}
 	if artifact.Digest != proc.programDigest {
 		return fmt.Errorf(
-			"program %q content changed (loaded %s, process bound to %s): a process is immutable — spawn a new process from the new program, or kill this one to settle its effects",
+			"program %q changed (loaded %s, process bound to %s): a process is immutable — its code and interface are fixed; spawn a new process from the new program, or kill this one to settle its effects",
 			proc.manifest.Program, shortDigest(artifact.Digest), shortDigest(proc.programDigest))
 	}
 	return nil
@@ -279,11 +280,12 @@ func (r *Runtime) headerFor(cred ProcessContext) journaled.Header {
 
 // compileProgram compiles a program's wasm into a kernel. It is pure with respect
 // to runtime state, so it can be called outside the runtime mutex while
-// preparing a SetPrograms swap.
-func (r *Runtime) compileProgram(ctx context.Context, id string, wasm []byte, digest string) (*capcompute.Kernel[string, ProcessContext], error) {
+// preparing a SetPrograms swap. The wasm engine gets the bytes' own sha256 for
+// integrity (not the program identity, which also covers the interface).
+func (r *Runtime) compileProgram(ctx context.Context, id string, wasm []byte) (*capcompute.Kernel[string, ProcessContext], error) {
 	kernel, err := capcompute.NewKernel(ctx, capcompute.Config[string, ProcessContext]{
 		Image: extism.Manifest{
-			Wasm: []extism.Wasm{extism.WasmData{Data: wasm, Hash: digest, Name: id}},
+			Wasm: []extism.Wasm{extism.WasmData{Data: wasm, Hash: digestOf(wasm), Name: id}},
 		},
 		PluginConfig: extism.PluginConfig{EnableWasi: true},
 		ProcessTable: r.processTable,
@@ -295,14 +297,16 @@ func (r *Runtime) compileProgram(ctx context.Context, id string, wasm []byte, di
 }
 
 // SetPrograms declaratively reconciles the registered programs to the given set:
-// programs absent from the set are removed, new or content-changed programs are
-// (re)compiled, and unchanged programs are left running. It is safe to call at any
-// time; the control plane uses it to hot-load programs from Program CRDs without a
-// restart. Compilation happens outside the runtime mutex so dispatch is only
-// briefly paused for the swap. If any program fails to compile, no change is
-// applied. Processes are immutably bound to the (name, digest) they were created
-// from: replacing or removing an artifact strands its processes — retries are
-// refused and any execution attempt fails — while they remain auditable and can
+// programs absent from the set are removed, new or changed programs are
+// (re)compiled, and unchanged programs are left running. A program counts as
+// changed when either its wasm bytes or its interface manifest differ (identity
+// covers both). It is safe to call at any time; the control plane uses it to
+// hot-load programs from Program CRDs without a restart. Compilation happens
+// outside the runtime mutex so dispatch is only briefly paused for the swap. If
+// any program fails to compile, no change is applied. Processes are immutably
+// bound to the (name, identity) they were created from: replacing or removing an
+// artifact — or editing its interface — strands its processes: retries are
+// refused and any execution attempt fails, while they remain auditable and can
 // be killed to settle their effects. The new artifact runs in new processes.
 func (r *Runtime) SetPrograms(ctx context.Context, sources []ProgramSource) error {
 	current := r.programs.digests()
@@ -329,15 +333,15 @@ func (r *Runtime) SetPrograms(ctx context.Context, sources []ProgramSource) erro
 			return fmt.Errorf("%w: duplicate program %q", ErrInvalid, id)
 		}
 		desired[id] = struct{}{}
-		if cur, ok := current[id]; ok && cur == digestOf(src.Wasm) {
-			continue // unchanged
+		if cur, ok := current[id]; ok && cur == programIdentity(src.Wasm, src.Interface) {
+			continue // unchanged: same bytes and same interface
 		}
 		record, err := loadProgram(id, src.Wasm, src.Interface)
 		if err != nil {
 			shutdownFresh()
 			return err
 		}
-		kernel, err := r.compileProgram(ctx, id, record.source.Wasm, record.artifact.Digest)
+		kernel, err := r.compileProgram(ctx, id, record.source.Wasm)
 		if err != nil {
 			shutdownFresh()
 			return err

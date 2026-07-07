@@ -106,13 +106,15 @@ type ProgramProvider interface {
 }
 ```
 
-The runtime copies the bytes, computes SHA-256 digests, and immutably binds
-each process to the (name, digest) it was created from — a process is an audit
-target, so it never resumes or restarts under different bytes. Filesystem,
-object-store, embedded, and remote loaders belong in application or adapter
-modules. Programs can be hot-swapped at runtime with `Runtime.SetPrograms`;
-swapped bytes serve new processes, while in-flight processes of the old digest
-are stranded (killable, auditable — never silently migrated).
+The runtime copies the bytes, computes each program's content identity — a
+SHA-256 over the wasm **and** its interface manifest together — and immutably
+binds each process to the (name, identity) it was created from. A process is an
+audit target, so it never resumes or restarts under changed code *or* a changed
+contract. Filesystem, object-store, embedded, and remote loaders belong in
+application or adapter modules. Programs can be hot-swapped at runtime with
+`Runtime.SetPrograms`; the new artifact serves new processes, while in-flight
+processes of the old identity are stranded (killable, auditable — never
+silently migrated).
 
 **A program declares its interface.** Each program ships a manifest beside its
 bytes — a description plus JSON Schemas for its input message and its answer

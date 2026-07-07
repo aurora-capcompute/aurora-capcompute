@@ -3,8 +3,6 @@ package agent
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"testing"
 )
@@ -67,16 +65,31 @@ func TestLoadProgramsCopiesBytesAndPinsDigestAndInterface(t *testing.T) {
 	if !bytes.Equal(source.Wasm, []byte("wasm-bytes")) {
 		t.Fatal("source bytes changed under the registry")
 	}
-	sum := sha256.Sum256([]byte("wasm-bytes"))
 	artifact, err := programs.Resolve("program@1")
 	if err != nil {
 		t.Fatalf("resolve artifact: %v", err)
 	}
-	if artifact.Digest != hex.EncodeToString(sum[:]) {
-		t.Fatalf("digest = %q", artifact.Digest)
+	// The identity covers both the bytes and the interface manifest.
+	if artifact.Digest != programIdentity([]byte("wasm-bytes"), iface) {
+		t.Fatalf("digest = %q, want the (wasm, interface) identity", artifact.Digest)
 	}
 	if artifact.Description != "echoes" || len(artifact.Input) == 0 || len(artifact.Output) == 0 {
 		t.Fatalf("interface not parsed: %+v", artifact.ProgramInterface)
+	}
+}
+
+// TestProgramIdentityCoversInterface: two programs with the same wasm but
+// different interface manifests have different identities, so editing an
+// interface is a program change — the seam the immutability law binds to.
+func TestProgramIdentityCoversInterface(t *testing.T) {
+	wasm := []byte("same-bytes")
+	a := json.RawMessage(`{"description":"v1","input":{"type":"string"},"output":{"type":"string"}}`)
+	b := json.RawMessage(`{"description":"v2","input":{"type":"string"},"output":{"type":"string"}}`)
+	if programIdentity(wasm, a) == programIdentity(wasm, b) {
+		t.Fatal("same wasm, different interface must yield different identities")
+	}
+	if programIdentity(wasm, a) != programIdentity(wasm, a) {
+		t.Fatal("identity must be stable for the same bytes and interface")
 	}
 }
 
