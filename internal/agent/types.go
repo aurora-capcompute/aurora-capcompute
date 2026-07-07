@@ -151,6 +151,12 @@ type processState struct {
 	manifest      Manifest
 	revision      uint64
 	programDigest string
+	// hideHistory suppresses the session history in this process's sys.input —
+	// set when it was spawned under a sys.spawn grant with history:false, so an
+	// isolated child sees only its input. Persisted, so a restart re-serves the
+	// same isolated input. (A hidden capability menu needs no field: the child's
+	// grants are simply marked hidden in its stored manifest.)
+	hideHistory bool
 	// parentProcessID and childProcessIDs make delegated processes addressable: a child knows
 	// the process that spawned it, and a parent records its children in spawn order.
 	parentProcessID string

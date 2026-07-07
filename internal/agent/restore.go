@@ -102,6 +102,7 @@ func (r *Runtime) restoreSession(proj Projection, journals map[string]map[uint64
 			err:               sr.Error,
 			manifest:          cloneManifest(em),
 			programDigest:     sr.ProgramDigest,
+			hideHistory:       sr.HideHistory,
 			parentProcessID:   sr.ParentProcessID,
 			childProcessIDs:   append([]string(nil), sr.ChildProcessIDs...),
 			childSpawnOffsets: append([]int(nil), sr.ChildSpawnOffsets...),

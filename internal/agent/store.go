@@ -41,6 +41,10 @@ type StoredProcess struct {
 	Error         string
 	Manifest      Manifest
 	ProgramDigest string
+	// HideHistory records that this process was spawned under a sys.spawn grant
+	// with history:false — its sys.input omits the session history. Persisted so
+	// a restart re-serves the same isolated input.
+	HideHistory bool `json:",omitempty"`
 	// Tags carries the owning session's tags so session metadata survives
 	// without a separate session.state event.
 	Tags map[string]string

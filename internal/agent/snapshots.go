@@ -158,6 +158,7 @@ func (r *Runtime) storedProcessLocked(proc *processState) StoredProcess {
 		Error:             proc.err,
 		Manifest:          cloneManifest(proc.manifest),
 		ProgramDigest:     proc.programDigest,
+		HideHistory:       proc.hideHistory,
 		Tags:              tags,
 		ParentProcessID:   proc.parentProcessID,
 		ChildProcessIDs:   append([]string(nil), proc.childProcessIDs...),

@@ -86,13 +86,15 @@ func TestValidateManifestValidatesTimerGrant(t *testing.T) {
 }
 
 // A sys.spawn grant carries programs — each a manifest of its own, program
-// required, no version, recursively validated — and no settings.
+// required, no version, recursively validated — plus optional context-sharing
+// settings (history/capabilities), with unknown fields rejected.
 func TestValidateManifestValidatesSpawnPrograms(t *testing.T) {
 	valid := Manifest{
 		Version: ManifestVersion,
 		Program: "root",
 		Syscalls: []Syscall{{
-			Syscall: SpawnSyscall,
+			Syscall:  SpawnSyscall,
+			Settings: json.RawMessage(`{"history":false,"capabilities":false}`),
 			Programs: []Manifest{{
 				Program:  "scout",
 				Syscalls: []Syscall{{Syscall: "core.custom"}},
@@ -108,7 +110,7 @@ func TestValidateManifestValidatesSpawnPrograms(t *testing.T) {
 		grant Syscall
 	}{
 		{"no programs", Syscall{Syscall: SpawnSyscall}},
-		{"settings on spawn", Syscall{Syscall: SpawnSyscall, Settings: json.RawMessage(`{}`),
+		{"unknown spawn setting", Syscall{Syscall: SpawnSyscall, Settings: json.RawMessage(`{"nope":true}`),
 			Programs: []Manifest{{Program: "scout"}}}},
 		{"program required", Syscall{Syscall: SpawnSyscall, Programs: []Manifest{{}}}},
 		{"nested version", Syscall{Syscall: SpawnSyscall,

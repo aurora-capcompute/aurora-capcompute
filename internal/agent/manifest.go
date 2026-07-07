@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -28,6 +29,27 @@ type TimerSettings struct {
 	MaxDurationMS int64 `json:"max_duration_ms,omitempty"`
 }
 
+// SpawnSettings is the Settings shape of a sys.spawn grant: it gates what a
+// spawned child inherits in its sys.input. History controls whether the child
+// sees the session history; Capabilities controls whether the child's own
+// capability menu is advertised to it. Both default to true (shared, the
+// runtime's standing behavior) when omitted — set false to spawn an isolated
+// child that sees only its input. The grants themselves are unaffected: a
+// child with Capabilities:false still holds its granted syscalls, they are
+// merely off its discoverable menu.
+type SpawnSettings struct {
+	History      *bool `json:"history,omitempty"`
+	Capabilities *bool `json:"capabilities,omitempty"`
+}
+
+// shareHistory reports whether a spawned child inherits the session history
+// (the default when unset).
+func (s SpawnSettings) shareHistory() bool { return s.History == nil || *s.History }
+
+// shareCapabilities reports whether a spawned child's capability menu is
+// advertised on its sys.input (the default when unset).
+func (s SpawnSettings) shareCapabilities() bool { return s.Capabilities == nil || *s.Capabilities }
+
 // Manifest is one process node: Program names it and Syscalls is its grant
 // set. A spawnable child inside a sys.spawn grant is itself a Manifest — the
 // recursion that makes the whole grant tree one shape — carrying no Version
@@ -50,7 +72,8 @@ type Manifest struct {
 // which syscall the process gets and how it is configured, and each driver
 // publishes its canonical capability names (net.http,
 // memory.get/put/list, openai.*) — the runtime-served sys.* grants are their
-// own names. A sys.spawn grant carries Programs instead of Settings.
+// own names. A sys.spawn grant carries Programs (its spawnable children) and
+// may carry Settings (a SpawnSettings gating what those children inherit).
 type Syscall struct {
 	Syscall  string          `json:"syscall"`
 	Settings json.RawMessage `json:"settings,omitempty"`
@@ -61,6 +84,16 @@ type Syscall struct {
 // isSpawn reports whether a grant spawns child processes rather than naming
 // a leaf I/O driver.
 func (s Syscall) isSpawn() bool { return s.Syscall == SpawnSyscall }
+
+// spawnSettings decodes a sys.spawn grant's context-sharing settings (validated
+// and canonicalized at manifest time); a grant with no settings shares all.
+func (s Syscall) spawnSettings() SpawnSettings {
+	var out SpawnSettings
+	if len(s.Settings) > 0 {
+		_ = json.Unmarshal(s.Settings, &out)
+	}
+	return out
+}
 
 // runtimeServed reports whether the runtime itself serves the granted
 // syscall, rather than a driver built by the dispatcher provider.
@@ -129,11 +162,15 @@ func validateSyscalls(syscalls []Syscall, provider DispatcherProvider) error {
 			return fmt.Errorf("%w: grant %d: a syscall is required", ErrInvalid, i)
 		}
 		if grant.isSpawn() {
-			if len(grant.Settings) > 0 {
-				return fmt.Errorf("%w: %s carries programs, not settings", ErrInvalid, SpawnSyscall)
-			}
 			if len(grant.Programs) == 0 {
 				return fmt.Errorf("%w: %s requires at least one program", ErrInvalid, SpawnSyscall)
+			}
+			if len(grant.Settings) > 0 {
+				normalized, err := normalizeSpawnSettings(grant.Settings)
+				if err != nil {
+					return fmt.Errorf("%w: %s settings: %v", ErrInvalid, SpawnSyscall, err)
+				}
+				grant.Settings = normalized
 			}
 			programs := make(map[string]struct{}, len(grant.Programs))
 			for j := range grant.Programs {
@@ -178,6 +215,19 @@ func validateSyscalls(syscalls []Syscall, provider DispatcherProvider) error {
 		seen[grant.Syscall] = struct{}{}
 	}
 	return nil
+}
+
+// normalizeSpawnSettings validates a sys.spawn grant's settings and returns
+// their canonical form. Unknown fields are rejected so a typo (e.g. "capabilites")
+// surfaces at manifest time rather than silently sharing everything.
+func normalizeSpawnSettings(raw json.RawMessage) (json.RawMessage, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var settings SpawnSettings
+	if err := decoder.Decode(&settings); err != nil {
+		return nil, err
+	}
+	return json.Marshal(settings)
 }
 
 func cloneManifest(manifest Manifest) Manifest {

@@ -210,7 +210,12 @@ func (r *Runtime) wrapProtocol(cred ProcessContext, next sys.Dispatcher[ProcessC
 	if proc != nil {
 		manifest = cloneManifest(proc.manifest)
 		input = proc.input
-		history = append([]HistoryMessage(nil), proc.history...)
+		// A child spawned with history:false serves no session history on its
+		// sys.input — it sees only its own input. The capability menu is gated
+		// separately, by hidden grants in the child's own manifest.
+		if !proc.hideHistory {
+			history = append([]HistoryMessage(nil), proc.history...)
+		}
 		attempt = proc.attempt
 	}
 	r.mu.Unlock()

@@ -20,10 +20,12 @@ import (
 // it never becomes a human-approvable task — and below the savepoint markers
 // and replay, so spawn results are journaled effects.
 type spawnRouter struct {
-	next     sys.Dispatcher[ProcessContext]
-	programs []Manifest
-	hidden   bool
-	runtime  *Runtime
+	next              sys.Dispatcher[ProcessContext]
+	programs          []Manifest
+	hidden            bool
+	shareHistory      bool
+	shareCapabilities bool
+	runtime           *Runtime
 }
 
 type spawnArgs struct {
@@ -36,7 +38,15 @@ type spawnResult struct {
 }
 
 func newSpawnRouter(next sys.Dispatcher[ProcessContext], grant Syscall, runtime *Runtime) *spawnRouter {
-	return &spawnRouter{next: next, programs: grant.Programs, hidden: grant.Hidden, runtime: runtime}
+	settings := grant.spawnSettings()
+	return &spawnRouter{
+		next:              next,
+		programs:          grant.Programs,
+		hidden:            grant.Hidden,
+		shareHistory:      settings.shareHistory(),
+		shareCapabilities: settings.shareCapabilities(),
+		runtime:           runtime,
+	}
 }
 
 func (r *spawnRouter) Dispatch(ctx context.Context, cred ProcessContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
@@ -239,9 +249,9 @@ func (r *spawnRouter) spawn(ctx context.Context, parent ProcessContext, spec Man
 		return spawnAnswer(answer)
 	}
 
-	childManifest := buildChildManifest(spec)
+	childManifest := buildChildManifest(spec, r.shareCapabilities)
 	slog.Info("spawning child process in parent session", "parent", parent.ProcessID, "child", spec.Program)
-	proc, err := r.runtime.createChildProcess(parent.ProcessID, parent.SessionID, input, childManifest)
+	proc, err := r.runtime.createChildProcess(parent.ProcessID, parent.SessionID, input, childManifest, r.shareHistory)
 	if err != nil {
 		return sys.Fail(fmt.Sprintf("create child process: %v", err)), nil
 	}
@@ -270,10 +280,17 @@ func spawnAnswer(answer string) (sys.SyscallResult, error) {
 // buildChildManifest turns a spawnable program's manifest into the child's
 // own: a clone with the version filled in (the root's governs the tree). The
 // embedded manifest is a 1-level projection — a complete manifest for that
-// program — so nothing else needs to be synthesized.
-func buildChildManifest(spec Manifest) Manifest {
+// program. When the sys.spawn grant withholds the capability menu
+// (Capabilities:false), every grant is hidden so the child's sys.input
+// advertises no tools; the grants stay dispatchable, just off the menu.
+func buildChildManifest(spec Manifest, shareCapabilities bool) Manifest {
 	child := cloneManifest(spec)
 	child.Version = ManifestVersion
+	if !shareCapabilities {
+		for i := range child.Syscalls {
+			child.Syscalls[i].Hidden = true
+		}
+	}
 	return child
 }
 
@@ -327,7 +344,7 @@ func (r *Runtime) nextCascadeChild(parentProcessID string) (childID, sessionID s
 	return childID, child.sessionID, mode, false, true
 }
 
-func (r *Runtime) createChildProcess(parentProcessID string, sessionID string, input string, manifest Manifest) (ProcessSnapshot, error) {
+func (r *Runtime) createChildProcess(parentProcessID string, sessionID string, input string, manifest Manifest, shareHistory bool) (ProcessSnapshot, error) {
 	if input == "" {
 		return ProcessSnapshot{}, fmt.Errorf("%w: input is required", ErrInvalid)
 	}
@@ -368,6 +385,7 @@ func (r *Runtime) createChildProcess(parentProcessID string, sessionID string, i
 		revision:        1,
 		programDigest:   program.Digest,
 		parentProcessID: parentProcessID,
+		hideHistory:     !shareHistory,
 	}
 	proc.journal = r.newJournal(proc, newProcessHistory(), 0)
 	r.processes[processID] = proc
