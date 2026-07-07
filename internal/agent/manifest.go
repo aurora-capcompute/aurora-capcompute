@@ -50,7 +50,7 @@ type Manifest struct {
 
 // Syscall is one granted syscall. The manifest names nothing: a grant says
 // which syscall the process gets and how it is configured, and each driver
-// publishes its canonical capability names (internet.read,
+// publishes its canonical capability names (net.http,
 // memory.get/put/list, openai.*) — the runtime-served sys.* grants are their
 // own names. A sys.spawn grant carries Programs instead of Settings.
 type Syscall struct {

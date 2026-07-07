@@ -179,7 +179,7 @@ func TestDispatcherPersistsAndResumesYieldedTask(t *testing.T) {
 		}
 		return replay.NewDispatcher[proc](tape, taskDispatcher)
 	}
-	call := sys.Syscall{Abi: sys.ABIVersion, Name: "internet.read", Args: json.RawMessage(`{"url":"https://example.com"}`)}
+	call := sys.Syscall{Abi: sys.ABIVersion, Name: "net.http", Args: json.RawMessage(`{"url":"https://example.com"}`)}
 
 	result, err := build().Dispatch(context.Background(), proc{}, call, sys.Authorization{})
 	if err != nil {
@@ -193,7 +193,7 @@ func TestDispatcherPersistsAndResumesYieldedTask(t *testing.T) {
 		t.Fatalf("tasks = %+v, err=%v", records, err)
 	}
 	// The task's identity is the journaled intent: position 0, the open tail.
-	if records[0].JournalPosition != 0 || records[0].Syscall.Name != "internet.read" {
+	if records[0].JournalPosition != 0 || records[0].Syscall.Name != "net.http" {
 		t.Fatalf("task record = %+v", records[0])
 	}
 	if journal.Length() != 1 {
@@ -252,7 +252,7 @@ func TestDispatcherDeniedTask(t *testing.T) {
 		}
 		return replay.NewDispatcher[proc](tape, taskDispatcher)
 	}
-	call := sys.Syscall{Abi: sys.ABIVersion, Name: "internet.read", Args: json.RawMessage(`{"url":"https://example.com"}`)}
+	call := sys.Syscall{Abi: sys.ABIVersion, Name: "net.http", Args: json.RawMessage(`{"url":"https://example.com"}`)}
 
 	if _, err := build().Dispatch(context.Background(), proc{}, call, sys.Authorization{}); err != nil {
 		t.Fatalf("initial dispatch: %v", err)
