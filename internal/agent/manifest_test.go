@@ -94,9 +94,8 @@ func TestValidateManifestValidatesSpawnPrograms(t *testing.T) {
 		Syscalls: []Syscall{{
 			Syscall: SpawnSyscall,
 			Programs: []Manifest{{
-				Program:   "scout",
-				OnFailure: OnFailurePropagate,
-				Syscalls:  []Syscall{{Syscall: "core.custom"}},
+				Program:  "scout",
+				Syscalls: []Syscall{{Syscall: "core.custom"}},
 			}},
 		}},
 	}

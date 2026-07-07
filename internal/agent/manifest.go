@@ -31,21 +31,18 @@ type TimerSettings struct {
 // Manifest is one process node. Program/SystemPrompt configure the node;
 // Syscalls is its grant set. A spawnable child inside a sys.spawn grant is
 // itself a Manifest — the recursion that makes the whole grant tree one
-// shape — carrying no Version of its own: the root's governs.
+// shape — carrying no Version of its own: the root's governs. A child's
+// failure is a recoverable observation to its parent's cognition; a program
+// that must abort on it makes the spawn a hard call.
 type Manifest struct {
 	Version int    `json:"version,omitempty"`
 	Program string `json:"program,omitempty"`
 	// BindingRef is an opaque application correlation reference (e.g. the
 	// name of the control-plane binding that produced this manifest). The
 	// runtime never interprets it.
-	BindingRef   string `json:"binding_ref,omitempty"`
-	SystemPrompt string `json:"system_prompt,omitempty"`
-	// OnFailure selects how this node's failure (when it is a spawned child)
-	// is handled: OnFailureReport (default) surfaces it to the parent
-	// program as a recoverable failed observation; OnFailurePropagate fails
-	// the parent outright.
-	OnFailure string    `json:"on_failure,omitempty"`
-	Syscalls  []Syscall `json:"syscalls,omitempty"`
+	BindingRef   string    `json:"binding_ref,omitempty"`
+	SystemPrompt string    `json:"system_prompt,omitempty"`
+	Syscalls     []Syscall `json:"syscalls,omitempty"`
 }
 
 // Syscall is one granted syscall. The manifest names nothing: a grant says
@@ -59,12 +56,6 @@ type Syscall struct {
 	Programs []Manifest      `json:"programs,omitempty"`
 	Hidden   bool            `json:"hidden,omitempty"`
 }
-
-// Child failure-handling modes for Manifest.OnFailure.
-const (
-	OnFailureReport    = "report"
-	OnFailurePropagate = "propagate"
-)
 
 // isSpawn reports whether a grant spawns child processes rather than naming
 // a leaf I/O driver.
@@ -123,11 +114,6 @@ func validateNode(node *Manifest, provider DispatcherProvider) error {
 	node.Program = strings.TrimSpace(node.Program)
 	node.SystemPrompt = strings.TrimSpace(node.SystemPrompt)
 	node.BindingRef = strings.TrimSpace(node.BindingRef)
-	switch node.OnFailure {
-	case "", OnFailureReport, OnFailurePropagate:
-	default:
-		return fmt.Errorf("%w: on_failure must be %q or %q", ErrInvalid, OnFailureReport, OnFailurePropagate)
-	}
 	return validateSyscalls(node.Syscalls, provider)
 }
 

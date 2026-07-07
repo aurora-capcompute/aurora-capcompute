@@ -854,10 +854,11 @@ func (failingChildDispatcher) Dispatch(_ context.Context, _ ProcessContext, sysc
 			return chatActions(`{"actions":[{"action":"missing.tool","content":{}}]}`), nil
 		}
 	}
-	return chatActions(`{"actions":[{"action":"sys.spawn","content":{"program":"program@1","message":"do subtask"}}]}`), nil
+	// A hard spawn: the parent must abort if the child fails.
+	return chatActions(`{"actions":[{"action":"sys.spawn","content":{"program":"program@1","message":"do subtask"},"hard":true}]}`), nil
 }
 
-func TestRuntimeChildFailurePropagatesToParent(t *testing.T) {
+func TestRuntimeHardSpawnFailsParentOnChildFailure(t *testing.T) {
 	store := newRuntimeStore()
 	runtime, err := NewRuntime(context.Background(), Config{
 		Programs: staticPrograms{
@@ -891,15 +892,15 @@ func TestRuntimeChildFailurePropagatesToParent(t *testing.T) {
 		Program: "program@1",
 		Syscalls: []Syscall{{
 			Syscall:  SpawnSyscall,
-			Programs: []Manifest{{Program: "program@1", OnFailure: OnFailurePropagate}},
+			Programs: []Manifest{{Program: "program@1"}},
 		}},
 	})
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
 
-	// With OnFailurePropagate, the failed child fails the parent run rather than
-	// surfacing as a recoverable observation.
+	// The parent made the spawn a hard call, so the failed child fails the
+	// parent run rather than surfacing as a recoverable observation.
 	failed := waitForProcessFailed(t, runtime, proc.ID)
 	if !strings.Contains(failed.Error, "child") {
 		t.Fatalf("parent error = %q, want it to mention the failed child", failed.Error)
@@ -1006,10 +1007,9 @@ func waitForProcessFailed(t *testing.T, runtime *Runtime, processID string) Proc
 
 // cascadeResumeDispatchers drives a parent that delegates to a child with
 // multiple steps. The child calls tool.x then on its second LLM turn fails on
-// attempt 1 and succeeds on attempt 2. With OnFailurePropagate the parent also
-// fails on attempt 1. On parent resume-retry the cascade must resume (not
-// restart) the child so only entries from the failing step onward get a new
-// revision.
+// attempt 1 and succeeds on attempt 2. The parent spawns hard, so it also fails
+// on attempt 1. On parent resume-retry the cascade must resume (not restart)
+// the child so only entries from the failing step onward get a new revision.
 type cascadeResumeDispatchers struct {
 	mu         sync.Mutex
 	childTurn2 int
@@ -1068,11 +1068,12 @@ func (d *cascadeResumeDispatcherImpl) Dispatch(_ context.Context, _ ProcessConte
 			}
 			return chatActions(`{"actions":[{"action":"final","content":{"answer":"child-done"}}]}`), nil
 		}
-		// Parent: delegate on first turn, finish once it has the child's result.
+		// Parent: delegate on first turn (a hard call, so the child's failure
+		// fails the parent), finish once it has the child's result.
 		if laterUser {
 			return chatActions(`{"actions":[{"action":"final","content":{"answer":"parent-done"}}]}`), nil
 		}
-		return chatActions(`{"actions":[{"action":"sys.spawn","content":{"program":"program@1","message":"do subtask"}}]}`), nil
+		return chatActions(`{"actions":[{"action":"sys.spawn","content":{"program":"program@1","message":"do subtask"},"hard":true}]}`), nil
 	default:
 		return sys.Fail("unsupported call: " + syscall.Name), nil
 	}
@@ -1113,9 +1114,8 @@ func TestRuntimeCascadeResumeUsesResumeModeForFailedChild(t *testing.T) {
 		Syscalls: []Syscall{{
 			Syscall: SpawnSyscall,
 			Programs: []Manifest{{
-				Program:   "program@1",
-				OnFailure: OnFailurePropagate,
-				Syscalls:  []Syscall{{Syscall: "core.custom"}},
+				Program:  "program@1",
+				Syscalls: []Syscall{{Syscall: "core.custom"}},
 			}},
 		}},
 	})
@@ -1123,7 +1123,7 @@ func TestRuntimeCascadeResumeUsesResumeModeForFailedChild(t *testing.T) {
 		t.Fatalf("create run: %v", err)
 	}
 
-	// Attempt 1: child fails → parent fails via OnFailurePropagate.
+	// Attempt 1: child fails → the hard spawn fails the parent.
 	waitForProcessFailed(t, runtime, proc.ID)
 	childID := onlyChildProcess(t, runtime, proc.ID)
 

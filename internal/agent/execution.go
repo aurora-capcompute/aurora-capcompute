@@ -176,18 +176,10 @@ func (r *Runtime) execute(processID string) {
 
 	result := <-results
 	r.mu.Lock()
-	var forced error
 	if proc = r.processes[processID]; proc != nil {
 		proc.stop = nil
-		forced = proc.failure
 	}
 	r.mu.Unlock()
-	if forced != nil {
-		// A propagated child failure is a policy decision, not an accident —
-		// no re-drive: roll the open section back and surface it.
-		r.failNow(processID, forced)
-		return
-	}
 	switch result.Status {
 	case capcompute.ResumeCompleted:
 		if r.guestAborted(processID) {
@@ -260,24 +252,6 @@ func (r *Runtime) failureStatus(err error) ProcessStatus {
 		return ProcessInterrupted
 	}
 	return ProcessFailed
-}
-
-// requestProcessFailure marks a process to finish as failed and stops its
-// in-flight quantum. It is used to propagate a delegated child's failure up
-// to its parent when the child's failure-mode policy is OnFailurePropagate.
-func (r *Runtime) requestProcessFailure(processID string, err error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	proc := r.processes[processID]
-	if proc == nil {
-		return
-	}
-	if proc.failure == nil {
-		proc.failure = err
-	}
-	if proc.stop != nil {
-		proc.stop()
-	}
 }
 
 func (r *Runtime) finish(processID string, status ProcessStatus, answer string, err error) {

@@ -822,7 +822,6 @@ func (r *Runtime) relaunchLocked(proc *processState) (ProcessSnapshot, error) {
 	proc.attempt++
 	proc.answer = ""
 	proc.err = ""
-	proc.failure = nil
 	proc.stopRequested = false
 	proc.startedAt = nil
 	proc.completedAt = nil

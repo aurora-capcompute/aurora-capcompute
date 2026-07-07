@@ -115,11 +115,9 @@ var (
 // Constants
 
 const (
-	DefaultTenantID    = agent.DefaultTenantID
-	DefaultProgramID   = agent.DefaultProgramID
-	ManifestVersion    = agent.ManifestVersion
-	SpawnSyscall       = agent.SpawnSyscall
-	TimerSyscall       = agent.TimerSyscall
-	OnFailureReport    = agent.OnFailureReport
-	OnFailurePropagate = agent.OnFailurePropagate
+	DefaultTenantID  = agent.DefaultTenantID
+	DefaultProgramID = agent.DefaultProgramID
+	ManifestVersion  = agent.ManifestVersion
+	SpawnSyscall     = agent.SpawnSyscall
+	TimerSyscall     = agent.TimerSyscall
 )

@@ -196,9 +196,6 @@ type processState struct {
 	// terminal result directly when the parent is re-driven after that child's
 	// out-of-band approval resolved. Consumed and cleared when the play ends.
 	reconnectChildren bool
-	// failure forces the process to finish as failed regardless of how its play ends;
-	// set when a delegated child fails under an OnFailurePropagate policy.
-	failure error
 }
 
 // ProcessContext is the host-side credential for one process revision: the syscall

@@ -353,10 +353,8 @@ func (r *Runtime) failProcess(processID string, failure error) {
 }
 
 // failNow rolls an open section back and finishes the process as failed, with
-// no re-drive — the path for failures that are decisions rather than
-// accidents: a child failure propagated under OnFailurePropagate (the child
-// already earned its own re-drive before its wall; the policy says surface
-// it) and a failure whose re-drive hit the wall.
+// no re-drive — the path for a failure that has already earned its re-drive and
+// hit the wall (a deterministic failure the resume cannot get past).
 func (r *Runtime) failNow(processID string, failure error) {
 	if failure == nil {
 		failure = errors.New("process failed")

@@ -151,18 +151,6 @@ func visibleGrantNames(spec Manifest) []string {
 	return out
 }
 
-// onChildFailure applies the spawnable program's failure-mode policy.
-// OnFailurePropagate forces the parent process to fail (a failed result
-// alone only surfaces a recoverable observation to the program); otherwise
-// the failure is reported to the parent program as a recoverable failed
-// observation.
-func (r *spawnRouter) onChildFailure(parentProcessID string, spec Manifest, err error) (sys.SyscallResult, error) {
-	if spec.OnFailure == OnFailurePropagate {
-		r.runtime.requestProcessFailure(parentProcessID, fmt.Errorf("child %q failed: %w", spec.Program, err))
-	}
-	return sys.Fail(err.Error()), nil
-}
-
 func (r *spawnRouter) spawn(ctx context.Context, parent ProcessContext, spec Manifest, args spawnArgs) (sys.SyscallResult, error) {
 	// Deep cascade resume: when the parent process is being restarted (or
 	// re-driven after a child's HITL approval), re-execution re-issues the
@@ -181,7 +169,7 @@ func (r *spawnRouter) spawn(ctx context.Context, parent ProcessContext, spec Man
 			}
 			answer, _, procErr := childTerminal(snap)
 			if procErr != nil {
-				return r.onChildFailure(parent.ProcessID, spec, procErr)
+				return sys.Fail(procErr.Error()), nil
 			}
 			return spawnAnswer(answer)
 		}
@@ -190,7 +178,7 @@ func (r *spawnRouter) spawn(ctx context.Context, parent ProcessContext, spec Man
 		}
 		answer, parked, err := r.runtime.waitForCompletion(ctx, childID, sessionID)
 		if err != nil {
-			return r.onChildFailure(parent.ProcessID, spec, err)
+			return sys.Fail(err.Error()), nil
 		}
 		if parked {
 			return sys.Yield(fmt.Sprintf("waiting on child %s", spec.Program)), nil
@@ -206,7 +194,7 @@ func (r *spawnRouter) spawn(ctx context.Context, parent ProcessContext, spec Man
 	}
 	answer, parked, err := r.runtime.waitForCompletion(ctx, proc.ID, parent.SessionID)
 	if err != nil {
-		return r.onChildFailure(parent.ProcessID, spec, err)
+		return sys.Fail(err.Error()), nil
 	}
 	if parked {
 		// The child parked for human approval. Yield so the parent process suspends
