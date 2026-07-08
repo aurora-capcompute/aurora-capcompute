@@ -104,7 +104,7 @@ func TestSpawnSettingsDefaults(t *testing.T) {
 		t.Fatal("omitted settings should share both history and capabilities")
 	}
 	no, yes := false, true
-	off := SpawnSettings{History: &no, Capabilities: &no}
+	off := SpawnSettings{History: &no, ShareCapabilities: &no}
 	if off.shareHistory() || off.shareCapabilities() {
 		t.Fatal("explicit false should withhold")
 	}
@@ -122,7 +122,7 @@ func TestBuildChildManifestCapabilitiesGate(t *testing.T) {
 		Program: "child",
 		Syscalls: []Syscall{
 			{Syscall: "net.http"},
-			{Syscall: "openai.chat", Hidden: true},
+			{Syscall: "core.openaiApi", Hidden: true},
 		},
 	}
 	shared := buildChildManifest(spec, true)
@@ -167,7 +167,7 @@ func TestNormalizeSpawnSettings(t *testing.T) {
 func TestNewSpawnRouterReadsSettings(t *testing.T) {
 	grant := Syscall{
 		Syscall:  SpawnSyscall,
-		Settings: json.RawMessage(`{"history":false,"capabilities":false}`),
+		Config:   json.RawMessage(`{"history":false,"share_capabilities":false}`),
 		Programs: []Manifest{{Program: "child"}},
 	}
 	if r := newSpawnRouter(nil, grant, nil); r.shareHistory || r.shareCapabilities {

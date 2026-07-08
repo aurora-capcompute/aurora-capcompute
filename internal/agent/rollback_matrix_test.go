@@ -142,7 +142,7 @@ func (d *matrixDispatcher) Dispatch(ctx context.Context, _ ProcessContext, sysca
 		return d.effect(ctx, "charge", &d.charges, sys.Result(json.RawMessage(`{"charge_id":"c1"}`)))
 	case "billing.refund":
 		return d.effect(ctx, "refund", &d.refunds, sys.Result(json.RawMessage(`{"refunded":true}`)))
-	case "openai.chat":
+	case "core.openaiApi":
 		var req struct {
 			Messages []struct {
 				Role    string `json:"role"`

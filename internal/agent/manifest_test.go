@@ -13,15 +13,15 @@ type testDispatchers struct {
 	normalized []string
 }
 
-func (p *testDispatchers) Normalize(syscall string, settings json.RawMessage) (json.RawMessage, error) {
+func (p *testDispatchers) Normalize(syscall string, config json.RawMessage) (json.RawMessage, error) {
 	if syscall == "unknown" {
 		return nil, fmt.Errorf("unsupported syscall")
 	}
 	p.normalized = append(p.normalized, syscall)
-	if len(settings) == 0 {
+	if len(config) == 0 {
 		return json.RawMessage(`{}`), nil
 	}
-	return append(json.RawMessage(nil), settings...), nil
+	return append(json.RawMessage(nil), config...), nil
 }
 
 func (*testDispatchers) NewDispatcher(context.Context, ProcessContext, Manifest) (sys.Dispatcher[ProcessContext], error) {
@@ -41,8 +41,47 @@ func TestValidateManifestUsesInjectedProvider(t *testing.T) {
 	if manifest.Syscalls[0].Syscall != "core.custom" {
 		t.Fatalf("manifest = %+v", manifest)
 	}
-	if string(manifest.Syscalls[0].Settings) != "{}" {
-		t.Fatalf("settings = %s", manifest.Syscalls[0].Settings)
+	if string(manifest.Syscalls[0].Config) != "{}" {
+		t.Fatalf("config = %s", manifest.Syscalls[0].Config)
+	}
+}
+
+// A grant is a tagged union on `syscall`: the runtime owns syscall/hidden/
+// programs; every other top-level key is the family's Config, captured verbatim
+// and round-tripping through marshal/unmarshal.
+func TestSyscallConfigCapture(t *testing.T) {
+	raw := `{"syscall":"core.internet","hidden":true,"capabilities":[{"methods":["GET"],"domain":"*"}],"timeout_ms":5000}`
+	var grant Syscall
+	if err := json.Unmarshal([]byte(raw), &grant); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if grant.Syscall != "core.internet" || !grant.Hidden {
+		t.Fatalf("runtime fields = %+v", grant)
+	}
+	var config map[string]json.RawMessage
+	if err := json.Unmarshal(grant.Config, &config); err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	if _, ok := config["capabilities"]; !ok {
+		t.Fatalf("capabilities not captured into Config: %s", grant.Config)
+	}
+	if _, ok := config["timeout_ms"]; !ok {
+		t.Fatalf("timeout_ms not captured into Config: %s", grant.Config)
+	}
+	if _, leaked := config["syscall"]; leaked {
+		t.Fatal("runtime key syscall leaked into Config")
+	}
+	// Re-marshal merges the runtime fields back with Config, and round-trips.
+	out, err := json.Marshal(grant)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var back Syscall
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatalf("round-trip unmarshal: %v", err)
+	}
+	if back.Syscall != grant.Syscall || back.Hidden != grant.Hidden || string(back.Config) != string(grant.Config) {
+		t.Fatalf("round-trip diverged: %+v vs %+v", back, grant)
 	}
 }
 
@@ -68,18 +107,18 @@ func TestValidateManifestRefusesDuplicateSyscalls(t *testing.T) {
 	}
 }
 
-// A sys.timer grant is the runtime's own: its settings validate here, not
+// A sys.timer grant is the runtime's own: its bound validates here, not
 // against a driver registration.
 func TestValidateManifestValidatesTimerGrant(t *testing.T) {
 	if _, err := ValidateManifest(Manifest{
 		Version:  ManifestVersion,
-		Syscalls: []Syscall{{Syscall: TimerSyscall, Settings: json.RawMessage(`{"max_duration_ms":60000}`)}},
+		Syscalls: []Syscall{{Syscall: TimerSyscall, Config: json.RawMessage(`{"max_duration_ms":60000}`)}},
 	}, &testDispatchers{}); err != nil {
 		t.Fatalf("timer grant rejected: %v", err)
 	}
 	if _, err := ValidateManifest(Manifest{
 		Version:  ManifestVersion,
-		Syscalls: []Syscall{{Syscall: TimerSyscall, Settings: json.RawMessage(`{"max_duration_ms":-1}`)}},
+		Syscalls: []Syscall{{Syscall: TimerSyscall, Config: json.RawMessage(`{"max_duration_ms":-1}`)}},
 	}, &testDispatchers{}); err == nil {
 		t.Fatal("negative max_duration_ms accepted")
 	}
@@ -87,14 +126,14 @@ func TestValidateManifestValidatesTimerGrant(t *testing.T) {
 
 // A sys.spawn grant carries programs — each a manifest of its own, program
 // required, no version, recursively validated — plus optional context-sharing
-// settings (history/capabilities), with unknown fields rejected.
+// settings (history/share_capabilities), with unknown fields rejected.
 func TestValidateManifestValidatesSpawnPrograms(t *testing.T) {
 	valid := Manifest{
 		Version: ManifestVersion,
 		Program: "root",
 		Syscalls: []Syscall{{
-			Syscall:  SpawnSyscall,
-			Settings: json.RawMessage(`{"history":false,"capabilities":false}`),
+			Syscall: SpawnSyscall,
+			Config:  json.RawMessage(`{"history":false,"share_capabilities":false}`),
 			Programs: []Manifest{{
 				Program:  "scout",
 				Syscalls: []Syscall{{Syscall: "core.custom"}},
@@ -110,7 +149,7 @@ func TestValidateManifestValidatesSpawnPrograms(t *testing.T) {
 		grant Syscall
 	}{
 		{"no programs", Syscall{Syscall: SpawnSyscall}},
-		{"unknown spawn setting", Syscall{Syscall: SpawnSyscall, Settings: json.RawMessage(`{"nope":true}`),
+		{"unknown spawn setting", Syscall{Syscall: SpawnSyscall, Config: json.RawMessage(`{"nope":true}`),
 			Programs: []Manifest{{Program: "scout"}}}},
 		{"program required", Syscall{Syscall: SpawnSyscall, Programs: []Manifest{{}}}},
 		{"nested version", Syscall{Syscall: SpawnSyscall,
@@ -121,56 +160,6 @@ func TestValidateManifestValidatesSpawnPrograms(t *testing.T) {
 			Programs: []Manifest{{Program: "scout", Syscalls: []Syscall{{Syscall: "unknown"}}}}}},
 		{"programs on a leaf", Syscall{Syscall: "core.custom",
 			Programs: []Manifest{{Program: "scout"}}}},
-	}
-	for _, tc := range cases {
-		if _, err := ValidateManifest(Manifest{
-			Version:  ManifestVersion,
-			Syscalls: []Syscall{tc.grant},
-		}, &testDispatchers{}); err == nil {
-			t.Fatalf("%s: expected validation error", tc.name)
-		}
-	}
-}
-
-// Data-flow labels/forbid are declarable on leaf driver grants — a flat array
-// (every operation) or a per-operation object — normalized (trimmed, deduped,
-// sorted), and rejected on the runtime-served sys.* grants and the reserved
-// "syscall:" namespace. Parsed from JSON to exercise the polymorphic decode.
-func TestValidateManifestLabelsForbid(t *testing.T) {
-	raw := `{"version":4,"syscalls":[
-		{"syscall":"core.custom",
-		 "labels":[" untrusted_web ","untrusted_web",""],
-		 "forbid":{"memory.put":["secret","secret"],"*":["pii"]}}]}`
-	var manifest Manifest
-	if err := json.Unmarshal([]byte(raw), &manifest); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	m, err := ValidateManifest(manifest, &testDispatchers{})
-	if err != nil {
-		t.Fatalf("validate: %v", err)
-	}
-	grant := m.Syscalls[0]
-	if got := grant.Labels["*"]; len(got) != 1 || got[0] != "untrusted_web" {
-		t.Fatalf("labels[*] = %v, want [untrusted_web] (array sugar, trimmed + deduped)", got)
-	}
-	if got := grant.Forbid["memory.put"]; len(got) != 1 || got[0] != "secret" {
-		t.Fatalf("forbid[memory.put] = %v, want [secret]", got)
-	}
-	if got := grant.Forbid["*"]; len(got) != 1 || got[0] != "pii" {
-		t.Fatalf("forbid[*] = %v, want [pii]", got)
-	}
-	// A "*"-only policy round-trips back to the array form.
-	if out, _ := json.Marshal(grant.Labels); string(out) != `["untrusted_web"]` {
-		t.Fatalf("labels marshal = %s, want the array sugar", out)
-	}
-
-	cases := []struct {
-		name  string
-		grant Syscall
-	}{
-		{"reserved label prefix", Syscall{Syscall: "core.custom", Labels: FlowLabels{"*": {"syscall:core.custom"}}}},
-		{"labels on spawn", Syscall{Syscall: SpawnSyscall, Labels: FlowLabels{"*": {"x"}}, Programs: []Manifest{{Program: "p"}}}},
-		{"forbid on timer", Syscall{Syscall: TimerSyscall, Forbid: FlowLabels{"*": {"x"}}}},
 	}
 	for _, tc := range cases {
 		if _, err := ValidateManifest(Manifest{

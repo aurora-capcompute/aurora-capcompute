@@ -82,7 +82,7 @@ func TestLogJournalRoundTripsHTMLCharactersVerbatim(t *testing.T) {
 	j := newLogJournal(log, scope, "proc1", 1, newProcessHistory(), 0, now, nil)
 
 	args := []byte(`{"prompt":"reply with <exact tool name> & schema"}`)
-	syscall := sys.Syscall{Abi: sys.ABIVersion, Name: "openai.chat", Args: append([]byte(nil), args...)}
+	syscall := sys.Syscall{Abi: sys.ABIVersion, Name: "core.openaiApi", Args: append([]byte(nil), args...)}
 	result := sys.Result([]byte(`{"text":"<done> & gone"}`))
 	appendPair(t, j, syscall, result)
 

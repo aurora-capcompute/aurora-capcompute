@@ -37,10 +37,10 @@ type timerDispatcher struct {
 
 func newTimerDispatcher(next sys.Dispatcher[ProcessContext], grant Syscall) *timerDispatcher {
 	var settings TimerSettings
-	if len(grant.Settings) > 0 {
+	if len(grant.Config) > 0 {
 		// Validated at the manifest door; a decode failure here leaves the
 		// default bound.
-		_ = json.Unmarshal(grant.Settings, &settings)
+		_ = json.Unmarshal(grant.Config, &settings)
 	}
 	maxDuration := time.Duration(settings.MaxDurationMS) * time.Millisecond
 	if maxDuration <= 0 {

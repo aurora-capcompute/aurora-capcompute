@@ -3,7 +3,7 @@ module github.com/aurora-capcompute/aurora-capcompute
 go 1.26
 
 require (
-	github.com/aurora-capcompute/capcompute v0.0.0-20260707131151-ff4f2f6cc9a5
+	github.com/aurora-capcompute/capcompute v0.0.0-20260708110059-6d31db5a36aa
 	github.com/extism/go-sdk v1.7.1
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 )

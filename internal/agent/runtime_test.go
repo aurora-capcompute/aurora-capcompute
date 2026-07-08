@@ -43,7 +43,7 @@ func (p *runtimeDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, 
 // does: dispatchable, hidden from the discoverable menu, and — because the
 // kernel's Validator enforces complete mediation — granted explicitly.
 func llmCapability() sys.Capability {
-	return sys.Capability{Name: "openai.chat", Description: "LLM chat", Hidden: true}
+	return sys.Capability{Name: "core.openaiApi", Description: "LLM chat", Hidden: true}
 }
 
 type finalDispatcher struct{}
@@ -51,7 +51,7 @@ type finalDispatcher struct{}
 func (finalDispatcher) Capabilities() []sys.Capability { return []sys.Capability{llmCapability()} }
 
 func (finalDispatcher) Dispatch(_ context.Context, _ ProcessContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
-	if syscall.Name != "openai.chat" {
+	if syscall.Name != "core.openaiApi" {
 		return sys.Fail("unsupported call: " + syscall.Name), nil
 	}
 	return sys.Result(json.RawMessage(
@@ -197,7 +197,7 @@ func TestRuntimePassesManifestToDispatcherProvider(t *testing.T) {
 	proc, err := runtime.CreateProcess(session.ID, "finish", Manifest{
 		Version: ManifestVersion,
 		Syscalls: []Syscall{{
-			Syscall: "core.custom", Settings: json.RawMessage(`{"value":2}`),
+			Syscall: "core.custom", Config: json.RawMessage(`{"value":2}`),
 		}},
 	})
 	if err != nil {
@@ -207,7 +207,7 @@ func TestRuntimePassesManifestToDispatcherProvider(t *testing.T) {
 	// The program brackets its one turn in a sys.begin/sys.commit savepoint, so
 	// the journal narrative is input → begin → chat → commit → finish.
 	names := journalNames(t, runtime, proc.ID)
-	want := []string{callSysInput, sys.SyscallBegin, "openai.chat", sys.SyscallCommit, callSysOutput}
+	want := []string{callSysInput, sys.SyscallBegin, "core.openaiApi", sys.SyscallCommit, callSysOutput}
 	if len(names) != len(want) {
 		t.Fatalf("journal = %v, want %v", names, want)
 	}
@@ -220,7 +220,7 @@ func TestRuntimePassesManifestToDispatcherProvider(t *testing.T) {
 	dispatchers.mu.Lock()
 	defer dispatchers.mu.Unlock()
 	if len(dispatchers.manifests) != 1 ||
-		string(dispatchers.manifests[0].Syscalls[0].Settings) != `{"value":2}` {
+		string(dispatchers.manifests[0].Syscalls[0].Config) != `{"value":2}` {
 		t.Fatalf("dispatcher manifests = %+v", dispatchers.manifests)
 	}
 }
@@ -278,7 +278,7 @@ func TestRuntimeSetProgramsLifecycle(t *testing.T) {
 	}
 	proc, err := runtime.CreateProcess(session.ID, "finish", Manifest{
 		Version:  ManifestVersion,
-		Syscalls: []Syscall{{Syscall: "core.custom", Settings: json.RawMessage(`{"value":1}`)}},
+		Syscalls: []Syscall{{Syscall: "core.custom", Config: json.RawMessage(`{"value":1}`)}},
 	})
 	if err != nil {
 		t.Fatalf("create run: %v", err)
@@ -507,7 +507,7 @@ func buildEchoProgram(t *testing.T) []byte {
 }
 
 // cascadeDispatchers drives a parent program to delegate to a "child" once and
-// then finish. The openai.chat fake decides what to emit by inspecting the
+// then finish. The core.openaiApi fake decides what to emit by inspecting the
 // conversation: the child's own turn (whose user message is the delegated task)
 // finishes immediately; the parent's first turn delegates; its second turn (which
 // now carries a tool observation) finishes.
@@ -536,7 +536,7 @@ func chatActions(actions string) sys.SyscallResult {
 }
 
 func (cascadeDispatcher) Dispatch(_ context.Context, _ ProcessContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
-	if syscall.Name != "openai.chat" {
+	if syscall.Name != "core.openaiApi" {
 		return sys.Fail("unsupported call: " + syscall.Name), nil
 	}
 	var req struct {
@@ -723,7 +723,7 @@ func (approvalToolDispatcher) Dispatch(_ context.Context, _ ProcessContext, sysc
 			return sys.Yield("Approve tool.y"), nil
 		}
 		return sys.Result(json.RawMessage(`{"granted":true}`)), nil
-	case "openai.chat":
+	case "core.openaiApi":
 		var req struct {
 			Messages []struct {
 				Role    string `json:"role"`
@@ -837,7 +837,7 @@ func (failingChildDispatcher) Capabilities() []sys.Capability {
 }
 
 func (failingChildDispatcher) Dispatch(_ context.Context, _ ProcessContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
-	if syscall.Name != "openai.chat" {
+	if syscall.Name != "core.openaiApi" {
 		return sys.Fail("unsupported call: " + syscall.Name), nil
 	}
 	var req struct {
@@ -954,7 +954,7 @@ func (d *failThenSucceedDispatcher) Dispatch(_ context.Context, _ ProcessContext
 	switch syscall.Name {
 	case "tool.x":
 		return sys.Result(json.RawMessage(`{"ok":true}`)), nil
-	case "openai.chat":
+	case "core.openaiApi":
 		var req struct {
 			Messages []struct {
 				Role    string `json:"role"`
@@ -1043,7 +1043,7 @@ func (d *cascadeResumeDispatcherImpl) Dispatch(_ context.Context, _ ProcessConte
 	switch syscall.Name {
 	case "tool.x":
 		return sys.Result(json.RawMessage(`{"ok":true}`)), nil
-	case "openai.chat":
+	case "core.openaiApi":
 		var req struct {
 			Messages []struct {
 				Role    string `json:"role"`
@@ -1356,7 +1356,7 @@ func (d *compensationDispatcher) Dispatch(ctx context.Context, _ ProcessContext,
 		}
 		d.mu.Unlock()
 		return sys.Result(json.RawMessage(`{"synced":true}`)), nil
-	case "openai.chat":
+	case "core.openaiApi":
 		var req struct {
 			Messages []struct {
 				Role    string `json:"role"`
