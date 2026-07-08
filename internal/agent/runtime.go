@@ -410,7 +410,7 @@ func (r *Runtime) CreateSession(name string, tags map[string]string) (SessionSna
 	if err := r.checkSessionNameFreeLocked(name, ""); err != nil {
 		return SessionSnapshot{}, err
 	}
-	session := &sessionState{id: id, name: name, title: "New session", createdAt: now, updatedAt: now, tags: cloneTags(tags)}
+	session := &sessionState{id: id, name: name, title: defaultSessionTitle, createdAt: now, updatedAt: now, tags: cloneTags(tags)}
 	r.sessions[id] = session
 	if err := r.appendSession(session); err != nil {
 		delete(r.sessions, id)

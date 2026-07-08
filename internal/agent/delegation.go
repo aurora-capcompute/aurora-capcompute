@@ -65,7 +65,7 @@ func (r *spawnRouter) Dispatch(ctx context.Context, cred ProcessContext, syscall
 	// The spawn ADT types `input` per the child's declared input schema; collapse
 	// it to the canonical process-input string (the inverse of the string-first
 	// rule) before validating and spawning.
-	input, err := spawnInputToMessage(args.Input)
+	input, err := spawnInputToString(args.Input)
 	if err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("spawn: %v", err)), nil
 	}
@@ -81,11 +81,11 @@ func (r *spawnRouter) Dispatch(ctx context.Context, cred ProcessContext, syscall
 	return r.spawn(ctx, cred, spec, input)
 }
 
-// spawnInputToMessage collapses the typed spawn `input` value into the canonical
+// spawnInputToString collapses the typed spawn `input` value into the canonical
 // process-input string — the inverse of the string-first rule (validateText in
 // program.go): a JSON string input carries its plain text; any other JSON value
 // carries its compact text, which the child re-parses under the same rule.
-func spawnInputToMessage(input json.RawMessage) (string, error) {
+func spawnInputToString(input json.RawMessage) (string, error) {
 	trimmed := bytes.TrimSpace(input)
 	if len(trimmed) == 0 {
 		return "", fmt.Errorf("an input is required")
@@ -389,10 +389,11 @@ func (r *Runtime) createChildProcess(parentProcessID string, sessionID string, i
 	}
 	proc.journal = r.newJournal(proc, newProcessHistory(), 0)
 	r.processes[processID] = proc
+	// The parent is already in session.processIDs (it is the active process that
+	// spawned this child), so the child is never the session's first process and
+	// never sets its title — a child's input is a delegated sub-task, not the
+	// session's headline.
 	session.processIDs = append(session.processIDs, processID)
-	if len(session.processIDs) == 1 {
-		session.title = sessionTitle(input)
-	}
 	prevActiveProcessID := session.activeProcessID
 	session.activeProcessID = processID
 	session.updatedAt = now

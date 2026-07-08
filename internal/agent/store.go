@@ -10,8 +10,8 @@ const DefaultTenantID = "local"
 // StoredSession is a session's durable state, derived from the process projection
 // and folded back into memory on restore.
 type StoredSession struct {
-	TenantID        string
-	ID              string
+	TenantID string
+	ID       string
 	// Name is the session's explicit, renamable handle (empty if unnamed). It is
 	// carried by session.state events, not derived from the process projection.
 	Name            string
@@ -48,8 +48,9 @@ type StoredProcess struct {
 	// with history:false — its sys.input omits the session history. Persisted so
 	// a restart re-serves the same isolated input.
 	HideHistory bool `json:",omitempty"`
-	// Tags carries the owning session's tags so session metadata survives
-	// without a separate session.state event.
+	// Tags carries the owning session's tags. A session.state event now carries
+	// them too; this copy is retained so sessions from pre-session.state streams
+	// (which have no such event) still restore their tags.
 	Tags map[string]string
 	// ParentProcessID links a delegated child back to the process that spawned
 	// it; ChildProcessIDs records, in spawn order, the children this process

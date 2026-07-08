@@ -8,9 +8,9 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
-// TestSpawnInputToMessage covers the inverse of the string-first rule: the typed
+// TestSpawnInputToString covers the inverse of the string-first rule: the typed
 // spawn `input` collapses to the canonical process-input string.
-func TestSpawnInputToMessage(t *testing.T) {
+func TestSpawnInputToString(t *testing.T) {
 	cases := []struct {
 		name    string
 		input   string
@@ -26,7 +26,7 @@ func TestSpawnInputToMessage(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := spawnInputToMessage(json.RawMessage(tc.input))
+			got, err := spawnInputToString(json.RawMessage(tc.input))
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected error for %q", tc.input)
@@ -55,12 +55,12 @@ func TestSpawnADTSchema(t *testing.T) {
 	})
 	schema := compileSpawnSchema(t, adt)
 
-	assertValid(t, schema, `{"program":"echo","input":"hello"}`, true)          // string program, string input
-	assertValid(t, schema, `{"program":"weather","input":{"city":"paris"}}`, true) // object program, object input
-	assertValid(t, schema, `{"program":"echo","input":{"city":"paris"}}`, false)   // wrong input type for the program
-	assertValid(t, schema, `{"program":"weather","input":"paris"}`, false)         // wrong input type for the program
-	assertValid(t, schema, `{"program":"nope","input":"x"}`, false)                // unlisted program
-	assertValid(t, schema, `{"program":"echo"}`, false)                            // missing input
+	assertValid(t, schema, `{"program":"echo","input":"hello"}`, true)                   // string program, string input
+	assertValid(t, schema, `{"program":"weather","input":{"city":"paris"}}`, true)       // object program, object input
+	assertValid(t, schema, `{"program":"echo","input":{"city":"paris"}}`, false)         // wrong input type for the program
+	assertValid(t, schema, `{"program":"weather","input":"paris"}`, false)               // wrong input type for the program
+	assertValid(t, schema, `{"program":"nope","input":"x"}`, false)                      // unlisted program
+	assertValid(t, schema, `{"program":"echo"}`, false)                                  // missing input
 	assertValid(t, schema, `{"program":"echo","input":"hi","system_prompt":"x"}`, false) // no sidecar fields
 }
 

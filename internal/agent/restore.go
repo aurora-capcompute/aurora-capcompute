@@ -56,6 +56,11 @@ func (r *Runtime) restoreSession(proj Projection, journals map[string]map[uint64
 		activeProcessID: stored.ActiveProcessID,
 		tags:            cloneTags(stored.Tags),
 	}
+	// A process-less session has no derived title; give it the same placeholder
+	// the live runtime assigns at creation so its title survives a restart.
+	if session.title == "" {
+		session.title = defaultSessionTitle
+	}
 	r.sessions[session.id] = session
 
 	procs := make([]StoredProcess, 0, len(proj.Processes))

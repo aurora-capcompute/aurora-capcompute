@@ -40,10 +40,15 @@ func (r *Runtime) storedSessionLocked(session *sessionState) StoredSession {
 	}
 }
 
+// defaultSessionTitle is the placeholder headline a session carries until one of
+// its processes supplies one. It is applied identically on creation and on
+// restore so a process-less named session round-trips to the same title.
+const defaultSessionTitle = "New session"
+
 func sessionTitle(input string) string {
 	fields := strings.Fields(input)
 	if len(fields) == 0 {
-		return "New session"
+		return defaultSessionTitle
 	}
 	title := strings.Join(fields, " ")
 	runes := []rune(title)

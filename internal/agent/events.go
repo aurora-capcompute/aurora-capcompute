@@ -97,9 +97,10 @@ type Projection struct {
 }
 
 // Fold reconstructs a session's durable projection from its event stream. Events
-// must be in append order (ascending Seq). Session state is derived from the process
-// projection rather than stored in a dedicated event; folding is
-// last-writer-wins per id.
+// must be in append order (ascending Seq). A session.state event carries the
+// session's explicit identity (id, name, tags, creation time); its title and
+// active process are derived from the process projection and merged over it.
+// Folding is last-writer-wins per id.
 func Fold(events []eventlog.Event) (Projection, error) {
 	proj := Projection{
 		Processes: make(map[string]StoredProcess),
@@ -157,13 +158,14 @@ func Fold(events []eventlog.Event) (Projection, error) {
 	return proj, nil
 }
 
-// deriveStoredSession reconstructs session metadata from the process projection.
-// Session state is not stored in a separate event; instead it is derived:
-// - identity (ID, TenantID) and Tags come from the earliest process
-// - Title is the first process's message truncated to 60 runes
-// - CreatedAt is the earliest process's CreatedAt
-// - UpdatedAt is the latest process's UpdatedAt
-// - ActiveProcessID is the ID of the one process (if any) that is not in a terminal state
+// deriveStoredSession reconstructs the process-projection half of session
+// metadata; Fold merges the authoritative session.state event over it. It derives:
+//   - identity (ID, TenantID) and Tags from the earliest process — the fallback
+//     for pre-session.state streams that carry no session event
+//   - Title from the first process's input, truncated to 60 runes
+//   - CreatedAt is the earliest process's CreatedAt
+//   - UpdatedAt is the latest process's UpdatedAt
+//   - ActiveProcessID is the ID of the one process (if any) that is not in a terminal state
 func deriveStoredSession(processes map[string]StoredProcess) StoredSession {
 	if len(processes) == 0 {
 		return StoredSession{}

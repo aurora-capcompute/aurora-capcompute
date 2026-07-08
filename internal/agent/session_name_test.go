@@ -80,4 +80,9 @@ func TestSessionNamePersistsAcrossRestart(t *testing.T) {
 	if restored.Name != "renamed" {
 		t.Fatalf("restored name = %q, want the last rename to survive", restored.Name)
 	}
+	// A process-less session has no derived title, but must round-trip to the
+	// same placeholder the live runtime assigns at creation — not an empty string.
+	if restored.Title != defaultSessionTitle {
+		t.Fatalf("restored title = %q, want %q to survive restart", restored.Title, defaultSessionTitle)
+	}
 }

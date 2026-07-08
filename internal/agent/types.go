@@ -248,7 +248,7 @@ type agentInput struct {
 }
 
 type SessionSummary struct {
-	ID              string            `json:"id"`
+	ID string `json:"id"`
 	// Name is the session's explicit, human-readable handle (set at creation,
 	// renamable). Empty when the session was created without one — its id is
 	// then the handle. Unique per tenant when set.

@@ -49,7 +49,9 @@ func (s SpawnSettings) shareHistory() bool { return s.History == nil || *s.Histo
 
 // shareCapabilities reports whether a spawned child's capability menu is
 // advertised on its sys.input (the default when unset).
-func (s SpawnSettings) shareCapabilities() bool { return s.ShareCapabilities == nil || *s.ShareCapabilities }
+func (s SpawnSettings) shareCapabilities() bool {
+	return s.ShareCapabilities == nil || *s.ShareCapabilities
+}
 
 // Manifest is one process node: Program names it and Syscalls is its grant
 // set. A spawnable child inside a sys.spawn grant is itself a Manifest — the
