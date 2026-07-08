@@ -3,7 +3,8 @@ package aurora
 import "context"
 
 type Runtime interface {
-	CreateSession(tags map[string]string) (SessionSnapshot, error)
+	CreateSession(name string, tags map[string]string) (SessionSnapshot, error)
+	RenameSession(sessionID string, name string) (SessionSnapshot, error)
 	ListSessions() []SessionSummary
 	Programs() []ProgramArtifact
 	SetPrograms(ctx context.Context, programs []ProgramSource) error

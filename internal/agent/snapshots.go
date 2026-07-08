@@ -18,12 +18,25 @@ import (
 func (r *Runtime) sessionSummaryLocked(session *sessionState) SessionSummary {
 	return SessionSummary{
 		ID:              session.id,
+		Name:            session.name,
 		Title:           session.title,
 		CreatedAt:       session.createdAt,
 		UpdatedAt:       session.updatedAt,
 		ProcessCount:    len(session.processIDs),
 		ActiveProcessID: session.activeProcessID,
 		Tags:            cloneTags(session.tags),
+	}
+}
+
+// storedSessionLocked builds the durable identity a session.state event carries.
+func (r *Runtime) storedSessionLocked(session *sessionState) StoredSession {
+	return StoredSession{
+		TenantID:  r.tenantID,
+		ID:        session.id,
+		Name:      session.name,
+		CreatedAt: session.createdAt,
+		UpdatedAt: session.updatedAt,
+		Tags:      cloneTags(session.tags),
 	}
 }
 

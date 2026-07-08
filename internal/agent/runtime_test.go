@@ -190,7 +190,7 @@ func TestRuntimePassesManifestToDispatcherProvider(t *testing.T) {
 			t.Errorf("close runtime: %v", err)
 		}
 	})
-	session, err := runtime.CreateSession(nil)
+	session, err := runtime.CreateSession("", nil)
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -255,7 +255,7 @@ func TestRuntimeSetProgramsLifecycle(t *testing.T) {
 	if len(runtime.Programs()) != 0 {
 		t.Fatalf("expected no programs at boot, got %v", runtime.Programs())
 	}
-	emptyTh, err := runtime.CreateSession(nil)
+	emptyTh, err := runtime.CreateSession("", nil)
 	if err != nil {
 		t.Fatalf("create session (no programs): %v", err)
 	}
@@ -272,7 +272,7 @@ func TestRuntimeSetProgramsLifecycle(t *testing.T) {
 	}
 
 	// A run now dispatches through the freshly registered program.
-	session, err := runtime.CreateSession(nil)
+	session, err := runtime.CreateSession("", nil)
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -329,7 +329,7 @@ func TestProcessImmutablyBoundToProgramBytes(t *testing.T) {
 	}
 
 	// The new bytes run in a new process.
-	session, err := runtime.CreateSession(nil)
+	session, err := runtime.CreateSession("", nil)
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -637,7 +637,7 @@ func TestRuntimeCascadeResumeReusesChildRun(t *testing.T) {
 		}
 	})
 
-	session, err := runtime.CreateSession(nil)
+	session, err := runtime.CreateSession("", nil)
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -771,7 +771,7 @@ func TestRuntimeApprovalCycle(t *testing.T) {
 		}
 	})
 
-	session, err := runtime.CreateSession(nil)
+	session, err := runtime.CreateSession("", nil)
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -883,7 +883,7 @@ func TestRuntimeHardSpawnFailsParentOnChildFailure(t *testing.T) {
 		}
 	})
 
-	session, err := runtime.CreateSession(nil)
+	session, err := runtime.CreateSession("", nil)
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -1104,7 +1104,7 @@ func TestRuntimeCascadeResumeUsesResumeModeForFailedChild(t *testing.T) {
 		}
 	})
 
-	session, err := runtime.CreateSession(nil)
+	session, err := runtime.CreateSession("", nil)
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -1173,7 +1173,7 @@ func TestRuntimeHardRetryForksFromBeginning(t *testing.T) {
 		}
 	})
 
-	session, err := runtime.CreateSession(nil)
+	session, err := runtime.CreateSession("", nil)
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -1441,7 +1441,7 @@ func newCompensationRuntime(t *testing.T, disp *compensationDispatcher) *Runtime
 
 func startCompensationProcess(t *testing.T, runtime *Runtime) ProcessSnapshot {
 	t.Helper()
-	session, err := runtime.CreateSession(nil)
+	session, err := runtime.CreateSession("", nil)
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}

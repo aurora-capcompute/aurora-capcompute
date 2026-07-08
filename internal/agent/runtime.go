@@ -390,21 +390,73 @@ func (r *Runtime) SetPrograms(ctx context.Context, sources []ProgramSource) erro
 	return nil
 }
 
-func (r *Runtime) CreateSession(tags map[string]string) (SessionSnapshot, error) {
+// CreateSession opens a session under the tenant. An explicit name is the
+// session's handle (unique per tenant; empty means unnamed — its id is then the
+// handle). The session's identity is persisted immediately as a session.state
+// event, so a named session survives a restart even before it runs anything.
+func (r *Runtime) CreateSession(name string, tags map[string]string) (SessionSnapshot, error) {
+	name = strings.TrimSpace(name)
 	id, err := r.idSource("ses_")
 	if err != nil {
 		return SessionSnapshot{}, err
 	}
 	now := r.now().UTC()
-	session := &sessionState{id: id, title: "New session", createdAt: now, updatedAt: now, tags: cloneTags(tags)}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
 		return SessionSnapshot{}, fmt.Errorf("%w: runtime is closed", ErrConflict)
 	}
+	if err := r.checkSessionNameFreeLocked(name, ""); err != nil {
+		return SessionSnapshot{}, err
+	}
+	session := &sessionState{id: id, name: name, title: "New session", createdAt: now, updatedAt: now, tags: cloneTags(tags)}
 	r.sessions[id] = session
+	if err := r.appendSession(session); err != nil {
+		delete(r.sessions, id)
+		return SessionSnapshot{}, err
+	}
 	return r.sessionSnapshotLocked(session), nil
+}
+
+// RenameSession changes a session's explicit handle. The new name must be free
+// within the tenant; empty clears it (the id becomes the handle again).
+func (r *Runtime) RenameSession(sessionID, name string) (SessionSnapshot, error) {
+	name = strings.TrimSpace(name)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return SessionSnapshot{}, fmt.Errorf("%w: runtime is closed", ErrConflict)
+	}
+	session := r.sessions[sessionID]
+	if session == nil {
+		return SessionSnapshot{}, fmt.Errorf("%w: session %s", ErrNotFound, sessionID)
+	}
+	if err := r.checkSessionNameFreeLocked(name, sessionID); err != nil {
+		return SessionSnapshot{}, err
+	}
+	previous := session.name
+	session.name = name
+	session.updatedAt = r.now().UTC()
+	if err := r.appendSession(session); err != nil {
+		session.name = previous
+		return SessionSnapshot{}, err
+	}
+	return r.sessionSnapshotLocked(session), nil
+}
+
+// checkSessionNameFreeLocked rejects a name already held by another session of
+// the tenant. An empty name is always free (unnamed sessions coexist).
+func (r *Runtime) checkSessionNameFreeLocked(name, exceptID string) error {
+	if name == "" {
+		return nil
+	}
+	for id, session := range r.sessions {
+		if id != exceptID && session.name == name {
+			return fmt.Errorf("%w: a session named %q already exists", ErrConflict, name)
+		}
+	}
+	return nil
 }
 
 func (r *Runtime) ListSessions() []SessionSummary {

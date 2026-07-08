@@ -120,6 +120,7 @@ type Runtime struct {
 
 type sessionState struct {
 	id              string
+	name            string
 	title           string
 	createdAt       time.Time
 	updatedAt       time.Time
@@ -248,6 +249,10 @@ type agentInput struct {
 
 type SessionSummary struct {
 	ID              string            `json:"id"`
+	// Name is the session's explicit, human-readable handle (set at creation,
+	// renamable). Empty when the session was created without one — its id is
+	// then the handle. Unique per tenant when set.
+	Name            string            `json:"name,omitempty"`
 	Title           string            `json:"title"`
 	CreatedAt       time.Time         `json:"created_at"`
 	UpdatedAt       time.Time         `json:"updated_at"`

@@ -13,11 +13,14 @@ import (
 
 // Domain event kinds appended to a session's eventlog stream. Lifecycle payloads
 // are state-carried: a process event holds the process's full durable state at that
-// point, so folding is last-writer-wins per id. Session state is derived from
-// the process projection (no separate session event). Task events are semantic
-// (created / resolved / executed). Capability-journal events (syscall.recorded,
-// journal.header) are defined alongside the journal view.
+// point, so folding is last-writer-wins per id. A session.state event carries the
+// session's explicit identity — its name (renamable, hence a first-class event
+// rather than derived), tags, and creation time; the rest of a session's summary
+// (title, active process) is still derived from the process projection. Task
+// events are semantic (created / resolved / executed). Capability-journal events
+// (syscall.recorded, journal.header) are defined alongside the journal view.
 const (
+	evSessionState = "session.state"
 	evProcessState = "process.state"
 	evTaskCreated  = "task.created"
 	evTaskResolved = "task.resolved"
@@ -38,6 +41,12 @@ type taskExecutedData struct {
 
 func processStateEvent(now time.Time, r StoredProcess) (eventlog.Event, error) {
 	return encodeEvent(evProcessState, r.ID, r.Revision, now, r)
+}
+
+// sessionStateEvent records a session's explicit identity (name, tags, creation
+// time). It is not tied to a process, so it carries no proc/rev.
+func sessionStateEvent(now time.Time, s StoredSession) (eventlog.Event, error) {
+	return encodeEvent(evSessionState, "", 0, now, s)
 }
 
 func taskCreatedEvent(now time.Time, record task.Record) (eventlog.Event, error) {
@@ -96,8 +105,15 @@ func Fold(events []eventlog.Event) (Projection, error) {
 		Processes: make(map[string]StoredProcess),
 		Tasks:     make(map[string]task.Record),
 	}
+	var sessionEvent *StoredSession
 	for _, ev := range events {
 		switch ev.Kind {
+		case evSessionState:
+			var s StoredSession
+			if err := json.Unmarshal(ev.Data, &s); err != nil {
+				return Projection{}, fmt.Errorf("decode session.state: %w", err)
+			}
+			sessionEvent = &s
 		case evProcessState:
 			var r StoredProcess
 			if err := json.Unmarshal(ev.Data, &r); err != nil {
@@ -125,6 +141,19 @@ func Fold(events []eventlog.Event) (Projection, error) {
 		// (foldJournals); any other kind is skipped.
 	}
 	proj.Session = deriveStoredSession(proj.Processes)
+	if sessionEvent != nil {
+		// The session.state event is authoritative for the session's explicit
+		// identity — id, name, tags, creation time — while the title and active
+		// process stay derived from the process projection. This is what lets a
+		// named session with no processes persist, and a rename survive a restart.
+		merged := *sessionEvent
+		merged.Title = proj.Session.Title
+		merged.ActiveProcessID = proj.Session.ActiveProcessID
+		if proj.Session.UpdatedAt.After(merged.UpdatedAt) {
+			merged.UpdatedAt = proj.Session.UpdatedAt
+		}
+		proj.Session = merged
+	}
 	return proj, nil
 }
 

@@ -360,6 +360,15 @@ func (r *Runtime) appendProcess(proc *processState) error {
 	return err
 }
 
+func (r *Runtime) appendSession(session *sessionState) error {
+	ev, err := sessionStateEvent(r.now().UTC(), r.storedSessionLocked(session))
+	if err != nil {
+		return err
+	}
+	_, err = r.log.Append(context.Background(), r.scope(session.id), ev)
+	return err
+}
+
 func (r *Runtime) newJournal(proc *processState, history *processHistory, forkOffset int) *logJournal {
 	return newLogJournal(r.log, r.scope(proc.sessionID), proc.id, proc.revision,
 		history, forkOffset, r.journalNow, r.journalAppendPublisher(proc.sessionID))

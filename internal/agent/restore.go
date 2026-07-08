@@ -49,6 +49,7 @@ func (r *Runtime) restoreSession(proj Projection, journals map[string]map[uint64
 	}
 	session := &sessionState{
 		id:              stored.ID,
+		name:            stored.Name,
 		title:           stored.Title,
 		createdAt:       stored.CreatedAt,
 		updatedAt:       stored.UpdatedAt,

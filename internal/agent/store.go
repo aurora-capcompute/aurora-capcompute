@@ -12,6 +12,9 @@ const DefaultTenantID = "local"
 type StoredSession struct {
 	TenantID        string
 	ID              string
+	// Name is the session's explicit, renamable handle (empty if unnamed). It is
+	// carried by session.state events, not derived from the process projection.
+	Name            string
 	Title           string
 	CreatedAt       time.Time
 	UpdatedAt       time.Time

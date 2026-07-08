@@ -235,7 +235,7 @@ func runRollbackFlow(t *testing.T, crashAt int, failMidSection bool) matrixOutco
 	// Life 1: run until the crash stops the world or the task completes.
 	first := newMatrixRuntime(t, world, disp)
 	var processID string
-	if session, err := first.CreateSession(nil); err == nil {
+	if session, err := first.CreateSession("", nil); err == nil {
 		if proc, err := first.CreateProcess(session.ID, "place the order", Manifest{
 			Version:  ManifestVersion,
 			Program:  "program@1",
