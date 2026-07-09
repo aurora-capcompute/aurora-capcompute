@@ -196,9 +196,10 @@ func TestRuntimePassesManifestToDispatcherProvider(t *testing.T) {
 	}
 	proc, err := runtime.CreateProcess(session.ID, "finish", Manifest{
 		Version: ManifestVersion,
-		Syscalls: []Syscall{{
-			Syscall: "core.custom", Config: json.RawMessage(`{"value":2}`),
-		}},
+		Syscalls: []Syscall{
+			{Syscall: "core.custom", Config: json.RawMessage(`{"value":2}`)},
+			{Syscall: "core.openaiApi", Hidden: true},
+		},
 	})
 	if err != nil {
 		t.Fatalf("create run: %v", err)
@@ -278,7 +279,7 @@ func TestRuntimeSetProgramsLifecycle(t *testing.T) {
 	}
 	proc, err := runtime.CreateProcess(session.ID, "finish", Manifest{
 		Version:  ManifestVersion,
-		Syscalls: []Syscall{{Syscall: "core.custom", Config: json.RawMessage(`{"value":1}`)}},
+		Syscalls: cognitionGrants(),
 	})
 	if err != nil {
 		t.Fatalf("create run: %v", err)
@@ -334,8 +335,9 @@ func TestProcessImmutablyBoundToProgramBytes(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 	fresh, err := runtime.CreateProcess(session.ID, "hello from the new program", Manifest{
-		Version: ManifestVersion,
-		Program: "program@1",
+		Version:  ManifestVersion,
+		Program:  "program@1",
+		Syscalls: cognitionGrants("billing.charge", "billing.refund", "shipping.book", "inventory.sync"),
 	})
 	if err != nil {
 		t.Fatalf("create process: %v", err)
@@ -644,7 +646,10 @@ func TestRuntimeCascadeResumeReusesChildRun(t *testing.T) {
 	proc, err := runtime.CreateProcess(session.ID, "parent task", Manifest{
 		Version:  ManifestVersion,
 		Program:  "program@1",
-		Syscalls: []Syscall{{Syscall: SpawnSyscall, Programs: []Manifest{{Program: "program@1"}}}},
+		Syscalls: []Syscall{
+			{Syscall: SpawnSyscall, Programs: []Manifest{{Program: "program@1", Syscalls: cognitionGrants()}}},
+			{Syscall: "core.openaiApi", Hidden: true},
+		},
 	})
 	if err != nil {
 		t.Fatalf("create run: %v", err)
@@ -778,7 +783,7 @@ func TestRuntimeApprovalCycle(t *testing.T) {
 	proc, err := runtime.CreateProcess(session.ID, "do the guarded thing", Manifest{
 		Version:  ManifestVersion,
 		Program:  "program@1",
-		Syscalls: []Syscall{{Syscall: "core.custom"}},
+		Syscalls: cognitionGrants("tool.y"),
 	})
 	if err != nil {
 		t.Fatalf("create run: %v", err)
@@ -890,10 +895,10 @@ func TestRuntimeHardSpawnFailsParentOnChildFailure(t *testing.T) {
 	proc, err := runtime.CreateProcess(session.ID, "parent task", Manifest{
 		Version: ManifestVersion,
 		Program: "program@1",
-		Syscalls: []Syscall{{
-			Syscall:  SpawnSyscall,
-			Programs: []Manifest{{Program: "program@1"}},
-		}},
+		Syscalls: []Syscall{
+			{Syscall: SpawnSyscall, Programs: []Manifest{{Program: "program@1", Syscalls: cognitionGrants()}}},
+			{Syscall: "core.openaiApi", Hidden: true},
+		},
 	})
 	if err != nil {
 		t.Fatalf("create run: %v", err)
@@ -1111,13 +1116,14 @@ func TestRuntimeCascadeResumeUsesResumeModeForFailedChild(t *testing.T) {
 	proc, err := runtime.CreateProcess(session.ID, "parent task", Manifest{
 		Version: ManifestVersion,
 		Program: "program@1",
-		Syscalls: []Syscall{{
-			Syscall: SpawnSyscall,
-			Programs: []Manifest{{
+		Syscalls: []Syscall{
+			{Syscall: SpawnSyscall, Programs: []Manifest{{
 				Program:  "program@1",
-				Syscalls: []Syscall{{Syscall: "core.custom"}},
-			}},
-		}},
+				Syscalls: cognitionGrants("tool.x"),
+			}}},
+			{Syscall: "core.openaiApi", Hidden: true},
+			{Syscall: "tool.x"},
+		},
 	})
 	if err != nil {
 		t.Fatalf("create run: %v", err)
@@ -1180,7 +1186,7 @@ func TestRuntimeHardRetryForksFromBeginning(t *testing.T) {
 	proc, err := runtime.CreateProcess(session.ID, "task", Manifest{
 		Version:  ManifestVersion,
 		Program:  "program@1",
-		Syscalls: []Syscall{{Syscall: "core.custom"}},
+		Syscalls: cognitionGrants("tool.x"),
 	})
 	if err != nil {
 		t.Fatalf("create run: %v", err)
@@ -1448,7 +1454,7 @@ func startCompensationProcess(t *testing.T, runtime *Runtime) ProcessSnapshot {
 	proc, err := runtime.CreateProcess(session.ID, "place the order", Manifest{
 		Version:  ManifestVersion,
 		Program:  "program@1",
-		Syscalls: []Syscall{{Syscall: "core.custom"}},
+		Syscalls: cognitionGrants("billing.charge", "billing.refund", "shipping.book", "inventory.sync"),
 	})
 	if err != nil {
 		t.Fatalf("create process: %v", err)

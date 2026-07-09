@@ -12,6 +12,11 @@ import (
 
 const ManifestVersion = 4
 
+// reservedSyscallPrefix namespaces the kernel/runtime syscalls. A manifest may
+// grant only the runtime-served members in it (sys.spawn, sys.timer); any other
+// sys.* leaf grant is refused so a driver cannot shadow a protocol call.
+const reservedSyscallPrefix = "sys."
+
 // The runtime-served syscalls a manifest may grant. Both live in the sys
 // namespace because they are the runtime's own, not leaf I/O drivers:
 // SpawnSyscall's grant carries Programs — the manifests of the only programs
@@ -229,6 +234,16 @@ func validateSyscalls(syscalls []Syscall, provider DispatcherProvider) error {
 		grant.Syscall = strings.TrimSpace(grant.Syscall)
 		if grant.Syscall == "" {
 			return fmt.Errorf("%w: grant %d: a syscall is required", ErrInvalid, i)
+		}
+		// The sys.* namespace belongs to the kernel and the runtime. A manifest
+		// may grant only its two runtime-served members (sys.spawn, sys.timer);
+		// every other sys.* name is a reserved protocol call (sys.input/output/
+		// log/now/random/compensate/abort/declassify/begin/commit). Granting one
+		// as a leaf would hand it to a driver, which could then shadow the
+		// runtime's own protocol capability — so it is refused up front, the way
+		// the reserved "syscall:" label namespace is (sys.NormalizeLabels).
+		if strings.HasPrefix(grant.Syscall, reservedSyscallPrefix) && !grant.runtimeServed() {
+			return fmt.Errorf("%w: syscall %q is in the reserved %q namespace and may not be granted", ErrInvalid, grant.Syscall, reservedSyscallPrefix)
 		}
 		if grant.isSpawn() {
 			if len(grant.Programs) == 0 {

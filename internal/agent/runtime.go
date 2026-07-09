@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -70,6 +71,40 @@ func resolveGuestLimits(memoryPages int, timeout time.Duration) (uint32, time.Du
 		quantum = timeout
 	}
 	return pages, quantum
+}
+
+// reconcileGrants fails closed when the dispatcher provider advertises a
+// capability the manifest did not grant. The grant set the kernel Validator
+// enforces is the assembled chain's advertised capabilities (Stack.Grants, wired
+// in the host factory to the chain's own Capabilities()), so a provider that
+// publishes more than the manifest declared would silently widen a process's
+// authority beyond its manifest — the confused-deputy gap. Reconciling the
+// provider's leaf output against the manifest here makes the manifest the
+// enforced source of truth rather than a trusted input.
+//
+// Only the provider's own leaf capabilities are checked: the runtime layers its
+// protocol capabilities (sys.input/output/log/compensate/abort/now/random and
+// the manifest-gated sys.spawn/sys.timer) on top afterwards, so they never
+// appear in `advertised` and need no exception here. Under-advertising (a leaf
+// grant the provider chose not to serve) is not a leak — the guest simply cannot
+// call it — so only over-advertising fails the check.
+func reconcileGrants(advertised []sys.Capability, manifest Manifest) error {
+	granted := make(map[string]struct{}, len(manifest.Syscalls))
+	for _, leaf := range manifest.LeafSyscalls() {
+		granted[leaf.Syscall] = struct{}{}
+	}
+	var leaked []string
+	for _, capability := range advertised {
+		if _, ok := granted[capability.Name]; !ok {
+			leaked = append(leaked, capability.Name)
+		}
+	}
+	if len(leaked) > 0 {
+		sort.Strings(leaked)
+		return fmt.Errorf("%w: dispatcher provider advertises capabilities the manifest did not grant: %s",
+			ErrInvalid, strings.Join(leaked, ", "))
+	}
+	return nil
 }
 
 func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
@@ -220,6 +255,9 @@ func (r *Runtime) processDrivers(resolveCtx context.Context, cred ProcessContext
 	}
 	base, err := r.dispatchers.NewDispatcher(resolveCtx, cred, manifest)
 	if err != nil {
+		return nil, err
+	}
+	if err := reconcileGrants(base.Capabilities(), manifest); err != nil {
 		return nil, err
 	}
 	if grant, ok := manifest.grant(TimerSyscall); ok {

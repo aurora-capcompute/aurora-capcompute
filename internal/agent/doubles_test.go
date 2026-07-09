@@ -21,6 +21,21 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
 )
 
+// cognitionGrants are the leaf grants a fake-provider process needs so the
+// reconciliation guard (which makes the manifest authoritative over the chain's
+// advertised capabilities) admits its chain. Every fake provider in these tests
+// advertises the agent's own cognition tool — core.openaiApi, hidden, the tool
+// the guest calls to think — and some also advertise domain tools; the manifest
+// must grant that advertised set, exactly as a real assembly does. `extra` names
+// the domain tools a given fake also advertises.
+func cognitionGrants(extra ...string) []Syscall {
+	grants := []Syscall{{Syscall: "core.openaiApi", Hidden: true}}
+	for _, name := range extra {
+		grants = append(grants, Syscall{Syscall: name})
+	}
+	return grants
+}
+
 // memLog is an in-memory eventlog.Log.
 type memLog struct {
 	mu      sync.RWMutex
