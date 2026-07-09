@@ -87,6 +87,20 @@ type Config struct {
 	MaxAbortRetries int
 	// QuotaOf reports a tenant's scheduling quota. Nil means unlimited.
 	QuotaOf func(tenant string) sched.Quota
+
+	// ProcessMemoryPages caps each guest process's linear memory in 64 KiB wasm
+	// pages (0 = a default of 4096 = 256 MiB). A guest that allocates past the
+	// cap traps and its quantum fails, so a runaway allocation cannot exhaust
+	// host memory. Set a negative value to disable the cap (unbounded — a guest
+	// may then grow to the wasm 4 GiB ceiling; not recommended in production).
+	ProcessMemoryPages int
+	// ResumeQuantumTimeout bounds one guest quantum's wall-clock time (0 = a
+	// default of 2 minutes). A guest still running at the deadline is stopped,
+	// so an infinite loop cannot hold a scheduler slot forever. Syscalls that
+	// wait on the outside world yield (they do not spin), so this bounds only a
+	// guest's own uninterrupted compute between yields; a stopped quantum
+	// re-drives deterministically by replay. Set a negative value to disable it.
+	ResumeQuantumTimeout time.Duration
 }
 
 type Runtime struct {
@@ -112,6 +126,8 @@ type Runtime struct {
 	instanceID      string
 	leaseTTL        time.Duration
 	maxAbortRetries int
+	memoryPages     uint32
+	resumeTimeout   time.Duration
 	dispatchers     DispatcherProvider
 	factory         internalhost.Factory[string, ProcessContext]
 	wg              sync.WaitGroup
