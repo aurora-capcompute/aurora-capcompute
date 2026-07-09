@@ -43,12 +43,14 @@ assembly is [aurora-dist](https://github.com/aurora-capcompute/aurora-dist).
               │  HTTP /v1
          aurora-dist                         ← the server (one binary you run)
               │  assembled from…
-   ┌──────────┼─────────────────────┐
- aurora-       aurora-dispatchers     capcompute
- capcompute    (capability drivers)   (the kernel)
+   ┌──────────┴──────────┐
+ aurora-capcompute    aurora-dispatchers     ← orchestration runtime + capability drivers
  ◀ YOU ARE HERE
-              │
-        aurora-brains                        ← the Wasm agent "programs" that run inside
+   └──────────┬──────────┘
+              │  both built on
+         capcompute                          ← the kernel (the foundation)
+
+   aurora-brains  →  the Wasm agent "programs" that run inside
 ```
 
 - **[capcompute](https://github.com/aurora-capcompute/capcompute)** — the kernel
