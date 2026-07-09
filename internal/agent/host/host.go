@@ -14,6 +14,7 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"io"
 	"time"
 
@@ -68,6 +69,15 @@ func (f Factory[ID, K]) NewDispatcher(ctx context.Context, cred K) (sys.Dispatch
 	journal, err := f.NewJournal(ctx, cred)
 	if err != nil {
 		return nil, err
+	}
+	// Tamper-evidence, enforced. The journal's hash chain is the audit trail's
+	// integrity guarantee; verifying it here — before any record is served to
+	// replay — turns "tamper-evident" from an available check into a fail-closed
+	// one: a journal whose chain does not verify (a compromised or buggy durable
+	// store rewrote a record) is refused rather than replayed as truth. Replay
+	// already walks the whole journal, so this is the same order of work.
+	if err := journaled.Verify(journal); err != nil {
+		return nil, fmt.Errorf("journal integrity check failed: %w", err)
 	}
 	tape, err := journaled.NewTape(journal, f.Header(cred))
 	if err != nil {
