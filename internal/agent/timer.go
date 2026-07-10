@@ -62,10 +62,14 @@ func (t *timerDispatcher) Dispatch(ctx context.Context, cred ProcessContext, sys
 	if request.DurationSeconds <= 0 {
 		return sys.FailCode(sys.ErrnoInvalidArgs, "duration_seconds must be positive"), nil
 	}
-	duration := time.Duration(request.DurationSeconds) * time.Second
-	if duration > t.maxDuration {
-		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("duration_seconds must be at most %d", int64(t.maxDuration/time.Second))), nil
+	// Bound the seconds BEFORE converting to a Duration: DurationSeconds is an
+	// int64 and `* time.Second` (1e9) overflows to a negative Duration past ~9.2e9
+	// seconds, which would then slip past a post-conversion `> maxDuration` check.
+	maxSeconds := int64(t.maxDuration / time.Second)
+	if request.DurationSeconds > maxSeconds {
+		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("duration_seconds must be at most %d", maxSeconds)), nil
 	}
+	duration := time.Duration(request.DurationSeconds) * time.Second
 	if request.Label != "" {
 		return sys.Yield(fmt.Sprintf("Timer for %s: %s", duration, request.Label)), nil
 	}

@@ -7,9 +7,17 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/aurora-capcompute/capcompute/sys"
 )
+
+// childCompletionPollInterval is how often waitForCompletion re-polls
+// authoritative process state as a backstop against a dropped completion event.
+// The event path handles the common case immediately; this only bounds the
+// worst-case latency when the (lossy) event bus drops the child's terminal
+// notification, so it must never hang a synchronous delegation.
+const childCompletionPollInterval = 250 * time.Millisecond
 
 // spawnRouter serves the spawn syscall. The manifest's core.spawn grant
 // lists the only programs this process may spawn — each a full manifest of
@@ -412,7 +420,21 @@ func (r *Runtime) createChildProcess(parentProcessID string, sessionID string, i
 		}
 		parent.childProcessIDs = append(parent.childProcessIDs, processID)
 		parent.childSpawnOffsets = append(parent.childSpawnOffsets, spawnOffset)
-		_ = r.appendProcess(parent)
+		if err := r.appendProcess(parent); err != nil {
+			// The parent→child link is only durable here. If it can't be persisted,
+			// fail the spawn and undo the in-memory bookkeeping (parent link + child
+			// registration), so the in-memory view matches the parent's durable
+			// state — otherwise a restart rebuilds the parent without this child
+			// (from its stored field) while the child claims the parent, orphaning
+			// it or duplicating it on a cascade re-spawn.
+			parent.childProcessIDs = parent.childProcessIDs[:len(parent.childProcessIDs)-1]
+			parent.childSpawnOffsets = parent.childSpawnOffsets[:len(parent.childSpawnOffsets)-1]
+			delete(r.processes, processID)
+			session.processIDs = session.processIDs[:len(session.processIDs)-1]
+			session.activeProcessID = prevActiveProcessID
+			r.mu.Unlock()
+			return ProcessSnapshot{}, err
+		}
 	}
 	snapshot := r.processSnapshotLocked(proc)
 	r.mu.Unlock()
@@ -435,20 +457,42 @@ func (r *Runtime) waitForCompletion(ctx context.Context, processID, sessionID st
 	}
 	defer unsubscribe()
 
-	if snapshot, err := r.GetProcess(processID); err == nil {
-		if ans, childLabels, done, procErr := childTerminal(snapshot); done {
-			return ans, childLabels, false, procErr
+	// settled polls authoritative process state; the event channel below is a
+	// low-latency notification, but it is lossy (publish drops on a full buffer),
+	// so this is also the backstop that a ticker drives — a dropped terminal/park
+	// event must never hang the wait forever.
+	settled := func() (answer string, labels []string, parked, done bool, err error) {
+		snapshot, gerr := r.GetProcess(processID)
+		if gerr != nil {
+			return "", nil, false, false, nil
+		}
+		if ans, childLabels, terminal, procErr := childTerminal(snapshot); terminal {
+			return ans, childLabels, false, true, procErr
 		}
 		if childParked(snapshot) {
-			return "", nil, true, nil
+			return "", nil, true, true, nil
 		}
+		return "", nil, false, false, nil
 	}
+
+	if ans, childLabels, parked, done, procErr := settled(); done {
+		return ans, childLabels, parked, procErr
+	}
+
+	// Backstop cadence: the event path handles the common case with no latency;
+	// this only bounds how long a *dropped* event can delay noticing completion.
+	ticker := time.NewTicker(childCompletionPollInterval)
+	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			_, _ = r.Stop(processID)
 			return "", nil, false, ctx.Err()
+		case <-ticker.C:
+			if ans, childLabels, parked, done, procErr := settled(); done {
+				return ans, childLabels, parked, procErr
+			}
 		case event, ok := <-events:
 			if !ok {
 				return "", nil, false, fmt.Errorf("child event stream closed")

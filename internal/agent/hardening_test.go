@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/aurora-capcompute/capcompute/sys"
 	"github.com/aurora-capcompute/capcompute/sys/replay"
@@ -197,5 +199,32 @@ func TestOpenIntentPolicy(t *testing.T) {
 	}
 	if got := policy(sys.Syscall{Name: "core.read"}); got != replay.RetryOpenIntent {
 		t.Fatalf("ordinary syscall = %v, want RetryOpenIntent", got)
+	}
+}
+
+// A guest-supplied duration_seconds large enough to overflow int64 nanoseconds
+// must be rejected — not accepted via a wrapped-negative Duration slipping past
+// the max-duration bound.
+func TestTimerRejectsOverflowingDuration(t *testing.T) {
+	td := &timerDispatcher{next: nopNext{}, maxDuration: defaultMaxTimer}
+	dispatch := func(seconds int64) sys.SyscallResult {
+		t.Helper()
+		r, err := td.Dispatch(context.Background(), ProcessContext{},
+			sys.Syscall{Abi: sys.ABIVersion, Name: TimerSyscall,
+				Args: json.RawMessage(fmt.Sprintf(`{"duration_seconds":%d}`, seconds))},
+			sys.Authorization{})
+		if err != nil {
+			t.Fatalf("dispatch: %v", err)
+		}
+		return r
+	}
+	if r := dispatch(1 << 62); r.Status() != sys.StatusFailed || r.Errno() != sys.ErrnoInvalidArgs {
+		t.Fatalf("overflowing duration = %v/%v, want failed/invalid_args (bound must not be bypassed)", r.Status(), r.Errno())
+	}
+	if r := dispatch(int64(defaultMaxTimer/time.Second) + 1); r.Status() != sys.StatusFailed {
+		t.Fatalf("over-max duration = %v, want failed", r.Status())
+	}
+	if r := dispatch(60); r.Status() != sys.StatusYield {
+		t.Fatalf("a valid 60s timer = %v, want yield", r.Status())
 	}
 }

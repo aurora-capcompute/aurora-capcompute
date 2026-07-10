@@ -973,6 +973,14 @@ func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, erro
 // settlement, Stopping for a stop's rollback) is also the concurrency guard —
 // Retry and Stop refuse both. Called with r.mu held; unlocks it.
 func (r *Runtime) spawnSettleLocked(proc *processState, status ProcessStatus, settle func()) ProcessSnapshot {
+	// Don't enroll a settlement goroutine once shutdown has begun (same WaitGroup
+	// race as relaunchLocked). The open compensation intent stays on the journal,
+	// so a restart resumes the rollback — nothing is lost by deferring it.
+	if r.closed {
+		snapshot := r.processSnapshotLocked(proc)
+		r.mu.Unlock()
+		return snapshot
+	}
 	proc.status = status
 	proc.updatedAt = r.now().UTC()
 	_ = r.appendProcess(proc)
@@ -992,6 +1000,14 @@ func (r *Runtime) spawnSettleLocked(proc *processState, status ProcessStatus, se
 // attempt bumped, terminal fields cleared, its session made active, and the
 // transition appended and published. Called with r.mu held; unlocks it.
 func (r *Runtime) relaunchLocked(proc *processState) (ProcessSnapshot, error) {
+	// Refuse to enroll a new quantum once shutdown has begun: Close sets closed
+	// under r.mu then waits on r.wg, so a Retry/ResolveTask/child-finish racing
+	// Close must not wg.Add after the counter may already be draining (a reuse of
+	// the WaitGroup would panic) — mirrors CreateProcess.
+	if r.closed {
+		r.mu.Unlock()
+		return ProcessSnapshot{}, fmt.Errorf("%w: runtime is closed", ErrConflict)
+	}
 	proc.status = ProcessQueued
 	proc.attempt++
 	proc.answer = ""
@@ -1026,6 +1042,11 @@ func (r *Runtime) relaunchLocked(proc *processState) (ProcessSnapshot, error) {
 // runtime mutex held.
 func (r *Runtime) forkJournalLocked(proc *processState, forkOffset int, mode RetryMode) {
 	parent := proc.journal
+	// The outgoing revision can never run again — this fork is its abandonment —
+	// so release its taint. Otherwise the shared taint map accumulates one dead
+	// entry per abort-retry/restart fork for the runtime's lifetime; the new
+	// revision rebuilds its own taint by replaying the shared prefix's labels.
+	r.taints.ForgetProcess(processPID(proc.id, proc.revision))
 	proc.revision++
 	proc.forkOffset = forkOffset
 	proc.lastFailureLength = 0
