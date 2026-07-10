@@ -486,7 +486,14 @@ func (r *Runtime) settleRollback(processID string) {
 		}
 	}
 
-	ctx := context.Background()
+	// Derive from the runtime lifecycle context so Close can interrupt an
+	// in-flight compensation (a driver call that could otherwise run to its own
+	// timeout); a cancelled compensation leaves its intent open for a restart to
+	// resume. Fall back to Background for a runtime built without NewRuntime.
+	ctx := r.baseCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	drivers, err := r.processDrivers(ctx, cred)
 	if err != nil {
 		fail(err)

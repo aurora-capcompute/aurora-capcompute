@@ -355,6 +355,20 @@ func (r *Runtime) journalAppendPublisher(sessionID string) func(string, uint64, 
 }
 
 // appendProcess records a process's current state to its session's event stream.
+//
+// CONTRACT: this runs while r.mu (the single lock guarding all session/process
+// maps) is held, and callers check its error to roll a partial mutation back —
+// so the append stays synchronous and under the lock by design. The injected
+// eventlog.Log.Append MUST therefore be non-blocking/local (an in-memory or fast
+// local sink): a log that blocks on remote I/O would stall every concurrent
+// reader and state transition for that duration. Moving the append off-lock is
+// not a safe local change — it would either reorder same-entity events in the
+// restore fold or force appends to become asynchronous (losing the
+// synchronous-failure rollback callers depend on); an async ordered-append
+// pipeline is the proper redesign if a blocking log is ever required. The
+// context is non-cancellable on purpose: a metadata append must complete on
+// shutdown to persist final state (unlike rollback compensations, which derive
+// from the cancellable baseCtx).
 func (r *Runtime) appendProcess(proc *processState) error {
 	ev, err := processStateEvent(r.now().UTC(), r.storedProcessLocked(proc))
 	if err != nil {

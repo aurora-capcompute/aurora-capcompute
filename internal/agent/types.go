@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -120,7 +121,13 @@ type Config struct {
 }
 
 type Runtime struct {
-	mu              sync.Mutex
+	mu sync.Mutex
+	// baseCtx is cancelled by Close; long-running background work (rollback
+	// compensations) derives from it so shutdown can interrupt an in-flight
+	// driver call rather than wait out its timeout. Metadata appends deliberately
+	// do NOT use it — they must complete on shutdown to persist final state.
+	baseCtx         context.Context
+	cancel          context.CancelFunc
 	kernels         map[string]*capcompute.Kernel[string, ProcessContext]
 	programs        *loadedPrograms
 	processTable    capcompute.ProcessTable[string, ProcessContext]

@@ -155,7 +155,10 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
+	baseCtx, cancel := context.WithCancel(context.Background())
 	runtime := &Runtime{
+		baseCtx:         baseCtx,
+		cancel:          cancel,
 		kernels:         make(map[string]*capcompute.Kernel[string, ProcessContext]),
 		programs:        programs,
 		processTable:    config.ProcessTable,
@@ -1135,6 +1138,11 @@ func (r *Runtime) Close(ctx context.Context) error {
 	for _, stop := range stops {
 		stop()
 	}
+	// Cancel long-running background work (rollback compensations run under
+	// baseCtx) so an in-flight driver call is interrupted rather than waited out
+	// to its own timeout — bounding shutdown latency. A cancelled compensation
+	// leaves its intent open on the journal, so a restart resumes the rollback.
+	r.cancel()
 
 	done := make(chan struct{})
 	go func() {
