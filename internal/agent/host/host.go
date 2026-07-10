@@ -20,6 +20,7 @@ import (
 
 	"github.com/aurora-capcompute/capcompute"
 	"github.com/aurora-capcompute/capcompute/sys"
+	"github.com/aurora-capcompute/capcompute/sys/replay"
 	"github.com/aurora-capcompute/capcompute/sys/replay/tape/journaled"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
@@ -42,6 +43,10 @@ type Factory[ID comparable, K capcompute.PID[ID]] struct {
 	NewJournal func(context.Context, K) (journaled.Journal, error)
 	Header     func(K) journaled.Header
 	Taints     *capcompute.Taints[ID]
+	// OpenIntents overrides the replay open-intent policy — what to do with an
+	// effect journaled without a recorded completion, met on crash-resume. Nil
+	// retries every open intent under its original idempotency key.
+	OpenIntents replay.OpenIntentPolicy
 	// Now and Rand feed the journaled world sources (sys.now / sys.random);
 	// nil defaults to the real clock and crypto/rand.
 	Now  func() time.Time
@@ -119,8 +124,9 @@ func (f Factory[ID, K]) NewDispatcher(ctx context.Context, cred K) (sys.Dispatch
 	// protocol capabilities — is granted explicitly; anything else is denied
 	// by the Validator before it reaches a driver.
 	stack := capcompute.Stack[ID, K]{
-		Grants: func(K) []sys.Capability { return withSavepoints.Capabilities() },
-		Taints: f.Taints,
+		Grants:      func(K) []sys.Capability { return withSavepoints.Capabilities() },
+		Taints:      f.Taints,
+		OpenIntents: f.OpenIntents,
 	}
 	return stack.ForProcess(tape, withSavepoints)
 }

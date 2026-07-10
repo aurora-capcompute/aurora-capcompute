@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/aurora-capcompute/capcompute/sys"
+	"github.com/aurora-capcompute/capcompute/sys/replay"
 )
 
 // C1: a completed child's taint must ride its spawn result so the parent's
@@ -126,5 +127,75 @@ func TestCloneManifestDeepCopiesPointers(t *testing.T) {
 	*original.ShareCapabilities = false
 	if !clone.sharesHistory() || !clone.sharesCapabilities() {
 		t.Fatal("mutating the original manifest's pointers changed the clone's settings")
+	}
+}
+
+// Declassify is grantable, opt-in per program: a bare grant validates; one that
+// carries settings or programs is refused.
+func TestValidateManifestDeclassifyGrant(t *testing.T) {
+	if _, err := ValidateManifest(Manifest{
+		Version:  ManifestVersion,
+		Program:  "root",
+		Syscalls: []Syscall{{Syscall: DeclassifySyscall}},
+	}, &testDispatchers{}); err != nil {
+		t.Fatalf("a bare sys.declassify grant should validate: %v", err)
+	}
+	if _, err := ValidateManifest(Manifest{
+		Version:  ManifestVersion,
+		Syscalls: []Syscall{{Syscall: DeclassifySyscall, Config: json.RawMessage(`{"x":1}`)}},
+	}, &testDispatchers{}); err == nil {
+		t.Fatal("sys.declassify with settings should be rejected")
+	}
+	if _, err := ValidateManifest(Manifest{
+		Version:  ManifestVersion,
+		Syscalls: []Syscall{{Syscall: DeclassifySyscall, Programs: []Manifest{{Program: "x"}}}},
+	}, &testDispatchers{}); err == nil {
+		t.Fatal("sys.declassify with programs should be rejected")
+	}
+}
+
+// The lifecycle admits sys.declassify to the grant set ONLY when the manifest
+// grants it — so the Validator accepts the call opt-in — and advertises it
+// (not hidden) so the model can discover and request it. The kernel Declassifier
+// still gates every crossing on human approval, so this only makes the governed
+// path reachable; it does not let the guest self-lift.
+func TestLifecyclePublishesDeclassifyWhenGranted(t *testing.T) {
+	granted := newLifecycleDispatcher(nopNext{}, "msg", nil,
+		Manifest{Syscalls: []Syscall{{Syscall: DeclassifySyscall}}}, 1, nil)
+	cap, ok := sys.FindCapability(granted.Capabilities(), DeclassifySyscall)
+	if !ok {
+		t.Fatal("a manifest granting sys.declassify must advertise it in the grant set")
+	}
+	if cap.Hidden {
+		t.Fatal("sys.declassify should be visible so the model can request it")
+	}
+	if len(cap.InputSchema) == 0 {
+		t.Fatal("sys.declassify must carry an input schema for the Validator")
+	}
+	ungranted := newLifecycleDispatcher(nopNext{}, "msg", nil, Manifest{}, 1, nil)
+	if _, ok := sys.FindCapability(ungranted.Capabilities(), DeclassifySyscall); ok {
+		t.Fatal("sys.declassify must not appear unless the manifest grants it (opt-in)")
+	}
+}
+
+// Decision #3: a non-idempotent capability's open intent is failed (surfaced
+// for review) rather than silently retried on crash-resume; everything else
+// retries; an empty set disables the policy (framework default).
+func TestOpenIntentPolicy(t *testing.T) {
+	if openIntentPolicy(nil) != nil {
+		t.Fatal("empty set should yield nil (retry everything)")
+	}
+	if openIntentPolicy([]string{"", "  "}) != nil {
+		t.Fatal("only-blank names should yield nil")
+	}
+	policy := openIntentPolicy([]string{"payments.charge"})
+	if policy == nil {
+		t.Fatal("a non-empty set should yield a policy")
+	}
+	if got := policy(sys.Syscall{Name: "payments.charge"}); got != replay.FailOpenIntent {
+		t.Fatalf("non-idempotent syscall = %v, want FailOpenIntent (no silent at-least-once)", got)
+	}
+	if got := policy(sys.Syscall{Name: "core.read"}); got != replay.RetryOpenIntent {
+		t.Fatalf("ordinary syscall = %v, want RetryOpenIntent", got)
 	}
 }

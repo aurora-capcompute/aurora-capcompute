@@ -26,6 +26,7 @@ import (
 	"github.com/aurora-capcompute/capcompute"
 	"github.com/aurora-capcompute/capcompute/sched"
 	"github.com/aurora-capcompute/capcompute/sys"
+	"github.com/aurora-capcompute/capcompute/sys/replay"
 	"github.com/aurora-capcompute/capcompute/sys/replay/tape/journaled"
 
 	internalhost "github.com/aurora-capcompute/aurora-capcompute/internal/agent/host"
@@ -107,6 +108,33 @@ func reconcileGrants(advertised []sys.Capability, manifest Manifest) error {
 	return nil
 }
 
+// openIntentPolicy turns the operator's non-idempotent capability set into a
+// replay open-intent policy: an open intent (a journaled effect with no recorded
+// completion, met on crash-resume) for one of those capabilities is surfaced as
+// indeterminate rather than silently re-executed, giving at-most-once for
+// effects a driver cannot dedup. Empty set → nil → retry everything (the
+// framework default, safe under idempotency keys).
+func openIntentPolicy(nonIdempotent []string) replay.OpenIntentPolicy {
+	if len(nonIdempotent) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(nonIdempotent))
+	for _, name := range nonIdempotent {
+		if name = strings.TrimSpace(name); name != "" {
+			set[name] = struct{}{}
+		}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return func(syscall sys.Syscall) replay.OpenIntentDecision {
+		if _, ok := set[syscall.Name]; ok {
+			return replay.FailOpenIntent
+		}
+		return replay.RetryOpenIntent
+	}
+}
+
 func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 	if config.Dispatchers == nil {
 		return nil, fmt.Errorf("%w: dispatcher provider is required", ErrInvalid)
@@ -183,16 +211,17 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 	}
 
 	runtime.factory = internalhost.Factory[string, ProcessContext]{
-		Drivers:    runtime.processDrivers,
-		Wrap:       runtime.wrapProtocol,
-		NewJournal: runtime.journalFor,
-		Header:     runtime.headerFor,
-		Taints:     runtime.taints,
-		Now:        runtime.now,
-		Tasks:      runtime.tasks,
-		TaskSecret: runtime.taskSecret,
-		TaskTTL:    runtime.taskTTL,
-		TaskScope:  ProcessContext.taskScope,
+		Drivers:     runtime.processDrivers,
+		Wrap:        runtime.wrapProtocol,
+		NewJournal:  runtime.journalFor,
+		Header:      runtime.headerFor,
+		Taints:      runtime.taints,
+		OpenIntents: openIntentPolicy(config.NonIdempotentSyscalls),
+		Now:         runtime.now,
+		Tasks:       runtime.tasks,
+		TaskSecret:  runtime.taskSecret,
+		TaskTTL:     runtime.taskTTL,
+		TaskScope:   ProcessContext.taskScope,
 		OnTaskCreated: func(record task.Record) {
 			runtime.publish(record.Scope.SessionID, Event{
 				Type: "task.created",

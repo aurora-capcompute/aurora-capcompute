@@ -17,15 +17,19 @@ const ManifestVersion = 4
 // sys.* leaf grant is refused so a driver cannot shadow a protocol call.
 const reservedSyscallPrefix = "sys."
 
-// The runtime-served syscalls a manifest may grant. Both live in the sys
+// The runtime-served syscalls a manifest may grant. All live in the sys
 // namespace because they are the runtime's own, not leaf I/O drivers:
 // SpawnSyscall's grant carries Programs — the manifests of the only programs
-// this process may spawn, each with its own recursive grant set — and
-// TimerSyscall yields the durable timer tasks the runtime itself leans on
-// for abort-retry parks.
+// this process may spawn, each with its own recursive grant set — TimerSyscall
+// yields the durable timer tasks the runtime itself leans on for abort-retry
+// parks, and DeclassifySyscall lets a program request a taint lift (the only
+// governed way out of a flow label): granting it is opt-in per program, and
+// every crossing still requires human approval and is journaled — the guest
+// can request, never self-lift.
 const (
-	SpawnSyscall = sys.SyscallSpawn
-	TimerSyscall = sys.SyscallTimer
+	SpawnSyscall      = sys.SyscallSpawn
+	TimerSyscall      = sys.SyscallTimer
+	DeclassifySyscall = sys.SyscallDeclassify
 )
 
 // TimerSettings is the Config shape of a sys.timer grant.
@@ -164,7 +168,7 @@ func (s Syscall) isSpawn() bool { return s.Syscall == SpawnSyscall }
 // runtimeServed reports whether the runtime itself serves the granted
 // syscall, rather than a driver built by the dispatcher provider.
 func (s Syscall) runtimeServed() bool {
-	return s.Syscall == SpawnSyscall || s.Syscall == TimerSyscall
+	return s.Syscall == SpawnSyscall || s.Syscall == TimerSyscall || s.Syscall == DeclassifySyscall
 }
 
 // LeafSyscalls returns the node's driver grants. Dispatcher providers build
@@ -273,6 +277,17 @@ func validateSyscalls(syscalls []Syscall, provider DispatcherProvider) error {
 				return fmt.Errorf("%w: sys.timer settings: %v", ErrInvalid, err)
 			}
 			grant.Config = normalized
+		} else if grant.Syscall == DeclassifySyscall {
+			// Runtime-served by the kernel Declassifier; the grant is a bare opt-in,
+			// carrying no settings and no programs. Its authority is fully gated at
+			// dispatch by the mandatory human approval.
+			if len(grant.Programs) > 0 {
+				return fmt.Errorf("%w: syscall %q: only %s carries programs", ErrInvalid, grant.Syscall, SpawnSyscall)
+			}
+			if len(bytes.TrimSpace(grant.Config)) > 0 {
+				return fmt.Errorf("%w: %s takes no settings", ErrInvalid, DeclassifySyscall)
+			}
+			grant.Config = nil
 		} else {
 			if len(grant.Programs) > 0 {
 				return fmt.Errorf("%w: syscall %q: only %s carries programs", ErrInvalid, grant.Syscall, SpawnSyscall)

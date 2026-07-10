@@ -183,7 +183,7 @@ func (l *lifecycleDispatcher) Dispatch(ctx context.Context, cred ProcessContext,
 }
 
 func (l *lifecycleDispatcher) Capabilities() []sys.Capability {
-	return appendMissing(l.next.Capabilities(),
+	caps := appendMissing(l.next.Capabilities(),
 		sys.Capability{
 			Name:        callSysInput,
 			Description: "fetch this process's input, prior history, and the visible capability menu",
@@ -205,7 +205,36 @@ func (l *lifecycleDispatcher) Capabilities() []sys.Capability {
 			Hidden:      true,
 		},
 	)
+	// sys.declassify is served by the kernel Declassifier below the FlowMonitor
+	// (which performs the actual taint lift on the approved result). Its
+	// capability must appear in the grant set HERE so the Validator admits the
+	// call — but only when the manifest granted it (declassification is opt-in
+	// per program). It is advertised (not hidden) so the model can discover and
+	// request it; every crossing still yields for human approval, so the guest
+	// can propose a lift but never perform one itself.
+	if _, ok := l.manifest.grant(DeclassifySyscall); ok {
+		caps = appendMissing(caps, sys.Capability{
+			Name:        DeclassifySyscall,
+			Description: "request lifting labels from this run's taint; each crossing requires human approval and is journaled with its reason",
+			InputSchema: declassifyInputSchema,
+		})
+	}
+	return caps
 }
+
+// declassifyInputSchema mirrors the kernel Declassifier's sys.declassify input
+// schema. The Declassifier is the authoritative validator (it re-checks labels,
+// reason, and approval); this is the grant-set copy the Validator admits the
+// call against, kept in step with capcompute's declassifyInputSchema.
+var declassifyInputSchema = json.RawMessage(`{
+	"type": "object",
+	"required": ["labels", "reason"],
+	"properties": {
+		"labels": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
+		"reason": {"type": "string", "minLength": 1}
+	},
+	"additionalProperties": false
+}`)
 
 // historyLabels is the union of the provenance labels carried by every session-
 // history entry — the taint the loopback carries. It seeds the reading run's

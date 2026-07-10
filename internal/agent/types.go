@@ -94,6 +94,16 @@ type Config struct {
 	// QuotaOf reports a tenant's scheduling quota. Nil means unlimited.
 	QuotaOf func(tenant string) sched.Quota
 
+	// NonIdempotentSyscalls names capabilities whose re-execution is unsafe (a
+	// second POST charges twice; a second delete errors). On crash-resume the
+	// runtime meets an open intent — an effect journaled but with no recorded
+	// completion, so its outcome is unknown. By default it retries under the
+	// original idempotency key (at-least-once, safe when the driver dedups on the
+	// key). For a capability named here it instead surfaces the intent as
+	// indeterminate for review rather than silently re-applying it — at-most-once
+	// for effects a driver cannot make idempotent. Matched by capability name.
+	NonIdempotentSyscalls []string
+
 	// ProcessMemoryPages caps each guest process's linear memory in 64 KiB wasm
 	// pages (0 = a default of 4096 = 256 MiB). A guest that allocates past the
 	// cap traps and its quantum fails, so a runaway allocation cannot exhaust
