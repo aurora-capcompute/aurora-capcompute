@@ -225,23 +225,23 @@ func (r *spawnRouter) spawn(ctx context.Context, parent ProcessContext, spec Man
 			if err != nil {
 				return sys.Fail(fmt.Sprintf("reconnect child: %v", err)), nil
 			}
-			answer, _, procErr := childTerminal(snap)
+			answer, labels, _, procErr := childTerminal(snap)
 			if procErr != nil {
 				return sys.Fail(procErr.Error()), nil
 			}
-			return spawnAnswer(answer)
+			return spawnAnswer(answer, labels...)
 		}
 		if _, err := r.runtime.Retry(childID, cascadeMode); err != nil {
 			return sys.Fail(fmt.Sprintf("cascade retry child: %v", err)), nil
 		}
-		answer, parked, err := r.runtime.waitForCompletion(ctx, childID, sessionID)
+		answer, labels, parked, err := r.runtime.waitForCompletion(ctx, childID, sessionID)
 		if err != nil {
 			return sys.Fail(err.Error()), nil
 		}
 		if parked {
 			return sys.Yield(fmt.Sprintf("waiting on child %s", spec.Program)), nil
 		}
-		return spawnAnswer(answer)
+		return spawnAnswer(answer, labels...)
 	}
 
 	// History and capability sharing are the child program's own settings now.
@@ -251,7 +251,7 @@ func (r *spawnRouter) spawn(ctx context.Context, parent ProcessContext, spec Man
 	if err != nil {
 		return sys.Fail(fmt.Sprintf("create child process: %v", err)), nil
 	}
-	answer, parked, err := r.runtime.waitForCompletion(ctx, proc.ID, parent.SessionID)
+	answer, labels, parked, err := r.runtime.waitForCompletion(ctx, proc.ID, parent.SessionID)
 	if err != nil {
 		return sys.Fail(err.Error()), nil
 	}
@@ -261,16 +261,19 @@ func (r *spawnRouter) spawn(ctx context.Context, parent ProcessContext, spec Man
 		// finishes, and the reconnect branch above returns its answer.
 		return sys.Yield(fmt.Sprintf("waiting on child %s", spec.Program)), nil
 	}
-	return spawnAnswer(answer)
+	return spawnAnswer(answer, labels...)
 }
 
-// spawnAnswer marshals a child's answer into the spawn result envelope.
-func spawnAnswer(answer string) (sys.SyscallResult, error) {
+// spawnAnswer marshals a child's answer into the spawn result envelope, stamped
+// with the child's accumulated taint so the parent's FlowMonitor observes what
+// the child observed — a parent must not launder a forbidden source by
+// delegating the read to a child and reading the answer back unlabeled.
+func spawnAnswer(answer string, labels ...string) (sys.SyscallResult, error) {
 	result, err := json.Marshal(spawnResult{Answer: answer})
 	if err != nil {
 		return sys.SyscallResult{}, err
 	}
-	return sys.Result(result), nil
+	return sys.Result(result).WithLabels(labels...), nil
 }
 
 // buildChildManifest turns a spawnable program's manifest into the child's
@@ -425,19 +428,19 @@ func (r *Runtime) createChildProcess(parentProcessID string, sessionID string, i
 // yield (suspend the parent durably) rather than treat the result as final;
 // there is deliberately no timeout, since a human approval may take arbitrarily
 // long. ctx cancellation (shutdown/stop) still stops the child.
-func (r *Runtime) waitForCompletion(ctx context.Context, processID, sessionID string) (answer string, parked bool, err error) {
+func (r *Runtime) waitForCompletion(ctx context.Context, processID, sessionID string) (answer string, labels []string, parked bool, err error) {
 	_, events, unsubscribe, err := r.Subscribe(sessionID)
 	if err != nil {
-		return "", false, fmt.Errorf("subscribe to child session: %w", err)
+		return "", nil, false, fmt.Errorf("subscribe to child session: %w", err)
 	}
 	defer unsubscribe()
 
 	if snapshot, err := r.GetProcess(processID); err == nil {
-		if ans, done, procErr := childTerminal(snapshot); done {
-			return ans, false, procErr
+		if ans, childLabels, done, procErr := childTerminal(snapshot); done {
+			return ans, childLabels, false, procErr
 		}
 		if childParked(snapshot) {
-			return "", true, nil
+			return "", nil, true, nil
 		}
 	}
 
@@ -445,10 +448,10 @@ func (r *Runtime) waitForCompletion(ctx context.Context, processID, sessionID st
 		select {
 		case <-ctx.Done():
 			_, _ = r.Stop(processID)
-			return "", false, ctx.Err()
+			return "", nil, false, ctx.Err()
 		case event, ok := <-events:
 			if !ok {
-				return "", false, fmt.Errorf("child event stream closed")
+				return "", nil, false, fmt.Errorf("child event stream closed")
 			}
 			if event.Type != "process.updated" {
 				continue
@@ -457,11 +460,11 @@ func (r *Runtime) waitForCompletion(ctx context.Context, processID, sessionID st
 			if !ok || snapshot.ID != processID {
 				continue
 			}
-			if ans, done, procErr := childTerminal(snapshot); done {
-				return ans, false, procErr
+			if ans, childLabels, done, procErr := childTerminal(snapshot); done {
+				return ans, childLabels, false, procErr
 			}
 			if childParked(snapshot) {
-				return "", true, nil
+				return "", nil, true, nil
 			}
 		}
 	}
@@ -470,20 +473,20 @@ func (r *Runtime) waitForCompletion(ctx context.Context, processID, sessionID st
 // childTerminal reports whether a child process snapshot has reached a terminal state,
 // returning its answer (on completion) or the corresponding error. done is false
 // while the process is still in flight.
-func childTerminal(snapshot ProcessSnapshot) (answer string, done bool, err error) {
+func childTerminal(snapshot ProcessSnapshot) (answer string, labels []string, done bool, err error) {
 	switch snapshot.Status {
 	case ProcessCompleted:
-		return snapshot.Answer, true, nil
+		return snapshot.Answer, snapshot.Labels, true, nil
 	case ProcessFailed:
-		return "", true, fmt.Errorf("child process failed: %s", snapshot.Error)
+		return "", snapshot.Labels, true, fmt.Errorf("child process failed: %s", snapshot.Error)
 	case ProcessStopped:
-		return "", true, fmt.Errorf("child process stopped")
+		return "", snapshot.Labels, true, fmt.Errorf("child process stopped")
 	case ProcessInterrupted:
-		return "", true, fmt.Errorf("child process interrupted")
+		return "", snapshot.Labels, true, fmt.Errorf("child process interrupted")
 	case ProcessCompensated:
-		return "", true, fmt.Errorf("child process rolled back: %s", snapshot.Answer)
+		return "", snapshot.Labels, true, fmt.Errorf("child process rolled back: %s", snapshot.Answer)
 	default:
-		return "", false, nil
+		return "", nil, false, nil
 	}
 }
 

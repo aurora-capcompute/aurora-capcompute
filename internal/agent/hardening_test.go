@@ -1,0 +1,130 @@
+package agent
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"testing"
+
+	"github.com/aurora-capcompute/capcompute/sys"
+)
+
+// C1: a completed child's taint must ride its spawn result so the parent's
+// FlowMonitor observes what the child observed — a parent cannot launder a
+// forbidden source by delegating the read to a child and reading it back.
+func TestSpawnAnswerStampsChildLabels(t *testing.T) {
+	result, err := spawnAnswer("done", "untrusted_web", "secret")
+	if err != nil {
+		t.Fatalf("spawnAnswer: %v", err)
+	}
+	got := map[string]bool{}
+	for _, l := range result.Labels() {
+		got[l] = true
+	}
+	if len(got) != 2 || !got["untrusted_web"] || !got["secret"] {
+		t.Fatalf("spawn result labels = %v, want the child's taint stamped", result.Labels())
+	}
+}
+
+// C1: the child's terminal snapshot carries its taint out of waitForCompletion,
+// which is where the spawn result gets it.
+func TestChildTerminalCarriesLabels(t *testing.T) {
+	answer, labels, done, err := childTerminal(ProcessSnapshot{
+		Status: ProcessCompleted, Answer: "a", Labels: []string{"untrusted_web"},
+	})
+	if !done || err != nil || answer != "a" {
+		t.Fatalf("childTerminal = %q, %v, %v, %v", answer, labels, done, err)
+	}
+	if len(labels) != 1 || labels[0] != "untrusted_web" {
+		t.Fatalf("labels = %v, want the snapshot's taint", labels)
+	}
+}
+
+// H1: a deferred compensation is held to the reference monitor at registration,
+// because the rollback path that fires it at abort time re-runs neither the
+// Validator nor the FlowMonitor. So: an ungranted inverse is refused, a
+// schema-violating inverse is refused, and a run that has observed a forbidden
+// label may not register that sink as an undo (the abort-time flow bypass).
+func TestLifecycleCompensateHeldToReferenceMonitor(t *testing.T) {
+	next := nopNext{caps: []sys.Capability{{
+		Name:        "k8s.delete",
+		InputSchema: json.RawMessage(`{"type":"object","required":["name"],"properties":{"name":{"type":"string"}},"additionalProperties":false}`),
+		Forbid:      []string{"untrusted_web"},
+	}}}
+	l := newLifecycleDispatcher(next, "msg", nil, Manifest{}, 1, nil)
+	compensate := func(ctx context.Context, args string) sys.SyscallResult {
+		t.Helper()
+		result, err := l.Dispatch(ctx, ProcessContext{},
+			sys.Syscall{Abi: sys.ABIVersion, Name: callSysCompensate, Args: json.RawMessage(args)},
+			sys.Authorization{})
+		if err != nil {
+			t.Fatalf("dispatch: %v", err)
+		}
+		return result
+	}
+
+	if r := compensate(context.Background(), `{"name":"k8s.delete","args":{"name":"pod-1"}}`); r.Status() != sys.StatusResult {
+		t.Fatalf("a clean compensation should register: got %v", r.Status())
+	}
+	if r := compensate(context.Background(), `{"name":"k8s.forge","args":{}}`); r.Status() != sys.StatusFailed || r.Errno() != sys.ErrnoInvalidArgs {
+		t.Fatalf("ungranted inverse = %v/%v, want failed/invalid_args", r.Status(), r.Errno())
+	}
+	if r := compensate(context.Background(), `{"name":"k8s.delete","args":{"oops":true}}`); r.Status() != sys.StatusFailed || r.Errno() != sys.ErrnoInvalidArgs {
+		t.Fatalf("schema-violating inverse = %v/%v, want failed/invalid_args", r.Status(), r.Errno())
+	}
+	tainted := sys.WithTaint(context.Background(), []string{"untrusted_web"})
+	if r := compensate(tainted, `{"name":"k8s.delete","args":{"name":"pod-1"}}`); r.Status() != sys.StatusFailed || r.Errno() != sys.ErrnoDenied {
+		t.Fatalf("compensation in a tainted run = %v/%v, want failed/denied (abort-time flow bypass blocked)", r.Status(), r.Errno())
+	}
+}
+
+// L6: the guest's sys.input payload must carry role/content only — the taint
+// labels seed the FlowMonitor host-side and must never be serialized to the
+// (untrusted) guest, so the property is host-enforced, not a guest struct shape.
+func TestSysInputOmitsHistoryLabelsFromGuestPayload(t *testing.T) {
+	history := []HistoryMessage{
+		{Role: "user", Content: "q"},
+		{Role: "assistant", Content: "a", Labels: []string{"untrusted_web", "credential:ONYX@abc"}},
+	}
+	l := newLifecycleDispatcher(nopNext{}, "task", history, Manifest{}, 1, nil)
+	result, err := l.Dispatch(context.Background(), ProcessContext{},
+		sys.Syscall{Abi: sys.ABIVersion, Name: callSysInput}, sys.Authorization{})
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	for _, needle := range []string{"labels", "untrusted_web", "credential:ONYX@abc"} {
+		if bytes.Contains(result.Result(), []byte(needle)) {
+			t.Fatalf("SECURITY: %q reached the guest sys.input payload: %s", needle, result.Result())
+		}
+	}
+	// The taint still seeds the run host-side: the result carries the labels for
+	// the FlowMonitor even though the guest payload does not.
+	if len(result.Labels()) == 0 {
+		t.Fatal("sys.input result must carry the history taint for the FlowMonitor")
+	}
+}
+
+// L3: only sys.spawn carries programs; a sys.timer grant with a stray programs
+// field is rejected (an un-recursed, un-validated child manifest must not ride
+// along).
+func TestValidateManifestRejectsTimerWithPrograms(t *testing.T) {
+	if _, err := ValidateManifest(Manifest{
+		Version:  ManifestVersion,
+		Syscalls: []Syscall{{Syscall: TimerSyscall, Programs: []Manifest{{Program: "x"}}}},
+	}, &testDispatchers{}); err == nil {
+		t.Fatal("expected sys.timer with programs to be rejected")
+	}
+}
+
+// L4: cloneManifest deep-copies the History/ShareCapabilities pointers, so a
+// caller that retains the input manifest cannot mutate a stored clone.
+func TestCloneManifestDeepCopiesPointers(t *testing.T) {
+	yes := true
+	original := Manifest{History: &yes, ShareCapabilities: &yes}
+	clone := cloneManifest(original)
+	*original.History = false
+	*original.ShareCapabilities = false
+	if !clone.sharesHistory() || !clone.sharesCapabilities() {
+		t.Fatal("mutating the original manifest's pointers changed the clone's settings")
+	}
+}

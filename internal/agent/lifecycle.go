@@ -103,7 +103,7 @@ func (l *lifecycleDispatcher) Dispatch(ctx context.Context, cred ProcessContext,
 	case callSysInput:
 		payload, err := json.Marshal(agentInput{
 			Input:        l.input,
-			History:      l.history,
+			History:      guestHistory(l.history),
 			Capabilities: visibleCapabilities(l.next.Capabilities()),
 			Attempt:      l.attempt,
 		})
@@ -133,10 +133,19 @@ func (l *lifecycleDispatcher) Dispatch(ctx context.Context, cred ProcessContext,
 		}
 		return sys.Result(json.RawMessage(`{"ok":true}`)), nil
 	case callSysCompensate:
-		// Deferred: journal the registration, never execute it. The undo is a
-		// syscall like any other — the same granted-name check every dispatch
-		// gets, applied at registration so a misspelled or ungranted undo
-		// surfaces to the guest immediately rather than at abort time.
+		// Deferred: journal the registration, never execute it. The undo is a real
+		// syscall waiting to happen, and the rollback path that fires it at abort
+		// time does NOT re-run the Validator or FlowMonitor — so hold it to the
+		// reference monitor's gates HERE, at registration, when the guest's intent
+		// and the run's taint are both known:
+		//   - granted name (a misspelled/ungranted undo surfaces immediately),
+		//   - flow policy (a run that has already observed a label the capability
+		//     forbids may not register it as an undo — this blocks smuggling a
+		//     forbidden sink past the monitor by reading tainted data and then
+		//     aborting, while still allowing an undo registered before an
+		//     unrelated taint arrived), and
+		//   - input schema (the args cannot violate the authority boundary the
+		//     capability's schema encodes, e.g. a path prefix or an amount cap).
 		var args compensateArgs
 		if err := json.Unmarshal(syscall.Args, &args); err != nil {
 			return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode sys.compensate: %v", err)), nil
@@ -144,8 +153,16 @@ func (l *lifecycleDispatcher) Dispatch(ctx context.Context, cred ProcessContext,
 		if strings.TrimSpace(args.Name) == "" {
 			return sys.FailCode(sys.ErrnoInvalidArgs, "sys.compensate: a capability name is required"), nil
 		}
-		if _, ok := sys.FindCapability(l.next.Capabilities(), args.Name); !ok {
+		capability, ok := sys.FindCapability(l.next.Capabilities(), args.Name)
+		if !ok {
 			return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("sys.compensate: capability %q is not granted", args.Name)), nil
+		}
+		if blocked := sys.BlockedBy(sys.Taint(ctx), capability.Forbid); len(blocked) > 0 {
+			return sys.FailCode(sys.ErrnoDenied, fmt.Sprintf(
+				"sys.compensate: this run has observed %v, which may not flow into %s", blocked, args.Name)), nil
+		}
+		if err := validateCompensationArgs(capability, args.Args); err != nil {
+			return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("sys.compensate: %v", err)), nil
 		}
 		return sys.Result(json.RawMessage(`{}`)), nil
 	case callSysAbort:
@@ -232,6 +249,14 @@ func (r *Runtime) answerFromJournal(processID string) (string, error) {
 			name = intent.Syscall.Name
 		}
 		return "", fmt.Errorf("agent did not finish (last journal call was %q)", name)
+	}
+	// The sys.output completion must have SUCCEEDED. A schema-violating answer is
+	// journaled as a failed completion (the lifecycle validates it), and must
+	// never become the terminal answer just because the guest then returned
+	// {"status":"completed"} — the tail shape alone does not prove the answer was
+	// accepted.
+	if completion.Result == nil || completion.Result.Status() != sys.StatusResult {
+		return "", errors.New("agent did not finish (its final answer was rejected by the output schema)")
 	}
 	var args finishArgs
 	if err := json.Unmarshal(intent.Syscall.Args, &args); err != nil {

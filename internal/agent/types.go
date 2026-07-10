@@ -264,13 +264,40 @@ func processPID(processID string, revision uint64) string {
 }
 
 type agentInput struct {
-	Input        string           `json:"input"`
-	History      []HistoryMessage `json:"history,omitempty"`
-	Capabilities []sys.Capability `json:"capabilities,omitempty"`
+	Input string `json:"input"`
+	// History is the guest-facing role/content projection of the session history.
+	// The provenance labels are deliberately NOT here: they seed the FlowMonitor
+	// host-side (via historyLabels) and are never serialized to the guest, so
+	// "only role/content reach the guest input" is a host guarantee, not a
+	// property of the guest's struct shape (an untrusted guest could read a label
+	// field if we sent one — the taint taxonomy and credential fingerprints stay
+	// host-only).
+	History      []guestHistoryMessage `json:"history,omitempty"`
+	Capabilities []sys.Capability      `json:"capabilities,omitempty"`
 	// Attempt is which run of this process the guest is on (1 = first). A
 	// retried process — including an abort-retry — sees a higher attempt, so a
 	// program can back off or change strategy.
 	Attempt int `json:"attempt,omitempty"`
+}
+
+// guestHistoryMessage is a session-history entry as the guest sees it: role and
+// content only, never the provenance labels.
+type guestHistoryMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// guestHistory projects session history to its guest-facing shape, dropping the
+// host-only provenance labels.
+func guestHistory(history []HistoryMessage) []guestHistoryMessage {
+	if len(history) == 0 {
+		return nil
+	}
+	out := make([]guestHistoryMessage, len(history))
+	for i, m := range history {
+		out[i] = guestHistoryMessage{Role: m.Role, Content: m.Content}
+	}
+	return out
 }
 
 type SessionSummary struct {
@@ -309,6 +336,12 @@ type ProcessSnapshot struct {
 	CompletedAt   *time.Time    `json:"completed_at,omitempty"`
 	Manifest      Manifest      `json:"manifest"`
 	ProgramDigest string        `json:"program_digest"`
+	// Labels is the run's accumulated taint at snapshot time (the union of every
+	// source class it has observed). A completed process carries its final taint,
+	// which the spawn boundary reads to propagate a child's provenance to its
+	// parent — so a parent cannot launder a forbidden source by delegating the
+	// read to a child and reading the answer back.
+	Labels []string `json:"labels,omitempty"`
 	// Delegation lineage, so a single-process read shows the call tree the same
 	// way StoredProcess and the session graph do.
 	ParentProcessID string   `json:"parent_process_id,omitempty"`

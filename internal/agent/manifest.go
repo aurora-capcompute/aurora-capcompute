@@ -265,6 +265,9 @@ func validateSyscalls(syscalls []Syscall, provider DispatcherProvider) error {
 				programs[child.Program] = struct{}{}
 			}
 		} else if grant.Syscall == TimerSyscall {
+			if len(grant.Programs) > 0 {
+				return fmt.Errorf("%w: syscall %q: only %s carries programs", ErrInvalid, grant.Syscall, SpawnSyscall)
+			}
 			normalized, err := normalizeTimerSettings(grant.Config)
 			if err != nil {
 				return fmt.Errorf("%w: sys.timer settings: %v", ErrInvalid, err)
@@ -311,8 +314,21 @@ func normalizeTimerSettings(raw json.RawMessage) (json.RawMessage, error) {
 
 func cloneManifest(manifest Manifest) Manifest {
 	out := manifest
+	// Deep-copy the pointer fields so a caller that retains the input manifest
+	// (or reuses one across CreateProcess calls) cannot later flip a stored
+	// clone's history/share_capabilities out from under a running process.
+	out.History = cloneBoolPtr(manifest.History)
+	out.ShareCapabilities = cloneBoolPtr(manifest.ShareCapabilities)
 	out.Syscalls = cloneSyscalls(manifest.Syscalls)
 	return out
+}
+
+func cloneBoolPtr(p *bool) *bool {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
 }
 
 func cloneSyscalls(syscalls []Syscall) []Syscall {

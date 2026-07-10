@@ -12,6 +12,8 @@ import (
 	"sync"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
+
+	"github.com/aurora-capcompute/capcompute/sys"
 )
 
 const DefaultProgramID = "aurora-default@1"
@@ -170,6 +172,33 @@ func validateText(schema *jsonschema.Schema, text string) error {
 		return stringErr
 	}
 	return schema.Validate(value)
+}
+
+// validateCompensationArgs holds a deferred inverse's args to the same input
+// schema its forward call would face. The rollback path that fires the inverse
+// at abort time does not re-run the Validator, so this is where a compensation
+// with args that violate the capability's schema (its authority boundary) is
+// refused — at registration, before it can be journaled and later executed.
+func validateCompensationArgs(capability sys.Capability, rawArgs json.RawMessage) error {
+	if len(capability.InputSchema) == 0 {
+		return nil
+	}
+	schema, err := compileSchema("compensation", capability.InputSchema)
+	if err != nil {
+		return fmt.Errorf("compile %s schema: %w", capability.Name, err)
+	}
+	args := rawArgs
+	if len(bytes.TrimSpace(args)) == 0 {
+		args = json.RawMessage("null")
+	}
+	value, err := jsonschema.UnmarshalJSON(bytes.NewReader(args))
+	if err != nil {
+		return fmt.Errorf("%s args are not valid JSON: %w", capability.Name, err)
+	}
+	if err := schema.Validate(value); err != nil {
+		return fmt.Errorf("%s args violate its input schema: %w", capability.Name, err)
+	}
+	return nil
 }
 
 // loadPrograms snapshots the provider into a registry. A nil provider or an empty

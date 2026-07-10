@@ -86,6 +86,7 @@ func (r *Runtime) processSnapshotLocked(proc *processState) ProcessSnapshot {
 		Revision:        proc.revision,
 		Answer:          proc.answer,
 		Error:           proc.err,
+		Labels:          append([]string(nil), proc.labels...),
 		JournalLength:   journalLength,
 		CreatedAt:       proc.createdAt,
 		UpdatedAt:       proc.updatedAt,
