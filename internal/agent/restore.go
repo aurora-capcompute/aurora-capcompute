@@ -109,6 +109,7 @@ func (r *Runtime) restoreSession(proj Projection, journals map[string]map[uint64
 			manifest:          cloneManifest(em),
 			programDigest:     sr.ProgramDigest,
 			hideHistory:       sr.HideHistory,
+			labels:            append([]string(nil), sr.Labels...),
 			parentProcessID:   sr.ParentProcessID,
 			childProcessIDs:   append([]string(nil), sr.ChildProcessIDs...),
 			childSpawnOffsets: append([]int(nil), sr.ChildSpawnOffsets...),
@@ -138,7 +139,7 @@ func (r *Runtime) restoreSession(proj Projection, journals map[string]map[uint64
 		if proc.status == ProcessCompleted {
 			session.history = append(session.history,
 				HistoryMessage{Role: "user", Content: proc.input},
-				HistoryMessage{Role: "assistant", Content: proc.answer},
+				HistoryMessage{Role: "assistant", Content: proc.answer, Labels: proc.labels},
 			)
 		}
 		if status != sr.Status {

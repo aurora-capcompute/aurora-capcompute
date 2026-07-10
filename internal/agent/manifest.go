@@ -69,6 +69,13 @@ func (s SpawnSettings) shareCapabilities() bool {
 type Manifest struct {
 	Version int    `json:"version,omitempty"`
 	Program string `json:"program,omitempty"`
+	// History, on the root, disables session-history sharing across runs when set
+	// false: each run of this program starts fresh — its sys.input omits the
+	// session history, so it sees only its own input and inherits no taint from a
+	// prior run. Unset (the default) shares history, the runtime's standing
+	// behavior. It is the one setting a program node carries, and only at the
+	// root: a spawned child's history is governed by its parent sys.spawn grant.
+	History *bool `json:"history,omitempty"`
 	// BindingRef is an opaque application correlation reference (e.g. the
 	// name of the control-plane binding that produced this manifest). The
 	// runtime never interprets it.

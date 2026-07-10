@@ -51,6 +51,12 @@ const (
 type HistoryMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
+	// Labels is the provenance taint of the run that produced this entry (the
+	// assistant answer). Session history is a run-to-run loopback: when a later
+	// process reads this history through sys.input, the runtime seeds its taint
+	// with these labels, so data a prior run observed (e.g. a source class it
+	// read) cannot be laundered across turns by re-reading the answer.
+	Labels []string `json:"labels,omitempty"`
 }
 
 // Config wires a Runtime. Everything concrete is injected: programs, capability
@@ -160,6 +166,10 @@ type processState struct {
 	answer      string
 	err         string
 	journal     *logJournal
+	// labels is the run's accumulated taint, snapshotted at completion (before the
+	// per-revision taint is released) so it can ride onto the session-history entry
+	// this process contributes and, through it, into a later run that reads it.
+	labels []string
 	// stop aborts the process's in-flight quantum: the scheduler submission for a
 	// root process, the direct resume handle for a delegated child. Nil when no
 	// quantum is in flight.

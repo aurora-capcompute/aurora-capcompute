@@ -110,7 +110,11 @@ func (l *lifecycleDispatcher) Dispatch(ctx context.Context, cred ProcessContext,
 		if err != nil {
 			return sys.Fail(err.Error()), nil
 		}
-		return sys.Result(payload), nil
+		// The input carries the session history — a run-to-run loopback. Stamp it
+		// with the union of the history's provenance labels so the flow monitor
+		// (which observes every result's labels) taints this run with what prior
+		// runs observed, closing the cross-run laundering path.
+		return sys.Result(payload).WithLabels(historyLabels(l.history)...), nil
 	case callSysOutput:
 		// The answer travels in syscall.Args and is recorded on the journal; the
 		// host reads it back from there. Validate it against the program's
@@ -184,6 +188,18 @@ func (l *lifecycleDispatcher) Capabilities() []sys.Capability {
 			Hidden:      true,
 		},
 	)
+}
+
+// historyLabels is the union of the provenance labels carried by every session-
+// history entry — the taint the loopback carries. It seeds the reading run's
+// taint (via the sys.input result), so a prior run's provenance is not laundered
+// by re-reading its answer.
+func historyLabels(history []HistoryMessage) []string {
+	var labels []string
+	for i := range history {
+		labels = append(labels, history[i].Labels...)
+	}
+	return labels
 }
 
 // answerFromJournal reads a completed process's answer from the journal's final

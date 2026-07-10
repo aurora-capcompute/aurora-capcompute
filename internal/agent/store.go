@@ -48,6 +48,10 @@ type StoredProcess struct {
 	// with history:false — its sys.input omits the session history. Persisted so
 	// a restart re-serves the same isolated input.
 	HideHistory bool `json:",omitempty"`
+	// Labels is the run's final taint, persisted so the session-history entry this
+	// process contributes is rebuilt with its provenance on restore — the
+	// cross-run flow policy survives a restart.
+	Labels []string `json:",omitempty"`
 	// Tags carries the owning session's tags. A session.state event now carries
 	// them too; this copy is retained so sessions from pre-session.state streams
 	// (which have no such event) still restore their tags.

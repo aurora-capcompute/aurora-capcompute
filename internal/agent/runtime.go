@@ -608,6 +608,10 @@ func (r *Runtime) CreateProcess(sessionID string, input string, manifest Manifes
 		manifest:      manifest,
 		revision:      1,
 		programDigest: program.Digest,
+		// A root manifest with history:false opts out of session-history sharing —
+		// each run sees only its own input and inherits no cross-run taint. Reuses
+		// the hideHistory delivery gate (and its persistence).
+		hideHistory: manifest.History != nil && !*manifest.History,
 	}
 	proc.journal = r.newJournal(proc, newProcessHistory(), 0)
 	r.processes[processID] = proc

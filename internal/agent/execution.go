@@ -294,6 +294,10 @@ func (r *Runtime) finishLocked(proc *processState, status ProcessStatus, answer 
 		proc.err = ""
 	}
 	if isTerminal(status) {
+		// Snapshot the run's taint before releasing it, so the answer this process
+		// contributes to session history carries the run's provenance into any
+		// later run that reads it (closing the run-to-run laundering loophole).
+		proc.labels = r.taints.Snapshot(processPID(proc.id, proc.revision))
 		// The process's taint state is scoped to its revision identity; release
 		// it when no further quantum can observe it. A parked process keeps its
 		// taint (resume must re-enforce flow policy over the same history).
@@ -318,7 +322,7 @@ func (r *Runtime) finishLocked(proc *processState, status ProcessStatus, answer 
 		if status == ProcessCompleted && proc.parentProcessID == "" {
 			session.history = append(session.history,
 				HistoryMessage{Role: "user", Content: proc.input},
-				HistoryMessage{Role: "assistant", Content: answer},
+				HistoryMessage{Role: "assistant", Content: answer, Labels: proc.labels},
 			)
 		}
 	}
