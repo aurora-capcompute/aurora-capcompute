@@ -528,9 +528,21 @@ func (r *Runtime) settleRollback(processID string) {
 	}
 	state.Resume = resume
 
+	// The rollback chain has no FlowMonitor, and the drivers enforce flow via
+	// sys.Taint(ctx) — their per-operation taints — never the kernel
+	// Capability.Forbid field. So inject the run's accumulated taint here,
+	// exactly as the FlowMonitor does on the forward path, or a compensation
+	// would launder past every driver sink guard (and the egress floor): a guest
+	// could read a forbidden source, register an inverse naming an egress/write
+	// sink with the tainted data, and abort to fire it. With the taint present a
+	// forbidding inverse is refused, and a memory/filesystem write stores the
+	// value WITH its taint rather than poisoning storage unlabeled.
+	runTaint := r.taints.Snapshot(cred.PID())
+
 	var undone []string
 	dispatchInverse := func(inverse sys.Syscall, key string) error {
-		result, err := chain.Dispatch(sys.WithIdempotencyKey(ctx, key), cred, inverse, sys.Authorization{})
+		ictx := sys.WithTaint(sys.WithIdempotencyKey(ctx, key), runTaint)
+		result, err := chain.Dispatch(ictx, cred, inverse, sys.Authorization{})
 		if err != nil {
 			// Infrastructure error: the intent stays open in the journal; a
 			// later settle resumes it under the same idempotency key.
@@ -553,6 +565,15 @@ func (r *Runtime) settleRollback(processID string) {
 	settleStopped := func(err error) {
 		if errors.Is(err, errRollbackParked) {
 			r.finish(processID, ProcessWaitingTask, "", nil)
+			return
+		}
+		if errors.Is(err, context.Canceled) {
+			// Shutdown (Close cancels baseCtx) interrupted the rollback mid-inverse.
+			// The compensation intent stays open on the journal, so this is a
+			// resumable interruption, not a failure — surfacing it as
+			// ProcessInterrupted (still in the resumable set) keeps a clean shutdown
+			// from reading as data loss or tripping failure alerting.
+			r.finish(processID, ProcessInterrupted, rollbackReport(state, reportReason, undone), nil)
 			return
 		}
 		r.finish(processID, ProcessFailed, rollbackReport(state, reportReason, undone), fmt.Errorf("rollback stopped: %w", err))
