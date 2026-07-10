@@ -644,8 +644,8 @@ func TestRuntimeCascadeResumeReusesChildRun(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 	proc, err := runtime.CreateProcess(session.ID, "parent task", Manifest{
-		Version:  ManifestVersion,
-		Program:  "program@1",
+		Version: ManifestVersion,
+		Program: "program@1",
 		Syscalls: []Syscall{
 			{Syscall: SpawnSyscall, Programs: []Manifest{{Program: "program@1", Syscalls: cognitionGrants()}}},
 			{Syscall: "core.openaiApi", Hidden: true},

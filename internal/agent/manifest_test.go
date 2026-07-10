@@ -128,15 +128,17 @@ func TestValidateManifestValidatesTimerGrant(t *testing.T) {
 // required, no version, recursively validated — plus optional context-sharing
 // settings (history/share_capabilities), with unknown fields rejected.
 func TestValidateManifestValidatesSpawnPrograms(t *testing.T) {
+	no := false
 	valid := Manifest{
 		Version: ManifestVersion,
 		Program: "root",
 		Syscalls: []Syscall{{
 			Syscall: SpawnSyscall,
-			Config:  json.RawMessage(`{"history":false,"share_capabilities":false}`),
 			Programs: []Manifest{{
-				Program:  "scout",
-				Syscalls: []Syscall{{Syscall: "core.custom"}},
+				Program:           "scout",
+				History:           &no,
+				ShareCapabilities: &no,
+				Syscalls:          []Syscall{{Syscall: "core.custom"}},
 			}},
 		}},
 	}
@@ -149,7 +151,7 @@ func TestValidateManifestValidatesSpawnPrograms(t *testing.T) {
 		grant Syscall
 	}{
 		{"no programs", Syscall{Syscall: SpawnSyscall}},
-		{"unknown spawn setting", Syscall{Syscall: SpawnSyscall, Config: json.RawMessage(`{"nope":true}`),
+		{"settings on the grant", Syscall{Syscall: SpawnSyscall, Config: json.RawMessage(`{"history":false}`),
 			Programs: []Manifest{{Program: "scout"}}}},
 		{"program required", Syscall{Syscall: SpawnSyscall, Programs: []Manifest{{}}}},
 		{"nested version", Syscall{Syscall: SpawnSyscall,

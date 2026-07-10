@@ -569,6 +569,15 @@ func (r *Runtime) CreateProcess(sessionID string, input string, manifest Manifes
 	if err != nil {
 		return ProcessSnapshot{}, err
 	}
+	// A root that opts out of capability sharing keeps its grants off its own
+	// sys.input menu (it still holds them) — the same effect a spawned child gets
+	// through buildChildManifest. ValidateManifest returned a clone, so this is
+	// local. History is applied below via hideHistory.
+	if !manifest.sharesCapabilities() {
+		for i := range manifest.Syscalls {
+			manifest.Syscalls[i].Hidden = true
+		}
+	}
 	program, err := r.programs.Resolve(manifest.Program)
 	if err != nil {
 		return ProcessSnapshot{}, err
@@ -611,7 +620,7 @@ func (r *Runtime) CreateProcess(sessionID string, input string, manifest Manifes
 		// A root manifest with history:false opts out of session-history sharing —
 		// each run sees only its own input and inherits no cross-run taint. Reuses
 		// the hideHistory delivery gate (and its persistence).
-		hideHistory: manifest.History != nil && !*manifest.History,
+		hideHistory: !manifest.sharesHistory(),
 	}
 	proc.journal = r.newJournal(proc, newProcessHistory(), 0)
 	r.processes[processID] = proc

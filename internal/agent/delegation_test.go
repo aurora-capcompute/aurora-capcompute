@@ -96,20 +96,20 @@ func assertValid(t *testing.T, schema *jsonschema.Schema, doc string, want bool)
 	}
 }
 
-// TestSpawnSettingsDefaults: an absent field shares (the runtime's standing
-// behavior); an explicit false withholds.
-func TestSpawnSettingsDefaults(t *testing.T) {
-	var omitted SpawnSettings
-	if !omitted.shareHistory() || !omitted.shareCapabilities() {
+// TestProgramShareDefaults: a program node's share settings default to sharing
+// (the runtime's standing behavior); an explicit false withholds.
+func TestProgramShareDefaults(t *testing.T) {
+	var omitted Manifest
+	if !omitted.sharesHistory() || !omitted.sharesCapabilities() {
 		t.Fatal("omitted settings should share both history and capabilities")
 	}
 	no, yes := false, true
-	off := SpawnSettings{History: &no, ShareCapabilities: &no}
-	if off.shareHistory() || off.shareCapabilities() {
+	off := Manifest{History: &no, ShareCapabilities: &no}
+	if off.sharesHistory() || off.sharesCapabilities() {
 		t.Fatal("explicit false should withhold")
 	}
-	on := SpawnSettings{History: &yes}
-	if !on.shareHistory() || !on.shareCapabilities() {
+	on := Manifest{History: &yes}
+	if !on.sharesHistory() || !on.sharesCapabilities() {
 		t.Fatal("explicit true / omitted should share")
 	}
 }
@@ -143,38 +143,30 @@ func TestBuildChildManifestCapabilitiesGate(t *testing.T) {
 	}
 }
 
-// TestNormalizeSpawnSettings canonicalizes valid settings and rejects a typo'd
-// (unknown) field so it surfaces at manifest time.
-func TestNormalizeSpawnSettings(t *testing.T) {
-	out, err := normalizeSpawnSettings(json.RawMessage(`{"history":false}`))
-	if err != nil {
-		t.Fatalf("valid settings: %v", err)
+// TestSpawnGrantTakesNoSettings: the context settings live on the program node
+// now, so a sys.spawn grant that carries them on the grant is rejected, while a
+// grant with a program that carries them validates.
+func TestSpawnGrantTakesNoSettings(t *testing.T) {
+	onGrant := Manifest{
+		Version: ManifestVersion,
+		Syscalls: []Syscall{{
+			Syscall:  SpawnSyscall,
+			Config:   json.RawMessage(`{"history":false}`),
+			Programs: []Manifest{{Program: "child"}},
+		}},
 	}
-	var settings SpawnSettings
-	if err := json.Unmarshal(out, &settings); err != nil {
-		t.Fatalf("re-decode %s: %v", out, err)
+	if _, err := ValidateManifest(onGrant, &testDispatchers{}); err == nil {
+		t.Fatal("expected grant-level spawn settings to be rejected")
 	}
-	if settings.shareHistory() || !settings.shareCapabilities() {
-		t.Fatalf("normalized settings wrong: %s", out)
+	no := false
+	onProgram := Manifest{
+		Version: ManifestVersion,
+		Syscalls: []Syscall{{
+			Syscall:  SpawnSyscall,
+			Programs: []Manifest{{Program: "child", History: &no, ShareCapabilities: &no}},
+		}},
 	}
-	if _, err := normalizeSpawnSettings(json.RawMessage(`{"capabilites":true}`)); err == nil {
-		t.Fatal("expected an unknown field to be rejected")
-	}
-}
-
-// TestNewSpawnRouterReadsSettings: the router reads the grant's context-sharing
-// policy; a grant with no settings shares both.
-func TestNewSpawnRouterReadsSettings(t *testing.T) {
-	grant := Syscall{
-		Syscall:  SpawnSyscall,
-		Config:   json.RawMessage(`{"history":false,"share_capabilities":false}`),
-		Programs: []Manifest{{Program: "child"}},
-	}
-	if r := newSpawnRouter(nil, grant, nil); r.shareHistory || r.shareCapabilities {
-		t.Fatalf("router should withhold both: history=%v caps=%v", r.shareHistory, r.shareCapabilities)
-	}
-	bare := Syscall{Syscall: SpawnSyscall, Programs: []Manifest{{Program: "child"}}}
-	if r := newSpawnRouter(nil, bare, nil); !r.shareHistory || !r.shareCapabilities {
-		t.Fatal("a settings-free grant should share both")
+	if _, err := ValidateManifest(onProgram, &testDispatchers{}); err != nil {
+		t.Fatalf("program-level spawn settings should validate: %v", err)
 	}
 }

@@ -34,48 +34,32 @@ type TimerSettings struct {
 	MaxDurationMS int64 `json:"max_duration_ms,omitempty"`
 }
 
-// SpawnSettings is the Config shape of a sys.spawn grant: it gates what a
-// spawned child inherits in its sys.input. History controls whether the child
-// sees the session history; ShareCapabilities controls whether the child's own
-// capability menu is advertised to it. Both default to true (shared, the
-// runtime's standing behavior) when omitted — set false to spawn an isolated
-// child that sees only its input. The grants themselves are unaffected: a
-// child with ShareCapabilities:false still holds its granted syscalls, they are
-// merely off its discoverable menu. (The field is `share_capabilities`, not
-// `capabilities`, since a leaf grant's `capabilities` is its operation list.)
-type SpawnSettings struct {
-	History           *bool `json:"history,omitempty"`
-	ShareCapabilities *bool `json:"share_capabilities,omitempty"`
-}
-
-// shareHistory reports whether a spawned child inherits the session history
-// (the default when unset).
-func (s SpawnSettings) shareHistory() bool { return s.History == nil || *s.History }
-
-// shareCapabilities reports whether a spawned child's capability menu is
-// advertised on its sys.input (the default when unset).
-func (s SpawnSettings) shareCapabilities() bool {
-	return s.ShareCapabilities == nil || *s.ShareCapabilities
-}
-
 // Manifest is one process node: Program names it and Syscalls is its grant
 // set. A spawnable child inside a sys.spawn grant is itself a Manifest — the
 // recursion that makes the whole grant tree one shape — carrying no Version
 // of its own: the root's governs. A child's failure is a recoverable
 // observation to its parent's cognition; a program that must abort on it makes
-// the spawn a hard call. A program node carries no persona and no settings: a
-// process runs on exactly the input its interface declares, and the only
-// configuration lives on the syscall grants.
+// the spawn a hard call.
+//
+// A program node carries two optional context settings, honored wherever the
+// program runs — as the root, or spawned as a child — so history and capability
+// sharing live in one place per program rather than on the spawning grant.
+// Everything else is configuration on the syscall grants.
 type Manifest struct {
 	Version int    `json:"version,omitempty"`
 	Program string `json:"program,omitempty"`
-	// History, on the root, disables session-history sharing across runs when set
-	// false: each run of this program starts fresh — its sys.input omits the
-	// session history, so it sees only its own input and inherits no taint from a
-	// prior run. Unset (the default) shares history, the runtime's standing
-	// behavior. It is the one setting a program node carries, and only at the
-	// root: a spawned child's history is governed by its parent sys.spawn grant.
+	// History, when false, isolates this program's process from session history:
+	// its sys.input omits the history, so it sees only its own input and inherits
+	// no taint from a prior run (at the root) or from the parent's session (when
+	// spawned). Unset (the default) shares history — the runtime's standing
+	// behavior.
 	History *bool `json:"history,omitempty"`
+	// ShareCapabilities, when false, keeps this program's capability menu off its
+	// sys.input: it still holds its granted syscalls, they are merely not
+	// advertised (the program calls them directly). Unset (the default) advertises
+	// them. (The field is `share_capabilities`, not `capabilities`, since a leaf
+	// grant's `capabilities` is its operation list.)
+	ShareCapabilities *bool `json:"share_capabilities,omitempty"`
 	// BindingRef is an opaque application correlation reference (e.g. the
 	// name of the control-plane binding that produced this manifest). The
 	// runtime never interprets it.
@@ -83,13 +67,24 @@ type Manifest struct {
 	Syscalls   []Syscall `json:"syscalls,omitempty"`
 }
 
+// sharesHistory reports whether this program's process inherits session history
+// (the default when unset).
+func (m Manifest) sharesHistory() bool { return m.History == nil || *m.History }
+
+// sharesCapabilities reports whether this program's capability menu is advertised
+// on its sys.input (the default when unset).
+func (m Manifest) sharesCapabilities() bool {
+	return m.ShareCapabilities == nil || *m.ShareCapabilities
+}
+
 // Syscall is one granted syscall — a tagged union discriminated by Syscall. The
 // runtime owns three fields: Syscall (which family), Hidden (dispatchable but
 // off the discoverable menu), and Programs (a sys.spawn grant's spawnable
 // children, each a recursive Manifest). Everything else is Config: the family's
 // own configuration, opaque to the runtime and interpreted by whoever serves the
-// syscall — a leaf driver's `capabilities` list and knobs, a sys.spawn grant's
-// context-sharing settings, a sys.timer grant's bound. Data-flow policy
+// syscall — a leaf driver's `capabilities` list and knobs, a sys.timer grant's
+// bound (a sys.spawn grant carries no Config: its programs' context settings live
+// on each program node). Data-flow policy
 // (labels/taints) lives inside a leaf's `capabilities` entries, in Config; the
 // driver enforces it per call.
 type Syscall struct {
@@ -165,16 +160,6 @@ func (s Syscall) MarshalJSON() ([]byte, error) {
 // isSpawn reports whether a grant spawns child processes rather than naming
 // a leaf I/O driver.
 func (s Syscall) isSpawn() bool { return s.Syscall == SpawnSyscall }
-
-// spawnSettings decodes a sys.spawn grant's context-sharing settings (validated
-// and canonicalized at manifest time); a grant with no settings shares all.
-func (s Syscall) spawnSettings() SpawnSettings {
-	var out SpawnSettings
-	if len(s.Config) > 0 {
-		_ = json.Unmarshal(s.Config, &out)
-	}
-	return out
-}
 
 // runtimeServed reports whether the runtime itself serves the granted
 // syscall, rather than a driver built by the dispatcher provider.
@@ -256,11 +241,12 @@ func validateSyscalls(syscalls []Syscall, provider DispatcherProvider) error {
 			if len(grant.Programs) == 0 {
 				return fmt.Errorf("%w: %s requires at least one program", ErrInvalid, SpawnSyscall)
 			}
-			normalized, err := normalizeSpawnSettings(grant.Config)
-			if err != nil {
-				return fmt.Errorf("%w: %s settings: %v", ErrInvalid, SpawnSyscall, err)
+			// Context settings (history, share_capabilities) live on each program
+			// node now, not on the grant — so the grant carries only its programs.
+			if len(bytes.TrimSpace(grant.Config)) > 0 {
+				return fmt.Errorf("%w: %s takes no settings; set history/share_capabilities on each program", ErrInvalid, SpawnSyscall)
 			}
-			grant.Config = normalized
+			grant.Config = nil
 			programs := make(map[string]struct{}, len(grant.Programs))
 			for j := range grant.Programs {
 				child := &grant.Programs[j]
@@ -300,26 +286,6 @@ func validateSyscalls(syscalls []Syscall, provider DispatcherProvider) error {
 		seen[grant.Syscall] = struct{}{}
 	}
 	return nil
-}
-
-// normalizeSpawnSettings validates a sys.spawn grant's settings and returns
-// their canonical form (nil when none). Unknown fields are rejected so a typo
-// (e.g. "capabilites") surfaces at manifest time rather than silently sharing
-// everything.
-func normalizeSpawnSettings(raw json.RawMessage) (json.RawMessage, error) {
-	if len(bytes.TrimSpace(raw)) == 0 {
-		return nil, nil
-	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	var settings SpawnSettings
-	if err := decoder.Decode(&settings); err != nil {
-		return nil, err
-	}
-	if settings.History == nil && settings.ShareCapabilities == nil {
-		return nil, nil
-	}
-	return json.Marshal(settings)
 }
 
 // normalizeTimerSettings validates a sys.timer grant's bound and returns its

@@ -20,12 +20,10 @@ import (
 // it never becomes a human-approvable task — and below the savepoint markers
 // and replay, so spawn results are journaled effects.
 type spawnRouter struct {
-	next              sys.Dispatcher[ProcessContext]
-	programs          []Manifest
-	hidden            bool
-	shareHistory      bool
-	shareCapabilities bool
-	runtime           *Runtime
+	next     sys.Dispatcher[ProcessContext]
+	programs []Manifest
+	hidden   bool
+	runtime  *Runtime
 }
 
 type spawnArgs struct {
@@ -38,14 +36,11 @@ type spawnResult struct {
 }
 
 func newSpawnRouter(next sys.Dispatcher[ProcessContext], grant Syscall, runtime *Runtime) *spawnRouter {
-	settings := grant.spawnSettings()
 	return &spawnRouter{
-		next:              next,
-		programs:          grant.Programs,
-		hidden:            grant.Hidden,
-		shareHistory:      settings.shareHistory(),
-		shareCapabilities: settings.shareCapabilities(),
-		runtime:           runtime,
+		next:     next,
+		programs: grant.Programs,
+		hidden:   grant.Hidden,
+		runtime:  runtime,
 	}
 }
 
@@ -249,9 +244,10 @@ func (r *spawnRouter) spawn(ctx context.Context, parent ProcessContext, spec Man
 		return spawnAnswer(answer)
 	}
 
-	childManifest := buildChildManifest(spec, r.shareCapabilities)
+	// History and capability sharing are the child program's own settings now.
+	childManifest := buildChildManifest(spec, spec.sharesCapabilities())
 	slog.Info("spawning child process in parent session", "parent", parent.ProcessID, "child", spec.Program)
-	proc, err := r.runtime.createChildProcess(parent.ProcessID, parent.SessionID, input, childManifest, r.shareHistory)
+	proc, err := r.runtime.createChildProcess(parent.ProcessID, parent.SessionID, input, childManifest, spec.sharesHistory())
 	if err != nil {
 		return sys.Fail(fmt.Sprintf("create child process: %v", err)), nil
 	}
