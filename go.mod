@@ -9,10 +9,12 @@ require (
 )
 
 require (
+	github.com/dlclark/regexp2 v1.12.0 // indirect
 	github.com/dylibso/observe-sdk/go v0.0.0-20240828172851-9145d8ad07e1 // indirect
 	github.com/extism/go-pdk v1.1.3 // indirect
 	github.com/gobwas/glob v0.2.3 // indirect
 	github.com/ianlancetaylor/demangle v0.0.0-20260505044615-1ff4bf46051f // indirect
+	github.com/stretchr/testify v1.11.1 // indirect
 	github.com/tetratelabs/wabin v0.0.0-20230304001439-f6f874872834 // indirect
 	github.com/tetratelabs/wazero v1.12.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.10.0 // indirect
