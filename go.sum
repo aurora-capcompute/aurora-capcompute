@@ -1,5 +1,5 @@
-github.com/aurora-capcompute/capcompute v0.0.0-20260710133702-854dd3bb237d h1:wUiYOfwihkpf9E2isHi18EOmNg0i1iwFsS964u83+io=
-github.com/aurora-capcompute/capcompute v0.0.0-20260710133702-854dd3bb237d/go.mod h1:ftdHIQ963KvfrKMhkRt3bB2AiKYIZtU52V6ScC4TbS8=
+github.com/aurora-capcompute/capcompute v0.0.0-20260711075043-87f32dc79181 h1:2AoKM6IcjJWGMSjcUihHGluJPv6eXy/aZ5Y0u+kSLAk=
+github.com/aurora-capcompute/capcompute v0.0.0-20260711075043-87f32dc79181/go.mod h1:kPs+1zykay7j4Rbm58hvYE8nBk0YSBN1Z/uy6iXKy2c=
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc h1:U9qPSI2PIWSS1VwoXQT9A3Wy9MM3WgvqSxFWenqJduM=
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/dlclark/regexp2 v1.12.0 h1:0j4c5qQmnC6XOWNjP3PIXURXN2gWx76rd3KvgdPkCz8=
