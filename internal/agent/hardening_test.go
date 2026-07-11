@@ -30,7 +30,10 @@ func TestSpawnAnswerStampsChildLabels(t *testing.T) {
 }
 
 // C1: the child's terminal snapshot carries its taint out of waitForCompletion,
-// which is where the spawn result gets it.
+// which is where the spawn result gets it — on the completed path AND on every
+// failed/rolled-back path. The spawn call sites stamp these labels on their
+// error returns too, so a child cannot launder an observed source to the parent
+// through a (guest-controlled) failure or abort reason.
 func TestChildTerminalCarriesLabels(t *testing.T) {
 	answer, labels, done, err := childTerminal(ProcessSnapshot{
 		Status: ProcessCompleted, Answer: "a", Labels: []string{"untrusted_web"},
@@ -40,6 +43,21 @@ func TestChildTerminalCarriesLabels(t *testing.T) {
 	}
 	if len(labels) != 1 || labels[0] != "untrusted_web" {
 		t.Fatalf("labels = %v, want the snapshot's taint", labels)
+	}
+
+	// The error terminals must carry the taint too — these are the states the
+	// spawn error branches propagate. ProcessCompensated is the sharpest: its
+	// error text embeds the guest's rollback reason, which can carry read data.
+	for _, status := range []ProcessStatus{ProcessFailed, ProcessStopped, ProcessInterrupted, ProcessCompensated} {
+		_, labels, done, err := childTerminal(ProcessSnapshot{
+			Status: status, Answer: "leak", Labels: []string{"secret"},
+		})
+		if !done || err == nil {
+			t.Fatalf("childTerminal(%s) = done %v, err %v, want a terminal error", status, done, err)
+		}
+		if len(labels) != 1 || labels[0] != "secret" {
+			t.Fatalf("childTerminal(%s) labels = %v, want the child's taint carried on the error", status, labels)
+		}
 	}
 }
 

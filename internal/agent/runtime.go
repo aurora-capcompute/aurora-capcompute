@@ -670,10 +670,13 @@ func (r *Runtime) CreateProcess(sessionID string, input string, manifest Manifes
 		return ProcessSnapshot{}, err
 	}
 	snapshot := r.processSnapshotLocked(proc)
+	// Enroll in the wait group before releasing r.mu: Close sets r.closed under
+	// r.mu and then waits, so an Add that landed after the closed-check but after
+	// the unlock could race a returning Wait and panic. Under the lock it cannot.
+	r.wg.Add(1)
 	r.mu.Unlock()
 
 	r.publish(sessionID, Event{Type: "process.updated", Data: snapshot})
-	r.wg.Add(1)
 	go r.execute(processID)
 	return snapshot, nil
 }
@@ -989,9 +992,9 @@ func (r *Runtime) spawnSettleLocked(proc *processState, status ProcessStatus, se
 	_ = r.appendProcess(proc)
 	snapshot := r.processSnapshotLocked(proc)
 	sessionID := proc.sessionID
+	r.wg.Add(1) // enroll before releasing r.mu (see CreateProcess) so Close cannot race Wait
 	r.mu.Unlock()
 	r.publish(sessionID, Event{Type: "process.updated", Data: snapshot})
-	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
 		settle()
@@ -1029,10 +1032,10 @@ func (r *Runtime) relaunchLocked(proc *processState) (ProcessSnapshot, error) {
 	}
 	snapshot := r.processSnapshotLocked(proc)
 	sessionID, processID := proc.sessionID, proc.id
+	r.wg.Add(1) // enroll before releasing r.mu (see CreateProcess) so Close cannot race Wait
 	r.mu.Unlock()
 
 	r.publish(sessionID, Event{Type: "process.updated", Data: snapshot})
-	r.wg.Add(1)
 	go r.execute(processID)
 	return snapshot, nil
 }

@@ -235,7 +235,10 @@ func (r *spawnRouter) spawn(ctx context.Context, parent ProcessContext, spec Man
 			}
 			answer, labels, _, procErr := childTerminal(snap)
 			if procErr != nil {
-				return sys.Fail(procErr.Error()), nil
+				// A failed/rolled-back child still observed its sources; carry the
+				// child's taint on the error too, or its (guest-controlled) error
+				// text is an untainted channel that launders to the parent.
+				return sys.Fail(procErr.Error()).WithLabels(labels...), nil
 			}
 			return spawnAnswer(answer, labels...)
 		}
@@ -244,7 +247,7 @@ func (r *spawnRouter) spawn(ctx context.Context, parent ProcessContext, spec Man
 		}
 		answer, labels, parked, err := r.runtime.waitForCompletion(ctx, childID, sessionID)
 		if err != nil {
-			return sys.Fail(err.Error()), nil
+			return sys.Fail(err.Error()).WithLabels(labels...), nil
 		}
 		if parked {
 			return sys.Yield(fmt.Sprintf("waiting on child %s", spec.Program)), nil
@@ -261,7 +264,7 @@ func (r *spawnRouter) spawn(ctx context.Context, parent ProcessContext, spec Man
 	}
 	answer, labels, parked, err := r.runtime.waitForCompletion(ctx, proc.ID, parent.SessionID)
 	if err != nil {
-		return sys.Fail(err.Error()), nil
+		return sys.Fail(err.Error()).WithLabels(labels...), nil
 	}
 	if parked {
 		// The child parked for human approval. Yield so the parent process suspends
@@ -437,10 +440,10 @@ func (r *Runtime) createChildProcess(parentProcessID string, sessionID string, i
 		}
 	}
 	snapshot := r.processSnapshotLocked(proc)
+	r.wg.Add(1) // enroll before releasing r.mu (see CreateProcess) so Close cannot race Wait
 	r.mu.Unlock()
 
 	r.publish(sessionID, Event{Type: "process.updated", Data: snapshot})
-	r.wg.Add(1)
 	go r.execute(processID)
 	return snapshot, nil
 }

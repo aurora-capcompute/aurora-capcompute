@@ -128,6 +128,40 @@ func (s *rollbackState) widenToRevision(j *logJournal) {
 	s.Registrations = j.registrationsIn(0, s.ScopeEnd)
 }
 
+// rollbackTaint is the taint that must gate this revision's compensations: the
+// live FlowMonitor snapshot unioned with the taint the journal records across
+// its completions. The union only changes anything after a crash/restart, when
+// the in-memory snapshot is empty — the kernel FlowMonitor that rebuilds it on
+// the forward path does not run on the rollback path, and the revision laws
+// forbid re-driving the guest to repopulate it. On the live path the snapshot
+// already covers the journaled labels (the FlowMonitor observed every replayed
+// completion under this PID), so the union is idempotent. Without it a resumed
+// compensation dispatches untainted and can launder a forbidden source past the
+// driver sink guards.
+func (r *Runtime) rollbackTaint(pid string, journal *logJournal) []string {
+	seen := map[string]bool{}
+	var taint []string
+	add := func(labels []string) {
+		for _, label := range labels {
+			if !seen[label] {
+				seen[label] = true
+				taint = append(taint, label)
+			}
+		}
+	}
+	add(r.taints.Snapshot(pid))
+	for i, length := 0, journal.Length(); i < length; i++ {
+		rec, err := journal.Load(i)
+		if err != nil {
+			continue
+		}
+		if rec.Kind == journaled.KindCompletion && rec.Result != nil {
+			add(rec.Result.Labels())
+		}
+	}
+	return taint
+}
+
 // rollbackView reads the journal's rollback picture. started reports whether
 // a rollback is already marked in the journal: the guest's own completed
 // sys.abort as the last word, or an appended compensation section (a host
@@ -537,7 +571,7 @@ func (r *Runtime) settleRollback(processID string) {
 	// sink with the tainted data, and abort to fire it. With the taint present a
 	// forbidding inverse is refused, and a memory/filesystem write stores the
 	// value WITH its taint rather than poisoning storage unlabeled.
-	runTaint := r.taints.Snapshot(cred.PID())
+	runTaint := r.rollbackTaint(cred.PID(), journal)
 
 	var undone []string
 	dispatchInverse := func(inverse sys.Syscall, key string) error {

@@ -21,6 +21,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
+	"github.com/aurora-capcompute/capcompute"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
@@ -174,6 +176,38 @@ func TestCompensationCannotLaunderTaintPastRollbackSink(t *testing.T) {
 	}
 	if snap.Status != ProcessFailed {
 		t.Fatalf("process status = %v, want failed (rollback blocked, unsettled)", snap.Status)
+	}
+}
+
+// TestRollbackTaintRebuiltFromJournalAfterCrash is the crash twin of the test
+// above. r.taints is in-memory and is not rebuilt on restore — the kernel
+// FlowMonitor that repopulates it on the forward path does not run on the
+// rollback path, and the revision laws forbid re-driving the guest. So after a
+// restart the snapshot is empty, and settleRollback would inject an EMPTY taint,
+// re-opening the exact launder the test above closes on the live path.
+// rollbackTaint reconstructs the run's taint from the journal's completions;
+// this proves the reconstruction picks up a `secret` a live snapshot has lost.
+func TestRollbackTaintRebuiltFromJournalAfterCrash(t *testing.T) {
+	log := newMemLog()
+	scope := eventlog.Scope{TenantID: "t", SessionID: "th"}
+	now := func() time.Time { return time.Unix(0, 0).UTC() }
+	j := newLogJournal(log, scope, "proc1", 1, newProcessHistory(), 0, now, nil)
+
+	// A completed read that observed a `secret` source — exactly what the Labeler
+	// journals below replay for a labeled capability.
+	syscall := sys.Syscall{Abi: sys.ABIVersion, Name: "vault.read"}
+	labeled := sys.Result(json.RawMessage(`{"secret":"hunter2"}`)).WithLabels("secret")
+	appendPair(t, j, syscall, labeled)
+
+	// A freshly-restarted runtime: nothing has re-observed the completion, so the
+	// in-memory snapshot is empty — the crash condition.
+	restarted := &Runtime{taints: capcompute.NewTaints[string]()}
+	if snap := restarted.taints.Snapshot("proc1"); len(snap) != 0 {
+		t.Fatalf("precondition: taint map should be empty after restart, got %v", snap)
+	}
+
+	if taint := restarted.rollbackTaint("proc1", j); !containsLabel(taint, "secret") {
+		t.Fatalf("rollbackTaint = %v, want `secret` rebuilt from the journal (else a resumed compensation launders)", taint)
 	}
 }
 
