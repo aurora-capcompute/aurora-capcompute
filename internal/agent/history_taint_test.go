@@ -40,7 +40,7 @@ func TestSysInputStampsHistoryLabels(t *testing.T) {
 		{Role: "user", Content: "what is Hwaas"},
 		{Role: "assistant", Content: "HwaaS is …", Labels: []string{"onyx_data"}},
 	}
-	l := newLifecycleDispatcher(nopNext{}, "next task", history, Manifest{}, 1, nil)
+	l := newLifecycleDispatcher(nopNext{}, "next task", nil, history, Manifest{}, 1, nil)
 
 	result, err := l.Dispatch(context.Background(), ProcessContext{},
 		sys.Syscall{Name: callSysInput}, sys.Authorization{})
@@ -58,7 +58,7 @@ func TestSysInputStampsHistoryLabels(t *testing.T) {
 // History with no labels stamps nothing — a fresh session doesn't spuriously
 // taint the run.
 func TestSysInputUnlabeledHistoryTaintsNothing(t *testing.T) {
-	l := newLifecycleDispatcher(nopNext{}, "task",
+	l := newLifecycleDispatcher(nopNext{}, "task", nil,
 		[]HistoryMessage{{Role: "assistant", Content: "clean"}}, Manifest{}, 1, nil)
 	result, err := l.Dispatch(context.Background(), ProcessContext{},
 		sys.Syscall{Name: callSysInput}, sys.Authorization{})

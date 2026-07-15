@@ -382,10 +382,21 @@ func (r *Runtime) createChildProcess(parentProcessID string, sessionID string, i
 		r.mu.Unlock()
 		return ProcessSnapshot{}, fmt.Errorf("%w: session already has active process %s", ErrConflict, session.activeProcessID)
 	}
+	// The child's input was composed by the parent from whatever the parent had
+	// observed, so it inherits the parent's taint at spawn: snapshot it here and
+	// let the child's sys.input stamp it — the downward mirror of the
+	// child→parent stamp on the spawn answer. Without it a tainted parent
+	// launders by embedding observed data in the input of a fresh, untainted
+	// child whose manifest grants the guarded sink.
+	var inputLabels []string
+	if parent := r.processes[parentProcessID]; parent != nil {
+		inputLabels = r.taints.Snapshot(processPID(parent.id, parent.revision))
+	}
 	proc := &processState{
 		id:              processID,
 		sessionID:       sessionID,
 		input:           input,
+		inputLabels:     inputLabels,
 		history:         append([]HistoryMessage(nil), session.history...),
 		status:          ProcessQueued,
 		attempt:         1,

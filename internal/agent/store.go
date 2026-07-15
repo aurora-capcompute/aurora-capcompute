@@ -52,6 +52,11 @@ type StoredProcess struct {
 	// process contributes is rebuilt with its provenance on restore — the
 	// cross-run flow policy survives a restart.
 	Labels []string `json:",omitempty"`
+	// InputLabels is the provenance the process's input arrived with — a
+	// delegated child's parent-taint snapshot at spawn. Persisted so a restart or
+	// revision restart re-serves sys.input with the same taint seed; the
+	// parent→child flow policy survives a restart exactly like the cross-run one.
+	InputLabels []string `json:",omitempty"`
 	// Tags carries the owning session's tags. A session.state event now carries
 	// them too; this copy is retained so sessions from pre-session.state streams
 	// (which have no such event) still restore their tags.

@@ -310,11 +310,16 @@ func (r *Runtime) wrapProtocol(cred ProcessContext, next sys.Dispatcher[ProcessC
 	proc := r.processes[cred.ProcessID]
 	var manifest Manifest
 	var input string
+	var inputLabels []string
 	var history []HistoryMessage
 	var attempt int
 	if proc != nil {
 		manifest = cloneManifest(proc.manifest)
 		input = proc.input
+		// The input's provenance (a delegated child's parent-taint snapshot)
+		// rides sys.input regardless of history sharing: history:false isolates
+		// the conversation, not the flow policy.
+		inputLabels = append([]string(nil), proc.inputLabels...)
 		// A child spawned with history:false serves no session history on its
 		// sys.input — it sees only its own input. The capability menu is gated
 		// separately, by hidden grants in the child's own manifest.
@@ -330,7 +335,7 @@ func (r *Runtime) wrapProtocol(cred ProcessContext, next sys.Dispatcher[ProcessC
 	if grant, ok := manifest.grant(SpawnSyscall); ok {
 		next = newSpawnRouter(next, grant, r)
 	}
-	return newLifecycleDispatcher(next, input, history, manifest, attempt, r.programs.answerValidator(manifest.Program)), nil
+	return newLifecycleDispatcher(next, input, inputLabels, history, manifest, attempt, r.programs.answerValidator(manifest.Program)), nil
 }
 
 // programBinding checks that the process's program is loaded with the exact

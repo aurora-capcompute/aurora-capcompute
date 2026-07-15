@@ -323,7 +323,7 @@ func TestRollbackViewSemantics(t *testing.T) {
 // policy; malformed args are rejected at dispatch and empty args are a bare
 // "roll back now, no retry".
 func TestLifecycleAbortArgs(t *testing.T) {
-	l := newLifecycleDispatcher(stubNext{}, "msg", nil, Manifest{}, 1, nil)
+	l := newLifecycleDispatcher(stubNext{}, "msg", nil, nil, Manifest{}, 1, nil)
 	dispatch := func(args string) sys.SyscallResult {
 		t.Helper()
 		result, err := l.Dispatch(context.Background(), ProcessContext{},
@@ -356,7 +356,7 @@ func TestLifecycleValidatesAnswer(t *testing.T) {
 		}
 		return nil
 	}
-	l := newLifecycleDispatcher(stubNext{}, "msg", nil, Manifest{}, 1, reject)
+	l := newLifecycleDispatcher(stubNext{}, "msg", nil, nil, Manifest{}, 1, reject)
 	output := func(args string) sys.SyscallResult {
 		t.Helper()
 		result, err := l.Dispatch(context.Background(), ProcessContext{},

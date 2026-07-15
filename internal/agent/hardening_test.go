@@ -72,7 +72,7 @@ func TestLifecycleCompensateHeldToReferenceMonitor(t *testing.T) {
 		InputSchema: json.RawMessage(`{"type":"object","required":["name"],"properties":{"name":{"type":"string"}},"additionalProperties":false}`),
 		Forbid:      []string{"untrusted_web"},
 	}}}
-	l := newLifecycleDispatcher(next, "msg", nil, Manifest{}, 1, nil)
+	l := newLifecycleDispatcher(next, "msg", nil, nil, Manifest{}, 1, nil)
 	compensate := func(ctx context.Context, args string) sys.SyscallResult {
 		t.Helper()
 		result, err := l.Dispatch(ctx, ProcessContext{},
@@ -107,7 +107,7 @@ func TestSysInputOmitsHistoryLabelsFromGuestPayload(t *testing.T) {
 		{Role: "user", Content: "q"},
 		{Role: "assistant", Content: "a", Labels: []string{"untrusted_web", "credential:ONYX@abc"}},
 	}
-	l := newLifecycleDispatcher(nopNext{}, "task", history, Manifest{}, 1, nil)
+	l := newLifecycleDispatcher(nopNext{}, "task", nil, history, Manifest{}, 1, nil)
 	result, err := l.Dispatch(context.Background(), ProcessContext{},
 		sys.Syscall{Abi: sys.ABIVersion, Name: callSysInput}, sys.Authorization{})
 	if err != nil {
@@ -180,7 +180,7 @@ func TestValidateManifestDeclassifyGrant(t *testing.T) {
 // still gates every crossing on human approval, so this only makes the governed
 // path reachable; it does not let the guest self-lift.
 func TestLifecyclePublishesDeclassifyWhenGranted(t *testing.T) {
-	granted := newLifecycleDispatcher(nopNext{}, "msg", nil,
+	granted := newLifecycleDispatcher(nopNext{}, "msg", nil, nil,
 		Manifest{Syscalls: []Syscall{{Syscall: DeclassifySyscall}}}, 1, nil)
 	cap, ok := sys.FindCapability(granted.Capabilities(), DeclassifySyscall)
 	if !ok {
@@ -192,7 +192,7 @@ func TestLifecyclePublishesDeclassifyWhenGranted(t *testing.T) {
 	if len(cap.InputSchema) == 0 {
 		t.Fatal("sys.declassify must carry an input schema for the Validator")
 	}
-	ungranted := newLifecycleDispatcher(nopNext{}, "msg", nil, Manifest{}, 1, nil)
+	ungranted := newLifecycleDispatcher(nopNext{}, "msg", nil, nil, Manifest{}, 1, nil)
 	if _, ok := sys.FindCapability(ungranted.Capabilities(), DeclassifySyscall); ok {
 		t.Fatal("sys.declassify must not appear unless the manifest grants it (opt-in)")
 	}

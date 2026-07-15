@@ -187,6 +187,13 @@ type processState struct {
 	// per-revision taint is released) so it can ride onto the session-history entry
 	// this process contributes and, through it, into a later run that reads it.
 	labels []string
+	// inputLabels is the provenance the process's input arrived with — for a
+	// delegated child, the parent's taint snapshot at spawn. sys.input stamps
+	// them on its result (beside the history labels) so the child observes what
+	// the parent had observed: the input text was composed from the parent's
+	// sources, and a fresh, untainted child would otherwise launder them downward
+	// — the mirror of the child→parent stamp on the spawn answer.
+	inputLabels []string
 	// stop aborts the process's in-flight quantum: the scheduler submission for a
 	// root process, the direct resume handle for a delegated child. Nil when no
 	// quantum is in flight.

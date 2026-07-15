@@ -110,6 +110,7 @@ func (r *Runtime) restoreSession(proj Projection, journals map[string]map[uint64
 			programDigest:     sr.ProgramDigest,
 			hideHistory:       sr.HideHistory,
 			labels:            append([]string(nil), sr.Labels...),
+			inputLabels:       append([]string(nil), sr.InputLabels...),
 			parentProcessID:   sr.ParentProcessID,
 			childProcessIDs:   append([]string(nil), sr.ChildProcessIDs...),
 			childSpawnOffsets: append([]int(nil), sr.ChildSpawnOffsets...),

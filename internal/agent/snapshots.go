@@ -179,6 +179,7 @@ func (r *Runtime) storedProcessLocked(proc *processState) StoredProcess {
 		ProgramDigest:     proc.programDigest,
 		HideHistory:       proc.hideHistory,
 		Labels:            append([]string(nil), proc.labels...),
+		InputLabels:       append([]string(nil), proc.inputLabels...),
 		Tags:              tags,
 		ParentProcessID:   proc.parentProcessID,
 		ChildProcessIDs:   append([]string(nil), proc.childProcessIDs...),

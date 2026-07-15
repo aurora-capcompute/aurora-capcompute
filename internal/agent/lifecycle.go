@@ -69,11 +69,15 @@ type compensateArgs struct {
 // grant set, so even the runtime's own protocol calls are granted explicitly
 // rather than smuggled past the reference monitor.
 type lifecycleDispatcher struct {
-	next     sys.Dispatcher[ProcessContext]
-	input    string
-	history  []HistoryMessage
-	manifest Manifest
-	attempt  int
+	next  sys.Dispatcher[ProcessContext]
+	input string
+	// inputLabels is the input's provenance — a delegated child's parent-taint
+	// snapshot at spawn. Stamped on the sys.input result beside the history
+	// labels, never serialized into the guest payload.
+	inputLabels []string
+	history     []HistoryMessage
+	manifest    Manifest
+	attempt     int
 	// validateAnswer checks a finished answer against the program's declared
 	// output schema; a rejected answer comes back as a failed result the guest
 	// can react to.
@@ -83,6 +87,7 @@ type lifecycleDispatcher struct {
 func newLifecycleDispatcher(
 	next sys.Dispatcher[ProcessContext],
 	input string,
+	inputLabels []string,
 	history []HistoryMessage,
 	manifest Manifest,
 	attempt int,
@@ -91,6 +96,7 @@ func newLifecycleDispatcher(
 	return &lifecycleDispatcher{
 		next:           next,
 		input:          input,
+		inputLabels:    inputLabels,
 		history:        history,
 		manifest:       manifest,
 		attempt:        attempt,
@@ -110,11 +116,14 @@ func (l *lifecycleDispatcher) Dispatch(ctx context.Context, cred ProcessContext,
 		if err != nil {
 			return sys.Fail(err.Error()), nil
 		}
-		// The input carries the session history — a run-to-run loopback. Stamp it
-		// with the union of the history's provenance labels so the flow monitor
-		// (which observes every result's labels) taints this run with what prior
-		// runs observed, closing the cross-run laundering path.
-		return sys.Result(payload).WithLabels(historyLabels(l.history)...), nil
+		// The input is this run's loopback from everything that came before it:
+		// the session history (prior runs) and, for a delegated child, the input
+		// text a tainted parent composed. Stamp both provenances so the flow
+		// monitor (which observes every result's labels) taints this run with
+		// what its predecessors observed — closing the cross-run laundering path
+		// and its downward mirror, a parent delegating a guarded sink to a
+		// fresh, untainted child.
+		return sys.Result(payload).WithLabels(append(historyLabels(l.history), l.inputLabels...)...), nil
 	case callSysOutput:
 		// The answer travels in syscall.Args and is recorded on the journal; the
 		// host reads it back from there. Validate it against the program's
