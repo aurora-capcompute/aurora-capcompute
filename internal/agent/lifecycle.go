@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/capcompute/sys"
-	"github.com/aurora-capcompute/capcompute/sys/replay/tape/journaled"
 )
 
 // Agent lifecycle syscalls. The guest fetches its input and reports its answer

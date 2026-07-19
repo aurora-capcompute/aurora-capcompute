@@ -1,6 +1,6 @@
 // Package host owns the per-process dispatcher stack. It takes the caller-supplied
 // driver chain and completes it, for one process, with durable task approval and
-// savepoint markers, then hands the whole thing to capcompute.Stack.ForProcess so
+// savepoint markers, then hands the whole thing to monitor.Stack.ForProcess so
 // the kernel's canonical monitor chain (Validator → FlowMonitor → replay →
 // Labeler → Declassifier → drivers) is assembled in the one correct order —
 // never by hand. The per-process piece is the tape: a journaled.Tape over the
@@ -18,10 +18,11 @@ import (
 	"io"
 	"time"
 
+	"github.com/aurora-capcompute/aurora-capcompute/journaled"
+	"github.com/aurora-capcompute/aurora-capcompute/monitor"
+	"github.com/aurora-capcompute/aurora-capcompute/replay"
 	"github.com/aurora-capcompute/capcompute"
 	"github.com/aurora-capcompute/capcompute/sys"
-	"github.com/aurora-capcompute/capcompute/sys/replay"
-	"github.com/aurora-capcompute/capcompute/sys/replay/tape/journaled"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 )
@@ -42,7 +43,7 @@ type Factory[ID comparable, K capcompute.PID[ID]] struct {
 	Wrap       func(K, sys.Dispatcher[K]) (sys.Dispatcher[K], error)
 	NewJournal func(context.Context, K) (journaled.Journal, error)
 	Header     func(K) journaled.Header
-	Taints     *capcompute.Taints[ID]
+	Taints     *monitor.Taints[ID]
 	// OpenIntents overrides the replay open-intent policy — what to do with an
 	// effect journaled without a recorded completion, met on crash-resume. Nil
 	// retries every open intent under its original idempotency key.
@@ -123,7 +124,7 @@ func (f Factory[ID, K]) NewDispatcher(ctx context.Context, cred K) (sys.Dispatch
 	// chain can serve — drivers, delegation routes, and the runtime's own
 	// protocol capabilities — is granted explicitly; anything else is denied
 	// by the Validator before it reaches a driver.
-	stack := capcompute.Stack[ID, K]{
+	stack := monitor.Stack[ID, K]{
 		Grants:      func(K) []sys.Capability { return withSavepoints.Capabilities() },
 		Taints:      f.Taints,
 		OpenIntents: f.OpenIntents,

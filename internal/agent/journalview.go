@@ -11,8 +11,8 @@ import (
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
 
+	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/capcompute/sys"
-	"github.com/aurora-capcompute/capcompute/sys/replay/tape/journaled"
 )
 
 // Capability-journal events. Each journal record (an intent, a completion, or

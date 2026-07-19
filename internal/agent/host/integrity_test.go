@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aurora-capcompute/capcompute"
+	"github.com/aurora-capcompute/aurora-capcompute/journaled"
+	"github.com/aurora-capcompute/aurora-capcompute/monitor"
 	"github.com/aurora-capcompute/capcompute/sys"
-	"github.com/aurora-capcompute/capcompute/sys/replay/tape/journaled"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 )
@@ -61,10 +61,12 @@ func (stubStore) MarkExecuted(context.Context, string, string, time.Time) error 
 
 func integrityFactory(journal journaled.Journal, header journaled.Header) Factory[string, integrityPID] {
 	return Factory[string, integrityPID]{
-		Drivers:    func(context.Context, integrityPID) (sys.Dispatcher[integrityPID], error) { return noopDispatcher{}, nil },
+		Drivers: func(context.Context, integrityPID) (sys.Dispatcher[integrityPID], error) {
+			return noopDispatcher{}, nil
+		},
 		NewJournal: func(context.Context, integrityPID) (journaled.Journal, error) { return journal, nil },
 		Header:     func(integrityPID) journaled.Header { return header },
-		Taints:     capcompute.NewTaints[string](),
+		Taints:     monitor.NewTaints[string](),
 		Tasks:      stubStore{},
 		TaskScope:  func(integrityPID) task.Scope { return task.Scope{} },
 		TaskSecret: []byte("secret"),

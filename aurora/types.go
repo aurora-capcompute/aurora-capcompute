@@ -1,8 +1,8 @@
 package aurora
 
 import (
+	"github.com/aurora-capcompute/aurora-capcompute/internal/sched"
 	"github.com/aurora-capcompute/capcompute"
-	"github.com/aurora-capcompute/capcompute/sched"
 	"github.com/aurora-capcompute/capcompute/sys"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent"

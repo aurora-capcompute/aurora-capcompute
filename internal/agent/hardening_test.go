@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aurora-capcompute/aurora-capcompute/replay"
 	"github.com/aurora-capcompute/capcompute/sys"
-	"github.com/aurora-capcompute/capcompute/sys/replay"
 )
 
 // C1: a completed child's taint must ride its spawn result so the parent's

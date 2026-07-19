@@ -23,11 +23,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/sched"
+	"github.com/aurora-capcompute/aurora-capcompute/journaled"
+	"github.com/aurora-capcompute/aurora-capcompute/monitor"
+	"github.com/aurora-capcompute/aurora-capcompute/replay"
 	"github.com/aurora-capcompute/capcompute"
-	"github.com/aurora-capcompute/capcompute/sched"
 	"github.com/aurora-capcompute/capcompute/sys"
-	"github.com/aurora-capcompute/capcompute/sys/replay"
-	"github.com/aurora-capcompute/capcompute/sys/replay/tape/journaled"
 
 	internalhost "github.com/aurora-capcompute/aurora-capcompute/internal/agent/host"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
@@ -162,7 +163,7 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		kernels:         make(map[string]*capcompute.Kernel[string, ProcessContext]),
 		programs:        programs,
 		processTable:    config.ProcessTable,
-		taints:          capcompute.NewTaints[string](),
+		taints:          monitor.NewTaints[string](),
 		log:             config.Log,
 		leases:          config.Leases,
 		tenantID:        strings.TrimSpace(config.TenantID),

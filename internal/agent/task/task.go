@@ -23,8 +23,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/capcompute/sys"
-	"github.com/aurora-capcompute/capcompute/sys/replay/tape/journaled"
 )
 
 type Scope struct {

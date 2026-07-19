@@ -55,8 +55,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/capcompute/sys"
-	"github.com/aurora-capcompute/capcompute/sys/replay/tape/journaled"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 )

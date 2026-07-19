@@ -15,9 +15,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/sched"
+	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/capcompute"
-	"github.com/aurora-capcompute/capcompute/sched"
-	"github.com/aurora-capcompute/capcompute/sys/replay/tape/journaled"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
 )

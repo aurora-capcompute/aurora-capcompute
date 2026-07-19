@@ -22,7 +22,7 @@ import (
 	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
-	"github.com/aurora-capcompute/capcompute"
+	"github.com/aurora-capcompute/aurora-capcompute/monitor"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
@@ -201,7 +201,7 @@ func TestRollbackTaintRebuiltFromJournalAfterCrash(t *testing.T) {
 
 	// A freshly-restarted runtime: nothing has re-observed the completion, so the
 	// in-memory snapshot is empty — the crash condition.
-	restarted := &Runtime{taints: capcompute.NewTaints[string]()}
+	restarted := &Runtime{taints: monitor.NewTaints[string]()}
 	if snap := restarted.taints.Snapshot("proc1"); len(snap) != 0 {
 		t.Fatalf("precondition: taint map should be empty after restart, got %v", snap)
 	}

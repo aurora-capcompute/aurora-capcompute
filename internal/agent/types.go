@@ -8,10 +8,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/sched"
+	"github.com/aurora-capcompute/aurora-capcompute/journaled"
+	"github.com/aurora-capcompute/aurora-capcompute/monitor"
 	"github.com/aurora-capcompute/capcompute"
-	"github.com/aurora-capcompute/capcompute/sched"
 	"github.com/aurora-capcompute/capcompute/sys"
-	"github.com/aurora-capcompute/capcompute/sys/replay/tape/journaled"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
 	internalhost "github.com/aurora-capcompute/aurora-capcompute/internal/agent/host"
@@ -132,7 +133,7 @@ type Runtime struct {
 	programs        *loadedPrograms
 	processTable    capcompute.ProcessTable[string, ProcessContext]
 	scheduler       *sched.Scheduler[string, ProcessContext]
-	taints          *capcompute.Taints[string]
+	taints          *monitor.Taints[string]
 	log             eventlog.Log
 	leases          Leases
 	tasks           *eventTaskStore
