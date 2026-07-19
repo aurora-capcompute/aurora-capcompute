@@ -142,12 +142,11 @@ func TestSpawnSeedsChildWithParentTaint(t *testing.T) {
 				defaultID: "program@1",
 				sources:   []ProgramSource{{ID: "program@1", Wasm: buildProgram(t)}},
 			},
-			Dispatchers:  spawnTaintDispatchers{},
-			Log:          store.log,
-			Leases:       store,
-			ProcessTable: newMemProcessTable(),
-			TaskSecret:   []byte("stable-secret"),
-			IDSource:     sequentialIDs(),
+			Dispatchers: spawnTaintDispatchers{},
+			Log:         store.log,
+			Leases:      store,
+			TaskSecret:  []byte("stable-secret"),
+			IDSource:    sequentialIDs(),
 		})
 		if err != nil {
 			t.Fatalf("new runtime: %v", err)

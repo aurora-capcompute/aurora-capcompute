@@ -146,9 +146,6 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 	if config.Leases == nil {
 		return nil, fmt.Errorf("%w: leases are required", ErrInvalid)
 	}
-	if config.ProcessTable == nil {
-		return nil, fmt.Errorf("%w: process table is required", ErrInvalid)
-	}
 	if len(config.TaskSecret) == 0 {
 		return nil, fmt.Errorf("%w: task secret is required", ErrInvalid)
 	}
@@ -160,9 +157,8 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 	runtime := &Runtime{
 		baseCtx:         baseCtx,
 		cancel:          cancel,
-		kernels:         make(map[string]*capcompute.Kernel[string, ProcessContext]),
+		images:          make(map[string]*capcompute.Program[ProcessContext]),
 		programs:        programs,
-		processTable:    config.ProcessTable,
 		taints:          monitor.NewTaints[string](),
 		log:             config.Log,
 		leases:          config.Leases,
@@ -261,14 +257,14 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		if err != nil {
 			return nil, err
 		}
-		kernel, err := runtime.compileProgram(ctx, artifact.ID, source.Wasm)
+		image, err := runtime.compileProgram(ctx, artifact.ID, source.Wasm)
 		if err != nil {
-			for _, opened := range runtime.kernels {
-				_ = opened.Shutdown(context.Background())
+			for _, opened := range runtime.images {
+				_ = opened.Close(context.Background())
 			}
 			return nil, err
 		}
-		runtime.kernels[artifact.ID] = kernel
+		runtime.images[artifact.ID] = image
 	}
 	return runtime, nil
 }
@@ -398,20 +394,18 @@ func (r *Runtime) headerFor(cred ProcessContext) journaled.Header {
 // to runtime state, so it can be called outside the runtime mutex while
 // preparing a SetPrograms swap. The wasm engine gets the bytes' own sha256 for
 // integrity (not the program identity, which also covers the interface).
-func (r *Runtime) compileProgram(ctx context.Context, id string, wasm []byte) (*capcompute.Kernel[string, ProcessContext], error) {
-	kernel, err := capcompute.NewKernel(ctx, capcompute.Config[string, ProcessContext]{
+func (r *Runtime) compileProgram(ctx context.Context, id string, wasm []byte) (*capcompute.Program[ProcessContext], error) {
+	image, err := capcompute.NewProgram[ProcessContext](ctx, capcompute.Config{
 		Image: extism.Manifest{
 			Wasm: []extism.Wasm{extism.WasmData{Data: wasm, Hash: digestOf(wasm), Name: id}},
 		},
 		PluginConfig:   extism.PluginConfig{EnableWasi: true},
-		ProcessTable:   r.processTable,
 		MaxMemoryPages: r.memoryPages,
-		ResumeTimeout:  r.resumeTimeout,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("compile program %q: %w", id, err)
 	}
-	return kernel, nil
+	return image, nil
 }
 
 // SetPrograms declaratively reconciles the registered programs to the given set:
@@ -434,12 +428,12 @@ func (r *Runtime) SetPrograms(ctx context.Context, sources []ProgramSource) erro
 	// outside the lock; fail atomically.
 	type compiled struct {
 		record programRecord
-		kernel *capcompute.Kernel[string, ProcessContext]
+		image  *capcompute.Program[ProcessContext]
 	}
 	var fresh []compiled
 	shutdownFresh := func() {
 		for _, c := range fresh {
-			_ = c.kernel.Shutdown(context.Background())
+			_ = c.image.Close(context.Background())
 		}
 	}
 	for _, src := range sources {
@@ -459,12 +453,12 @@ func (r *Runtime) SetPrograms(ctx context.Context, sources []ProgramSource) erro
 			shutdownFresh()
 			return err
 		}
-		kernel, err := r.compileProgram(ctx, id, record.source.Wasm)
+		image, err := r.compileProgram(ctx, id, record.source.Wasm)
 		if err != nil {
 			shutdownFresh()
 			return err
 		}
-		fresh = append(fresh, compiled{record: record, kernel: kernel})
+		fresh = append(fresh, compiled{record: record, image: image})
 	}
 
 	// Swap under the runtime mutex (which guards r.kernels), collecting the
@@ -476,29 +470,29 @@ func (r *Runtime) SetPrograms(ctx context.Context, sources []ProgramSource) erro
 		shutdownFresh()
 		return fmt.Errorf("%w: runtime is closed", ErrConflict)
 	}
-	var retired []*capcompute.Kernel[string, ProcessContext]
+	var retired []*capcompute.Program[ProcessContext]
 	for _, c := range fresh {
 		id := c.record.artifact.ID
-		if old := r.kernels[id]; old != nil {
+		if old := r.images[id]; old != nil {
 			retired = append(retired, old)
 		}
-		r.kernels[id] = c.kernel
+		r.images[id] = c.image
 		r.programs.put(c.record)
 	}
 	for id := range current {
 		if _, keep := desired[id]; keep {
 			continue
 		}
-		if old := r.kernels[id]; old != nil {
+		if old := r.images[id]; old != nil {
 			retired = append(retired, old)
 		}
-		delete(r.kernels, id)
+		delete(r.images, id)
 		r.programs.remove(id)
 	}
 	r.mu.Unlock()
 
 	for _, old := range retired {
-		_ = old.Shutdown(context.Background())
+		_ = old.Close(context.Background())
 	}
 	return nil
 }
@@ -1166,8 +1160,8 @@ func (r *Runtime) Close(ctx context.Context) error {
 	}
 
 	closeErrors := []error{}
-	for _, kernel := range r.kernels {
-		closeErrors = append(closeErrors, kernel.Shutdown(context.Background()))
+	for _, image := range r.images {
+		closeErrors = append(closeErrors, image.Close(context.Background()))
 	}
 	return errors.Join(closeErrors...)
 }

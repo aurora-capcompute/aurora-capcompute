@@ -65,19 +65,18 @@ type HistoryMessage struct {
 // drivers, the event log, leases, and the kernel's process table are supplied
 // by the application — this module ships interfaces and orchestration only.
 type Config struct {
-	Programs     ProgramProvider
-	Dispatchers  DispatcherProvider
-	Log          eventlog.Log
-	Leases       Leases
-	ProcessTable capcompute.ProcessTable[string, ProcessContext]
-	IDSource     func(prefix string) (string, error)
-	Now          func() time.Time
-	EventSize    int
-	TenantID     string
-	TaskSecret   []byte
-	TaskTTL      time.Duration
-	InstanceID   string
-	LeaseTTL     time.Duration
+	Programs    ProgramProvider
+	Dispatchers DispatcherProvider
+	Log         eventlog.Log
+	Leases      Leases
+	IDSource    func(prefix string) (string, error)
+	Now         func() time.Time
+	EventSize   int
+	TenantID    string
+	TaskSecret  []byte
+	TaskTTL     time.Duration
+	InstanceID  string
+	LeaseTTL    time.Duration
 
 	// MaxConcurrentProcesses bounds simultaneously executing process quanta across the
 	// runtime (0 = a default of 16). Delegated child processes execute inside their
@@ -129,9 +128,8 @@ type Runtime struct {
 	// do NOT use it — they must complete on shutdown to persist final state.
 	baseCtx         context.Context
 	cancel          context.CancelFunc
-	kernels         map[string]*capcompute.Kernel[string, ProcessContext]
+	images          map[string]*capcompute.Program[ProcessContext]
 	programs        *loadedPrograms
-	processTable    capcompute.ProcessTable[string, ProcessContext]
 	scheduler       *sched.Scheduler[string, ProcessContext]
 	taints          *monitor.Taints[string]
 	log             eventlog.Log

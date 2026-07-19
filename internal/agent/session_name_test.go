@@ -9,12 +9,11 @@ import (
 func bootSessionRuntime(t *testing.T, store *runtimeStore) *Runtime {
 	t.Helper()
 	runtime, err := NewRuntime(context.Background(), Config{
-		Dispatchers:  &runtimeDispatchers{},
-		Log:          store.log,
-		Leases:       store,
-		ProcessTable: newMemProcessTable(),
-		TaskSecret:   []byte("stable-secret"),
-		IDSource:     sequentialIDs(),
+		Dispatchers: &runtimeDispatchers{},
+		Log:         store.log,
+		Leases:      store,
+		TaskSecret:  []byte("stable-secret"),
+		IDSource:    sequentialIDs(),
 	})
 	if err != nil {
 		t.Fatalf("boot runtime: %v", err)

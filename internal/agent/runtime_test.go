@@ -128,7 +128,7 @@ func TestNewRuntimeRequiresImplementationDependencies(t *testing.T) {
 	programs := staticPrograms{defaultID: "program@1", sources: []ProgramSource{{ID: "program@1", Wasm: []byte("wasm")}}}
 	base := Config{
 		Programs: programs, Dispatchers: dispatchers, Log: store.log,
-		Leases: store, ProcessTable: newMemProcessTable(), TaskSecret: []byte("secret"),
+		Leases: store, TaskSecret: []byte("secret"),
 	}
 	tests := []struct {
 		name   string
@@ -137,7 +137,6 @@ func TestNewRuntimeRequiresImplementationDependencies(t *testing.T) {
 		{name: "dispatcher provider", mutate: func(config *Config) { config.Dispatchers = nil }},
 		{name: "event log", mutate: func(config *Config) { config.Log = nil }},
 		{name: "leases", mutate: func(config *Config) { config.Leases = nil }},
-		{name: "process table", mutate: func(config *Config) { config.ProcessTable = nil }},
 		{name: "task secret", mutate: func(config *Config) { config.TaskSecret = nil }},
 	}
 	for _, test := range tests {
@@ -173,12 +172,11 @@ func TestRuntimePassesManifestToDispatcherProvider(t *testing.T) {
 			defaultID: "program@1",
 			sources:   []ProgramSource{{ID: "program@1", Wasm: buildProgram(t)}},
 		},
-		Dispatchers:  dispatchers,
-		Log:          store.log,
-		Leases:       store,
-		ProcessTable: newMemProcessTable(),
-		TaskSecret:   []byte("stable-secret"),
-		IDSource:     sequentialIDs(),
+		Dispatchers: dispatchers,
+		Log:         store.log,
+		Leases:      store,
+		TaskSecret:  []byte("stable-secret"),
+		IDSource:    sequentialIDs(),
 	})
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
@@ -234,13 +232,12 @@ func TestRuntimeSetProgramsLifecycle(t *testing.T) {
 	dispatchers := &runtimeDispatchers{}
 	store := newRuntimeStore()
 	runtime, err := NewRuntime(context.Background(), Config{
-		Programs:     nil, // boot with zero programs
-		Dispatchers:  dispatchers,
-		Log:          store.log,
-		Leases:       store,
-		ProcessTable: newMemProcessTable(),
-		TaskSecret:   []byte("stable-secret"),
-		IDSource:     sequentialIDs(),
+		Programs:    nil, // boot with zero programs
+		Dispatchers: dispatchers,
+		Log:         store.log,
+		Leases:      store,
+		TaskSecret:  []byte("stable-secret"),
+		IDSource:    sequentialIDs(),
 	})
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
@@ -389,11 +386,10 @@ func TestNewRuntimeRejectsInvalidProgramWasm(t *testing.T) {
 			defaultID: "program@1",
 			sources:   []ProgramSource{{ID: "program@1", Wasm: []byte("not wasm")}},
 		},
-		Dispatchers:  &runtimeDispatchers{},
-		Log:          store.log,
-		Leases:       store,
-		ProcessTable: newMemProcessTable(),
-		TaskSecret:   []byte("stable-secret"),
+		Dispatchers: &runtimeDispatchers{},
+		Log:         store.log,
+		Leases:      store,
+		TaskSecret:  []byte("stable-secret"),
 	})
 	if err == nil {
 		t.Fatal("expected program compile error")
@@ -621,12 +617,11 @@ func TestRuntimeCascadeResumeReusesChildRun(t *testing.T) {
 			defaultID: "program@1",
 			sources:   []ProgramSource{{ID: "program@1", Wasm: buildProgram(t)}},
 		},
-		Dispatchers:  cascadeDispatchers{},
-		Log:          store.log,
-		Leases:       store,
-		ProcessTable: newMemProcessTable(),
-		TaskSecret:   []byte("stable-secret"),
-		IDSource:     sequentialIDs(),
+		Dispatchers: cascadeDispatchers{},
+		Log:         store.log,
+		Leases:      store,
+		TaskSecret:  []byte("stable-secret"),
+		IDSource:    sequentialIDs(),
 	})
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
@@ -758,12 +753,11 @@ func TestRuntimeApprovalCycle(t *testing.T) {
 			defaultID: "program@1",
 			sources:   []ProgramSource{{ID: "program@1", Wasm: buildProgram(t)}},
 		},
-		Dispatchers:  approvalDispatchers{},
-		Log:          store.log,
-		Leases:       store,
-		ProcessTable: newMemProcessTable(),
-		TaskSecret:   []byte("stable-secret"),
-		IDSource:     sequentialIDs(),
+		Dispatchers: approvalDispatchers{},
+		Log:         store.log,
+		Leases:      store,
+		TaskSecret:  []byte("stable-secret"),
+		IDSource:    sequentialIDs(),
 	})
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
@@ -870,12 +864,11 @@ func TestRuntimeHardSpawnFailsParentOnChildFailure(t *testing.T) {
 			defaultID: "program@1",
 			sources:   []ProgramSource{{ID: "program@1", Wasm: buildProgram(t)}},
 		},
-		Dispatchers:  failingChildDispatchers{},
-		Log:          store.log,
-		Leases:       store,
-		ProcessTable: newMemProcessTable(),
-		TaskSecret:   []byte("stable-secret"),
-		IDSource:     sequentialIDs(),
+		Dispatchers: failingChildDispatchers{},
+		Log:         store.log,
+		Leases:      store,
+		TaskSecret:  []byte("stable-secret"),
+		IDSource:    sequentialIDs(),
 	})
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
@@ -1091,12 +1084,11 @@ func TestRuntimeCascadeResumeUsesResumeModeForFailedChild(t *testing.T) {
 			defaultID: "program@1",
 			sources:   []ProgramSource{{ID: "program@1", Wasm: buildProgram(t)}},
 		},
-		Dispatchers:  &cascadeResumeDispatchers{},
-		Log:          store.log,
-		Leases:       store,
-		ProcessTable: newMemProcessTable(),
-		TaskSecret:   []byte("stable-secret"),
-		IDSource:     sequentialIDs(),
+		Dispatchers: &cascadeResumeDispatchers{},
+		Log:         store.log,
+		Leases:      store,
+		TaskSecret:  []byte("stable-secret"),
+		IDSource:    sequentialIDs(),
 	})
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
@@ -1161,12 +1153,11 @@ func TestRuntimeHardRetryForksFromBeginning(t *testing.T) {
 			defaultID: "program@1",
 			sources:   []ProgramSource{{ID: "program@1", Wasm: buildProgram(t)}},
 		},
-		Dispatchers:  &failThenSucceedDispatchers{},
-		Log:          store.log,
-		Leases:       store,
-		ProcessTable: newMemProcessTable(),
-		TaskSecret:   []byte("stable-secret"),
-		IDSource:     sequentialIDs(),
+		Dispatchers: &failThenSucceedDispatchers{},
+		Log:         store.log,
+		Leases:      store,
+		TaskSecret:  []byte("stable-secret"),
+		IDSource:    sequentialIDs(),
 	})
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
@@ -1425,12 +1416,11 @@ func newCompensationRuntime(t *testing.T, disp *compensationDispatcher) *Runtime
 			defaultID: "program@1",
 			sources:   []ProgramSource{{ID: "program@1", Wasm: buildProgram(t)}},
 		},
-		Dispatchers:  compensationDispatchers{d: disp},
-		Log:          store.log,
-		Leases:       store,
-		ProcessTable: newMemProcessTable(),
-		TaskSecret:   []byte("stable-secret"),
-		IDSource:     sequentialIDs(),
+		Dispatchers: compensationDispatchers{d: disp},
+		Log:         store.log,
+		Leases:      store,
+		TaskSecret:  []byte("stable-secret"),
+		IDSource:    sequentialIDs(),
 	})
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)

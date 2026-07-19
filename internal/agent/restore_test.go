@@ -39,13 +39,12 @@ func TestRestoreQuarantinesStaleManifests(t *testing.T) {
 		},
 	)
 	runtime, err := NewRuntime(context.Background(), Config{
-		Programs:     nil,
-		Dispatchers:  &vanishedToolDispatchers{},
-		Log:          store.log,
-		Leases:       store,
-		ProcessTable: newMemProcessTable(),
-		TaskSecret:   []byte("stable-secret"),
-		IDSource:     sequentialIDs(),
+		Programs:    nil,
+		Dispatchers: &vanishedToolDispatchers{},
+		Log:         store.log,
+		Leases:      store,
+		TaskSecret:  []byte("stable-secret"),
+		IDSource:    sequentialIDs(),
 	})
 	if err != nil {
 		t.Fatalf("boot with stale manifest: %v", err)

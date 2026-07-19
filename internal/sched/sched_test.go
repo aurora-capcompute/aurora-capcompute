@@ -20,7 +20,7 @@ func (p schedPID) PID() string { return p.id }
 type quantum struct {
 	pid  string
 	ctx  context.Context
-	done chan capcompute.ResumeResult[schedPID]
+	done chan capcompute.ResumeResult
 }
 
 // harness fakes the app side of the seam: activation is recorded, resumes
@@ -47,15 +47,15 @@ func (h *harness) config() sched.Config[string, schedPID] {
 			h.mu.Unlock()
 			return &capcompute.Process[schedPID]{Cred: schedPID{id: pid}}, nil
 		},
-		Resume: func(ctx context.Context, process *capcompute.Process[schedPID]) (<-chan capcompute.ResumeResult[schedPID], error) {
-			started := quantum{pid: process.Cred.PID(), ctx: ctx, done: make(chan capcompute.ResumeResult[schedPID], 1)}
-			results := make(chan capcompute.ResumeResult[schedPID], 1)
+		Resume: func(ctx context.Context, process *capcompute.Process[schedPID]) (<-chan capcompute.ResumeResult, error) {
+			started := quantum{pid: process.Cred.PID(), ctx: ctx, done: make(chan capcompute.ResumeResult, 1)}
+			results := make(chan capcompute.ResumeResult, 1)
 			go func() {
 				select {
 				case result := <-started.done:
 					results <- result
 				case <-ctx.Done():
-					results <- capcompute.ResumeResult[schedPID]{Status: capcompute.ResumeStopped, Err: ctx.Err()}
+					results <- capcompute.ResumeResult{Status: capcompute.ResumeStopped, Err: ctx.Err()}
 				}
 			}()
 			h.running <- started
@@ -92,15 +92,15 @@ func (h *harness) deactivated() []string {
 	return append([]string(nil), h.deactivations...)
 }
 
-func completed() capcompute.ResumeResult[schedPID] {
-	return capcompute.ResumeResult[schedPID]{Status: capcompute.ResumeCompleted}
+func completed() capcompute.ResumeResult {
+	return capcompute.ResumeResult{Status: capcompute.ResumeCompleted}
 }
 
-func yielded() capcompute.ResumeResult[schedPID] {
-	return capcompute.ResumeResult[schedPID]{Status: capcompute.ResumeYielded}
+func yielded() capcompute.ResumeResult {
+	return capcompute.ResumeResult{Status: capcompute.ResumeYielded}
 }
 
-func await(t *testing.T, results <-chan capcompute.ResumeResult[schedPID]) capcompute.ResumeResult[schedPID] {
+func await(t *testing.T, results <-chan capcompute.ResumeResult) capcompute.ResumeResult {
 	t.Helper()
 	select {
 	case result := <-results:
@@ -253,7 +253,7 @@ func TestVirtualActorEvictionAndReactivation(t *testing.T) {
 	}
 	defer scheduler.Close()
 
-	run := func(pid string, result capcompute.ResumeResult[schedPID]) {
+	run := func(pid string, result capcompute.ResumeResult) {
 		t.Helper()
 		results, err := scheduler.Submit(context.Background(), pid, "acme", sched.Normal)
 		if err != nil {

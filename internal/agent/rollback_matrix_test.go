@@ -203,12 +203,11 @@ func newMatrixRuntime(t *testing.T, world *crashLog, disp *matrixDispatcher) *Ru
 			defaultID: "program@1",
 			sources:   []ProgramSource{{ID: "program@1", Wasm: buildProgram(t)}},
 		},
-		Dispatchers:  disp,
-		Log:          world,
-		Leases:       newRuntimeStore(), // fresh per life: a real restart outlives lease TTLs
-		ProcessTable: newMemProcessTable(),
-		TaskSecret:   []byte("stable-secret"),
-		IDSource:     sequentialIDs(),
+		Dispatchers: disp,
+		Log:         world,
+		Leases:      newRuntimeStore(), // fresh per life: a real restart outlives lease TTLs
+		TaskSecret:  []byte("stable-secret"),
+		IDSource:    sequentialIDs(),
 	})
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)

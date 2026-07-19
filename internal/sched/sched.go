@@ -49,7 +49,7 @@ type Config[ID comparable, K capcompute.PID[ID]] struct {
 	Activate func(ctx context.Context, pid ID) (*capcompute.Process[K], error)
 	// Resume gives the process one quantum and returns its result stream —
 	// usually a thin wrapper over Kernel.Resume.
-	Resume func(ctx context.Context, process *capcompute.Process[K]) (<-chan capcompute.ResumeResult[K], error)
+	Resume func(ctx context.Context, process *capcompute.Process[K]) (<-chan capcompute.ResumeResult, error)
 	// Deactivate releases a resident process (close the instance, keep the
 	// journal). Called on eviction and when a process terminates. Optional.
 	Deactivate func(pid ID, process *capcompute.Process[K])
@@ -70,7 +70,7 @@ type entry[ID comparable, K capcompute.PID[ID]] struct {
 	pid      ID
 	owner    string
 	priority Priority
-	result   chan capcompute.ResumeResult[K]
+	result   chan capcompute.ResumeResult
 	// cancel aborts the running quantum; nil while queued.
 	cancel context.CancelFunc
 }
@@ -138,7 +138,7 @@ func New[ID comparable, K capcompute.PID[ID]](config Config[ID, K]) (*Scheduler[
 // the channel its result will arrive on. A PID has at most one outstanding
 // submission: waking a process that is already queued or running is
 // ErrAlreadyScheduled.
-func (s *Scheduler[ID, K]) Submit(ctx context.Context, pid ID, owner string, priority Priority) (<-chan capcompute.ResumeResult[K], error) {
+func (s *Scheduler[ID, K]) Submit(ctx context.Context, pid ID, owner string, priority Priority) (<-chan capcompute.ResumeResult, error) {
 	if priority < Low || priority > High {
 		return nil, fmt.Errorf("sched: invalid priority %d", priority)
 	}
@@ -158,7 +158,7 @@ func (s *Scheduler[ID, K]) Submit(ctx context.Context, pid ID, owner string, pri
 		pid:      pid,
 		owner:    owner,
 		priority: priority,
-		result:   make(chan capcompute.ResumeResult[K], 1),
+		result:   make(chan capcompute.ResumeResult, 1),
 	}
 	s.entries[pid] = submitted
 	s.enqueue(submitted)
@@ -174,7 +174,7 @@ func (s *Scheduler[ID, K]) Close() {
 	for _, band := range s.queues {
 		for owner, queue := range band.queues {
 			for _, queued := range queue {
-				queued.result <- capcompute.ResumeResult[K]{Status: capcompute.ResumeStopped, Err: ErrClosed}
+				queued.result <- capcompute.ResumeResult{Status: capcompute.ResumeStopped, Err: ErrClosed}
 				delete(s.entries, queued.pid)
 			}
 			delete(band.queues, owner)
@@ -212,7 +212,7 @@ func (s *Scheduler[ID, K]) Stop(pid ID) bool {
 	s.dequeue(scheduled)
 	delete(s.entries, pid)
 	s.mu.Unlock()
-	scheduled.result <- capcompute.ResumeResult[K]{Status: capcompute.ResumeStopped, Err: ErrStopped}
+	scheduled.result <- capcompute.ResumeResult{Status: capcompute.ResumeStopped, Err: ErrStopped}
 	return true
 }
 
@@ -315,12 +315,12 @@ func (s *Scheduler[ID, K]) runQuantum(ctx context.Context, running *entry[ID, K]
 
 	process, err := s.checkout(ctx, running)
 	if err != nil {
-		s.finish(running, nil, capcompute.ResumeResult[K]{Status: capcompute.ResumeFailed, Err: err})
+		s.finish(running, nil, capcompute.ResumeResult{Status: capcompute.ResumeFailed, Err: err})
 		return
 	}
 	results, err := s.config.Resume(ctx, process)
 	if err != nil {
-		s.finish(running, process, capcompute.ResumeResult[K]{Status: capcompute.ResumeFailed, Err: err})
+		s.finish(running, process, capcompute.ResumeResult{Status: capcompute.ResumeFailed, Err: err})
 		return
 	}
 	s.finish(running, process, <-results)
@@ -354,7 +354,7 @@ func (s *Scheduler[ID, K]) checkout(ctx context.Context, running *entry[ID, K]) 
 // finish releases the quantum's slot, delivers its result, and applies the
 // actor lifecycle: a yielded process stays warm (subject to eviction); a
 // terminated one is deactivated immediately.
-func (s *Scheduler[ID, K]) finish(ran *entry[ID, K], process *capcompute.Process[K], result capcompute.ResumeResult[K]) {
+func (s *Scheduler[ID, K]) finish(ran *entry[ID, K], process *capcompute.Process[K], result capcompute.ResumeResult) {
 	s.mu.Lock()
 	s.running--
 	s.byOwner[ran.owner]--

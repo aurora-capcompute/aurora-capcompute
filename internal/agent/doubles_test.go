@@ -15,7 +15,6 @@ import (
 	"sync"
 
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
-	"github.com/aurora-capcompute/capcompute"
 	"github.com/aurora-capcompute/capcompute/sys"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
@@ -91,33 +90,6 @@ func (m *memLog) Streams(_ context.Context, tenantID string) ([]eventlog.Scope, 
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].SessionID < out[j].SessionID })
 	return out, nil
-}
-
-// memProcessTable is an in-memory capcompute.ProcessTable.
-type memProcessTable struct {
-	mu        sync.Mutex
-	processes map[string]*capcompute.Process[ProcessContext]
-}
-
-func newMemProcessTable() *memProcessTable {
-	return &memProcessTable{processes: make(map[string]*capcompute.Process[ProcessContext])}
-}
-
-func (t *memProcessTable) LoadProcess(_ context.Context, pid string) (*capcompute.Process[ProcessContext], error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	process, ok := t.processes[pid]
-	if !ok {
-		return nil, errors.New("process not found: " + pid)
-	}
-	return process, nil
-}
-
-func (t *memProcessTable) SaveProcess(_ context.Context, pid string, process *capcompute.Process[ProcessContext]) error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.processes[pid] = process
-	return nil
 }
 
 // Journal-building helpers: append records directly with the same hash chain

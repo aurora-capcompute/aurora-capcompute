@@ -125,12 +125,11 @@ func TestCompensationCannotLaunderTaintPastRollbackSink(t *testing.T) {
 			defaultID: "program@1",
 			sources:   []ProgramSource{{ID: "program@1", Wasm: buildProgram(t)}},
 		},
-		Dispatchers:  launderDispatchers{d: disp},
-		Log:          newMemLog(),
-		Leases:       newRuntimeStore(),
-		ProcessTable: newMemProcessTable(),
-		TaskSecret:   []byte("stable-secret"),
-		IDSource:     sequentialIDs(),
+		Dispatchers: launderDispatchers{d: disp},
+		Log:         newMemLog(),
+		Leases:      newRuntimeStore(),
+		TaskSecret:  []byte("stable-secret"),
+		IDSource:    sequentialIDs(),
 	})
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)

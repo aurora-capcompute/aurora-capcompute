@@ -44,7 +44,7 @@ func (r *Runtime) activateProcess(ctx context.Context, pid string) (*capcompute.
 		cred = r.processContextLocked(proc)
 		programID = proc.manifest.Program
 	}
-	kernel := r.kernels[programID]
+	image := r.images[programID]
 	r.mu.Unlock()
 	if proc == nil {
 		return nil, fmt.Errorf("%w: no process for pid %s", ErrNotFound, pid)
@@ -52,7 +52,7 @@ func (r *Runtime) activateProcess(ctx context.Context, pid string) (*capcompute.
 	if err := r.programBinding(proc); err != nil {
 		return nil, err
 	}
-	if kernel == nil {
+	if image == nil {
 		return nil, fmt.Errorf("program %q is unavailable", programID)
 	}
 
@@ -60,18 +60,15 @@ func (r *Runtime) activateProcess(ctx context.Context, pid string) (*capcompute.
 	if err != nil {
 		return nil, err
 	}
-	process, err := kernel.CreateProcess(ctx, capcompute.ProcessSpec[string, ProcessContext]{
-		Entrypoint: "run",
-		Cred:       cred,
-		Dispatcher: chain,
+	process, err := capcompute.NewProcess(ctx, image, capcompute.ProcessSpec[ProcessContext]{
+		Entrypoint:    "run",
+		Cred:          cred,
+		Dispatcher:    chain,
+		ResumeTimeout: r.resumeTimeout,
 		// The guest fetches its input via the sys.input syscall (served by
 		// the lifecycle dispatcher), so no entrypoint input is supplied here.
 	})
 	if err != nil {
-		return nil, err
-	}
-	if err := r.processTable.SaveProcess(ctx, pid, process); err != nil {
-		_ = process.Close(context.Background())
 		return nil, err
 	}
 	return process, nil
@@ -79,18 +76,18 @@ func (r *Runtime) activateProcess(ctx context.Context, pid string) (*capcompute.
 
 // resumeProcess is the scheduler's Resume seam: one quantum on the kernel
 // owning the process's program.
-func (r *Runtime) resumeProcess(ctx context.Context, process *capcompute.Process[ProcessContext]) (<-chan capcompute.ResumeResult[ProcessContext], error) {
+func (r *Runtime) resumeProcess(ctx context.Context, process *capcompute.Process[ProcessContext]) (<-chan capcompute.ResumeResult, error) {
 	r.mu.Lock()
 	var programID string
 	if proc := r.processes[process.Cred.ProcessID]; proc != nil {
 		programID = proc.manifest.Program
 	}
-	kernel := r.kernels[programID]
+	image := r.images[programID]
 	r.mu.Unlock()
-	if kernel == nil {
+	if image == nil {
 		return nil, fmt.Errorf("program %q is unavailable", programID)
 	}
-	handle, err := kernel.Resume(ctx, process)
+	handle, err := capcompute.Resume(ctx, process)
 	if err != nil {
 		return nil, err
 	}
@@ -134,7 +131,7 @@ func (r *Runtime) execute(processID string) {
 	tenantID := r.tenantID
 	r.mu.Unlock()
 
-	var results <-chan capcompute.ResumeResult[ProcessContext]
+	var results <-chan capcompute.ResumeResult
 	var stop func()
 	var err error
 	if isChild {
@@ -219,7 +216,7 @@ func (r *Runtime) execute(processID string) {
 
 // driveDirect activates and resumes a process outside the scheduler — the
 // path for delegated children, which execute inside their parent's quantum.
-func (r *Runtime) driveDirect(pid string) (<-chan capcompute.ResumeResult[ProcessContext], func(), error) {
+func (r *Runtime) driveDirect(pid string) (<-chan capcompute.ResumeResult, func(), error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	process, err := r.activateProcess(ctx, pid)
 	if err != nil {
@@ -232,7 +229,7 @@ func (r *Runtime) driveDirect(pid string) (<-chan capcompute.ResumeResult[Proces
 		_ = process.Close(context.Background())
 		return nil, nil, err
 	}
-	out := make(chan capcompute.ResumeResult[ProcessContext], 1)
+	out := make(chan capcompute.ResumeResult, 1)
 	go func() {
 		defer cancel()
 		result := <-results

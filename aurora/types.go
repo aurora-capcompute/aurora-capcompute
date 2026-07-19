@@ -2,7 +2,6 @@ package aurora
 
 import (
 	"github.com/aurora-capcompute/aurora-capcompute/internal/sched"
-	"github.com/aurora-capcompute/capcompute"
 	"github.com/aurora-capcompute/capcompute/sys"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent"
@@ -72,11 +71,6 @@ type LogEvent = eventlog.Event
 type LogScope = eventlog.Scope
 type Leases = agent.Leases
 type ProcessContext = agent.ProcessContext
-
-// ProcessTable is the kernel's process lookup boundary, re-exported at the
-// runtime's credential type. Applications supply an implementation (the
-// syscall host path resolves each guest syscall through it).
-type ProcessTable = capcompute.ProcessTable[string, ProcessContext]
 
 // Quota bounds one tenant's concurrent process quanta (see Config.QuotaOf).
 type Quota = sched.Quota
