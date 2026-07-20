@@ -128,7 +128,7 @@ type Runtime struct {
 	// do NOT use it — they must complete on shutdown to persist final state.
 	baseCtx         context.Context
 	cancel          context.CancelFunc
-	images          map[string]*capcompute.Program[ProcessContext]
+	images          map[string]*capcompute.Program
 	programs        *loadedPrograms
 	scheduler       *sched.Scheduler[string, ProcessContext]
 	taints          *monitor.Taints[string]

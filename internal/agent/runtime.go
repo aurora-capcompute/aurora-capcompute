@@ -157,7 +157,7 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 	runtime := &Runtime{
 		baseCtx:         baseCtx,
 		cancel:          cancel,
-		images:          make(map[string]*capcompute.Program[ProcessContext]),
+		images:          make(map[string]*capcompute.Program),
 		programs:        programs,
 		taints:          monitor.NewTaints[string](),
 		log:             config.Log,
@@ -394,8 +394,8 @@ func (r *Runtime) headerFor(cred ProcessContext) journaled.Header {
 // to runtime state, so it can be called outside the runtime mutex while
 // preparing a SetPrograms swap. The wasm engine gets the bytes' own sha256 for
 // integrity (not the program identity, which also covers the interface).
-func (r *Runtime) compileProgram(ctx context.Context, id string, wasm []byte) (*capcompute.Program[ProcessContext], error) {
-	image, err := capcompute.NewProgram[ProcessContext](ctx, capcompute.Config{
+func (r *Runtime) compileProgram(ctx context.Context, id string, wasm []byte) (*capcompute.Program, error) {
+	image, err := capcompute.NewProgram(ctx, capcompute.Config{
 		Image: extism.Manifest{
 			Wasm: []extism.Wasm{extism.WasmData{Data: wasm, Hash: digestOf(wasm), Name: id}},
 		},
@@ -428,7 +428,7 @@ func (r *Runtime) SetPrograms(ctx context.Context, sources []ProgramSource) erro
 	// outside the lock; fail atomically.
 	type compiled struct {
 		record programRecord
-		image  *capcompute.Program[ProcessContext]
+		image  *capcompute.Program
 	}
 	var fresh []compiled
 	shutdownFresh := func() {
@@ -470,7 +470,7 @@ func (r *Runtime) SetPrograms(ctx context.Context, sources []ProgramSource) erro
 		shutdownFresh()
 		return fmt.Errorf("%w: runtime is closed", ErrConflict)
 	}
-	var retired []*capcompute.Program[ProcessContext]
+	var retired []*capcompute.Program
 	for _, c := range fresh {
 		id := c.record.artifact.ID
 		if old := r.images[id]; old != nil {
