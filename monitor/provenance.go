@@ -32,7 +32,7 @@ func (l *Labeler[K]) Dispatch(ctx context.Context, cred K, syscall sys.Syscall, 
 	}
 	switch syscall.Name {
 	case sys.SyscallBegin, sys.SyscallCommit, sys.SyscallDeclassify:
-		return result, nil // kernel control syscalls carry no data provenance
+		return result, nil // processor control syscalls carry no data provenance
 	}
 	labels := []string{sys.SyscallLabelPrefix + syscall.Name}
 	if capability, ok := sys.FindCapability(l.next.Capabilities(), syscall.Name); ok {
@@ -128,7 +128,7 @@ func (t *Taints[ID]) snapshot(pid ID) []string {
 }
 
 // FlowMonitor enforces information-flow policy at the reference monitor
-// (the CaMeL architecture as a kernel primitive). The guest is opaque, so
+// (the CaMeL architecture as a processor primitive). The guest is opaque, so
 // flow is judged conservatively: every label a process observes taints everything
 // it later emits. A syscall to a capability whose Forbid set intersects the
 // process's accumulated taint is refused with ErrnoDenied before any driver runs.

@@ -16,7 +16,7 @@ import (
 )
 
 // Capability-journal events. Each journal record (an intent, a completion, or
-// a compensation pair member — the kernel's envelope+payload shape, hash chain
+// a compensation pair member — the processor's envelope+payload shape, hash chain
 // included) is a syscall.recorded event carrying the record verbatim plus the
 // revision that produced it. The fork structure (which revision shared which
 // prefix) is fully derivable from the flat set of (position, revision) pairs —

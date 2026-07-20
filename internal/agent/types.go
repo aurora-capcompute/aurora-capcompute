@@ -62,7 +62,7 @@ type HistoryMessage struct {
 }
 
 // Config wires a Runtime. Everything concrete is injected: programs, capability
-// drivers, the event log, leases, and the kernel's process table are supplied
+// drivers, the event log, leases, and the processor's process table are supplied
 // by the application — this module ships interfaces and orchestration only.
 type Config struct {
 	Programs    ProgramProvider
@@ -255,7 +255,7 @@ type processState struct {
 }
 
 // ProcessContext is the host-side credential for one process revision: the syscall
-// triad's "who". The kernel keys instances by PID(); two revisions of one process
+// triad's "who". The processor keys instances by PID(); two revisions of one process
 // are distinct processes, so a forked retry (a rollback's re-run, a restart)
 // can never resume a stale instance. A plain resume deliberately keeps its
 // revision — it continues the same attempt — and activates fresh by replay,
@@ -281,7 +281,7 @@ func (r ProcessContext) taskScope() task.Scope {
 	}
 }
 
-// processPID derives the kernel process identity for one process revision.
+// processPID derives the processor process identity for one process revision.
 func processPID(processID string, revision uint64) string {
 	return fmt.Sprintf("%s@%d", processID, revision)
 }

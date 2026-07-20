@@ -105,7 +105,7 @@ func TestProcessDriversAdmitsFaithfulProvider(t *testing.T) {
 	}
 }
 
-// The reserved sys.* namespace belongs to the kernel and runtime. A manifest may
+// The reserved sys.* namespace belongs to the processor and runtime. A manifest may
 // grant only its runtime-served members (sys.spawn, sys.timer, sys.declassify);
 // every other sys.* leaf grant is refused at validation, so a driver can never be
 // built for a name that would shadow a protocol call.

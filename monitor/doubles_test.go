@@ -1,6 +1,6 @@
 package monitor
 
-// In-memory test doubles for the kernel's store interfaces. The kernel ships
+// In-memory test doubles for the processor's store interfaces. The processor ships
 // interfaces only (Journal, ProcessTable); durable implementations live in
 // consumer modules, and tests supply these.
 

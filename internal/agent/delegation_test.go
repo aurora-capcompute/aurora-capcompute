@@ -44,7 +44,7 @@ func TestSpawnInputToString(t *testing.T) {
 }
 
 // TestSpawnADTSchema proves the spawn capability's input_schema is a well-formed
-// discriminated union that the kernel Validator (which compiles and enforces it
+// discriminated union that the processor Validator (which compiles and enforces it
 // before dispatch) accepts: one branch per program, `input` typed per program.
 func TestSpawnADTSchema(t *testing.T) {
 	stringInput := json.RawMessage(`{"type":"string"}`)

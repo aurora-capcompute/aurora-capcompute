@@ -134,7 +134,7 @@ func (r *spawnRouter) Capabilities() []sys.Capability {
 // schemas). The arg schema is a oneOf over the programs — each branch pins
 // `program` to a const and types `input` with that program's declared input
 // schema — so a well-formed call names a granted program and carries an input
-// matching it. (The kernel Validator enforces this schema before dispatch.)
+// matching it. (The processor Validator enforces this schema before dispatch.)
 func (r *spawnRouter) capability() sys.Capability {
 	var desc strings.Builder
 	desc.WriteString("Spawn a child process running one of the granted programs and wait for its answer. Programs:")
@@ -176,7 +176,7 @@ func (r *spawnRouter) capability() sys.Capability {
 
 // spawnBranchSchema is one oneOf branch of the spawn ADT: the program pinned to
 // a const and `input` typed by that program's declared input schema, embedded
-// verbatim (it is already independently schema-compilable, which the kernel
+// verbatim (it is already independently schema-compilable, which the processor
 // Validator requires).
 func spawnBranchSchema(program string, inputSchema json.RawMessage) json.RawMessage {
 	programConst, _ := json.Marshal(program)
@@ -186,7 +186,7 @@ func spawnBranchSchema(program string, inputSchema json.RawMessage) json.RawMess
 }
 
 // spawnADTSchema wraps the per-program branches in a discriminated oneOf — the
-// input schema the guest is shown and the kernel Validator enforces.
+// input schema the guest is shown and the processor Validator enforces.
 func spawnADTSchema(branches []json.RawMessage) json.RawMessage {
 	arr, _ := json.Marshal(branches)
 	return json.RawMessage(fmt.Sprintf(`{"oneOf":%s}`, arr))

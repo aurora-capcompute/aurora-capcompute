@@ -1,7 +1,7 @@
 // Package host owns the per-process dispatcher stack. It takes the caller-supplied
 // driver chain and completes it, for one process, with durable task approval and
 // savepoint markers, then hands the whole thing to monitor.Stack.ForProcess so
-// the kernel's canonical monitor chain (Validator → FlowMonitor → replay →
+// the processor's canonical monitor chain (Validator → FlowMonitor → replay →
 // Labeler → Declassifier → drivers) is assembled in the one correct order —
 // never by hand. The per-process piece is the tape: a journaled.Tape over the
 // process's journal, stamped with the process's header (ABI, program digest, PID).

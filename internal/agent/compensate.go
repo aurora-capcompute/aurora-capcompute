@@ -131,7 +131,7 @@ func (s *rollbackState) widenToRevision(j *logJournal) {
 // rollbackTaint is the taint that must gate this revision's compensations: the
 // live FlowMonitor snapshot unioned with the taint the journal records across
 // its completions. The union only changes anything after a crash/restart, when
-// the in-memory snapshot is empty — the kernel FlowMonitor that rebuilds it on
+// the in-memory snapshot is empty — the processor FlowMonitor that rebuilds it on
 // the forward path does not run on the rollback path, and the revision laws
 // forbid re-driving the guest to repopulate it. On the live path the snapshot
 // already covers the journaled labels (the FlowMonitor observed every replayed
@@ -563,7 +563,7 @@ func (r *Runtime) settleRollback(processID string) {
 	state.Resume = resume
 
 	// The rollback chain has no FlowMonitor, and the drivers enforce flow via
-	// sys.Taint(ctx) — their per-operation taints — never the kernel
+	// sys.Taint(ctx) — their per-operation taints — never the processor
 	// Capability.Forbid field. So inject the run's accumulated taint here,
 	// exactly as the FlowMonitor does on the forward path, or a compensation
 	// would launder past every driver sink guard (and the egress floor): a guest

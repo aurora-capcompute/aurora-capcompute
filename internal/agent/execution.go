@@ -4,9 +4,9 @@ package agent
 // finishing path, and the event appends plus subscriber publishing that surface
 // each state change to the durable log and live watchers.
 //
-// Root processes are submitted to the kernel's fair-share scheduler (per-tenant
+// Root processes are submitted to the processor's fair-share scheduler (per-tenant
 // round-robin, quotas, virtual-actor residency); a delegated child process
-// executes directly inside its parent's quantum — the kernel's own sync-spawn
+// executes directly inside its parent's quantum — the processor's own sync-spawn
 // posture — so delegation can never deadlock the scheduler's concurrency cap.
 
 import (
@@ -25,7 +25,7 @@ import (
 // activateProcess reconstructs the guest for one process revision: it
 // assembles the revision's dispatcher chain (monitor stack, replay tape over
 // the journal, task layer, delegation routes, drivers), instantiates the
-// guest from the program's kernel, and saves it to the process table so the
+// guest from the program's compiled image, and saves it to the process table so the
 // syscall host path can find its dispatcher. Activation is exactly
 // journal-replay wiring — the journal, not the instance, is the durable
 // process.
@@ -74,7 +74,7 @@ func (r *Runtime) activateProcess(ctx context.Context, pid string) (*capcompute.
 	return process, nil
 }
 
-// resumeProcess is the scheduler's Resume seam: one quantum on the kernel
+// resumeProcess is the scheduler's Resume seam: one quantum on the processor
 // owning the process's program.
 func (r *Runtime) resumeProcess(ctx context.Context, process *capcompute.Process[ProcessContext]) (<-chan capcompute.ResumeResult, error) {
 	r.mu.Lock()

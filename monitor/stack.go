@@ -8,7 +8,7 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-// Stack wires the kernel's canonical dispatcher chain. The order is the
+// Stack wires the processor's canonical dispatcher chain. The order is the
 // load-bearing part, so it lives in code instead of prose:
 //
 //	Validator → FlowMonitor → [replay] → Labeler → Declassifier → drivers
@@ -20,7 +20,7 @@ import (
 // once and served from the tape thereafter: stamped labels and approved
 // declassification crossings — which also need the tape's idempotency keys.
 // Assembling this by hand and getting one layer on the wrong side silently
-// breaks a kernel law; ForProcess cannot.
+// breaks a law; ForProcess cannot.
 //
 // The Stack holds the chain's cross-process components (grant source, taint
 // state); ForProcess completes it with the one per-process piece — the tape —

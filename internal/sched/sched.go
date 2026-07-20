@@ -1,6 +1,6 @@
 // Package sched is the scheduler seam: it decides *when* a process gets the
 // CPU, while the app decides *what* runs (activation — typically journal
-// replay) and the kernel decides *how* (Resume). The default implementation
+// replay) and the processor decides *how* (Resume). The default implementation
 // is a fair-share scheduler with strict priority bands, round-robin across
 // owners inside a band, per-owner concurrency quotas enforced as backpressure
 // (never rejection), and virtual-actor residency in the Orleans/Golem sense:
@@ -194,7 +194,7 @@ func (s *Scheduler[ID, K]) Close() {
 
 // Stop aborts pid's outstanding submission: a queued quantum is dequeued and
 // delivered a stopped result; a running one has its context cancelled — the
-// kernel kills the guest and the stopped result flows out the normal way.
+// processor kills the guest and the stopped result flows out the normal way.
 // Returns false when pid has no outstanding submission.
 func (s *Scheduler[ID, K]) Stop(pid ID) bool {
 	s.mu.Lock()

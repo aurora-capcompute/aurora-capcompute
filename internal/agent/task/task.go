@@ -3,7 +3,7 @@
 // record, mints an HMAC-derived token the caller resolves against, and on
 // approval replays the original syscall back through the wrapped dispatcher
 // with the stored resolution as its Authorization. This is the approval
-// injection seam the kernel deliberately does not own: the kernel's syscall
+// injection seam the processor deliberately does not own: the processor's syscall
 // host path always passes a zero Authorization, so promoting a human decision
 // into a dispatch is the runtime's job, keyed by the intent the replay layer
 // journaled. A task's token hash is the only secret-derived value the store

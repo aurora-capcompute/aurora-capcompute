@@ -12,7 +12,7 @@ import (
 )
 
 // worldDispatcher serves the journaled world sources, sys.now and sys.random.
-// The kernel pins the guest's ambient clock and RNG for determinism, so real
+// The processor pins the guest's ambient clock and RNG for determinism, so real
 // time and entropy are capabilities: produced here on first execution — the
 // dispatcher sits below the replay layer, so the value is journaled like any
 // completion and replayed verbatim on resume. Everything else passes through.

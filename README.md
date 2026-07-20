@@ -2,7 +2,7 @@
 
 **The engine that runs durable, crash‑proof AI agents.** `aurora-capcompute` is a
 Go library that turns the [`capcompute`](https://github.com/aurora-capcompute/capcompute)
-kernel into a full agent runtime: it runs Wasm agent programs as long‑lived
+processor into a full agent runtime: it runs Wasm agent programs as long‑lived
 **processes** inside **sessions**, and makes every action they take recorded,
 resumable, reversible, and approval‑gated.
 
@@ -15,7 +15,7 @@ resumable, reversible, and approval‑gated.
 
 ## What is this, in plain words?
 
-[`capcompute`](https://github.com/aurora-capcompute/capcompute) (the kernel) knows
+[`capcompute`](https://github.com/aurora-capcompute/capcompute) (the processor) knows
 how to run one sandboxed Wasm program and mediate its syscalls. But a *real* agent
 needs much more: it has to survive crashes and pick up exactly where it left off,
 retry safely, roll back half‑finished work, pause for a human to approve a
@@ -48,15 +48,16 @@ assembly is [aurora-dist](https://github.com/aurora-capcompute/aurora-dist).
  ◀ YOU ARE HERE
    └──────────┬──────────┘
               │  both built on
-         capcompute                          ← the kernel (the foundation)
+         capcompute                          ← the processor (the foundation)
 
    aurora-brains  →  the Wasm agent "programs" that run inside
 ```
 
-- **[capcompute](https://github.com/aurora-capcompute/capcompute)** — the kernel
-  below this: sandboxing, the syscall gate, the journal, replay.
+- **[capcompute](https://github.com/aurora-capcompute/capcompute)** — the processor
+  below this: sandboxing, the syscall gate, deterministic execution, resource caps.
 - **aurora-capcompute (this repo)** — the orchestration runtime *on top* of the
-  kernel: sessions, retries, approvals, delegation, scheduling.
+  processor: the journal and replay, sessions, retries, approvals, delegation,
+  scheduling.
 - **[aurora-dispatchers](https://github.com/aurora-capcompute/aurora-dispatchers)** —
   the concrete drivers you inject (`core.internet`, `core.openaiApi`, …).
 - **[aurora-brains](https://github.com/aurora-capcompute/aurora-brains)** — the
@@ -145,7 +146,7 @@ A **dispatcher provider** owns capability‑specific settings and builds the dri
 chain for each process. Aurora defines only the generic grant envelope (`syscall`,
 `settings`, nested `programs`); each driver publishes its own capability names.
 
-## How it works: the kernel chain
+## How it works: the processor chain
 
 Every process's syscalls flow through a fixed monitor chain (assembled by
 `capcompute.Stack.ForProcess`, never by hand):
@@ -218,7 +219,7 @@ go test -race ./...
 
 ## Related repos
 
-- [capcompute](https://github.com/aurora-capcompute/capcompute) — the kernel this runtime is built on
+- [capcompute](https://github.com/aurora-capcompute/capcompute) — the processor this runtime is built on
 - [aurora-dispatchers](https://github.com/aurora-capcompute/aurora-dispatchers) — capability drivers you inject as `Dispatchers`
 - [aurora-brains](https://github.com/aurora-capcompute/aurora-brains) — the Wasm agent programs that run inside
 - [aurora-dist](https://github.com/aurora-capcompute/aurora-dist) — the assembly that turns this into a runnable server

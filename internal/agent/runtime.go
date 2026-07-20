@@ -1,5 +1,5 @@
 // Package agent is the runtime: it owns session and process lifecycle, the
-// scheduler-driven quanta that resume Wasm programs on the capcompute kernel,
+// scheduler-driven quanta that resume Wasm programs on the capcompute processor,
 // durable approval tasks, retries, event subscriptions, and the read
 // projections (snapshots, journal, call graph) the public API exposes. All
 // durable state is a fold of one append-only event stream per session — the
@@ -7,7 +7,7 @@
 // replaying each stream from the beginning.
 //
 // It does not own capability implementations, program bytes, or any concrete
-// store: dispatchers, programs, the event log, leases, and the kernel's process
+// store: dispatchers, programs, the event log, leases, and the processor's process
 // table are all injected. The aurora package re-exports this package's types
 // as the module's public surface.
 package agent
@@ -48,9 +48,9 @@ const (
 	defaultResumeQuantumTimeout = 2 * time.Minute
 )
 
-// resolveGuestLimits maps the Config knobs to the kernel's per-process limits:
+// resolveGuestLimits maps the Config knobs to the processor's per-process limits:
 // zero requests the safe default, a positive value is used verbatim, and a
-// negative value disables the limit (0 to the kernel = unbounded). Keeping this
+// negative value disables the limit (0 to the processor = unbounded). Keeping this
 // pure makes the "bounded by default, never accidentally unbounded" policy
 // directly testable without compiling a guest.
 func resolveGuestLimits(memoryPages int, timeout time.Duration) (uint32, time.Duration) {
@@ -76,7 +76,7 @@ func resolveGuestLimits(memoryPages int, timeout time.Duration) (uint32, time.Du
 }
 
 // reconcileGrants fails closed when the dispatcher provider advertises a
-// capability the manifest did not grant. The grant set the kernel Validator
+// capability the manifest did not grant. The grant set the processor Validator
 // enforces is the assembled chain's advertised capabilities (Stack.Grants, wired
 // in the host factory to the chain's own Capabilities()), so a provider that
 // publishes more than the manifest declared would silently widen a process's
@@ -390,7 +390,7 @@ func (r *Runtime) headerFor(cred ProcessContext) journaled.Header {
 	return journaled.Header{ABI: sys.ABIVersion, Program: program, Process: cred.ProcessID}
 }
 
-// compileProgram compiles a program's wasm into a kernel. It is pure with respect
+// compileProgram compiles a program's wasm into a compiled program. It is pure with respect
 // to runtime state, so it can be called outside the runtime mutex while
 // preparing a SetPrograms swap. The wasm engine gets the bytes' own sha256 for
 // integrity (not the program identity, which also covers the interface).
@@ -461,8 +461,8 @@ func (r *Runtime) SetPrograms(ctx context.Context, sources []ProgramSource) erro
 		fresh = append(fresh, compiled{record: record, image: image})
 	}
 
-	// Swap under the runtime mutex (which guards r.kernels), collecting the
-	// kernels that are being replaced or removed so they can be shut down
+	// Swap under the runtime mutex (which guards r.images), collecting the
+	// images that are being replaced or removed so they can be shut down
 	// after the lock is released.
 	r.mu.Lock()
 	if r.closed {

@@ -88,7 +88,7 @@ func (r *Runtime) restoreSession(proj Projection, journals map[string]map[uint64
 		// Processes are always restored regardless of program registration state:
 		// programs are loaded after restore via SetPrograms, so r.programs is empty
 		// here. If the program is unavailable when execution is attempted, execute()
-		// will fail the process cleanly at that point (kernel == nil check).
+		// will fail the process cleanly at that point (program == nil check).
 		status := sr.Status
 		if status == ProcessQueued || status == ProcessRunning || status == ProcessStopping {
 			status = ProcessInterrupted

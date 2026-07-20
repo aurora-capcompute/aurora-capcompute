@@ -41,7 +41,7 @@ func (p *runtimeDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, 
 
 // llmCapability publishes the fake cognition tool the way a real assembly
 // does: dispatchable, hidden from the discoverable menu, and — because the
-// kernel's Validator enforces complete mediation — granted explicitly.
+// processor's Validator enforces complete mediation — granted explicitly.
 func llmCapability() sys.Capability {
 	return sys.Capability{Name: "core.openaiApi", Description: "LLM chat", Hidden: true}
 }

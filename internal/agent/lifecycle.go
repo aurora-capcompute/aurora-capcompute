@@ -65,7 +65,7 @@ type compensateArgs struct {
 // lifecycleDispatcher serves the sys.input/sys.output lifecycle syscalls
 // below the replay layer (so they are journaled) and forwards everything else
 // to the capability dispatcher. It publishes both — hidden — into the chain's
-// capability set: the kernel's Validator enforces complete mediation from the
+// capability set: the processor's Validator enforces complete mediation from the
 // grant set, so even the runtime's own protocol calls are granted explicitly
 // rather than smuggled past the reference monitor.
 type lifecycleDispatcher struct {
@@ -214,7 +214,7 @@ func (l *lifecycleDispatcher) Capabilities() []sys.Capability {
 			Hidden:      true,
 		},
 	)
-	// sys.declassify is served by the kernel Declassifier below the FlowMonitor
+	// sys.declassify is served by the processor Declassifier below the FlowMonitor
 	// (which performs the actual taint lift on the approved result). Its
 	// capability must appear in the grant set HERE so the Validator admits the
 	// call — but only when the manifest granted it (declassification is opt-in
@@ -231,7 +231,7 @@ func (l *lifecycleDispatcher) Capabilities() []sys.Capability {
 	return caps
 }
 
-// declassifyInputSchema mirrors the kernel Declassifier's sys.declassify input
+// declassifyInputSchema mirrors the processor Declassifier's sys.declassify input
 // schema. The Declassifier is the authoritative validator (it re-checks labels,
 // reason, and approval); this is the grant-set copy the Validator admits the
 // call against, kept in step with capcompute's declassifyInputSchema.

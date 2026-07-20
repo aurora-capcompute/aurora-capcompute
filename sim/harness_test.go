@@ -1,5 +1,5 @@
-// Package sim is the deterministic simulation harness for the kernel's
-// durability laws (FoundationDB/Antithesis-style, scaled to this kernel). It
+// Package sim is the deterministic simulation harness for the processor's
+// durability laws (FoundationDB/Antithesis-style, scaled to this processor). It
 // models the parts of the world that survive a crash — the journal and the
 // external effect store — and drives a scripted, deterministic guest program
 // through the full dispatcher chain (Validator → FlowMonitor → replay →
@@ -31,7 +31,7 @@ func (p PID) PID() string { return p.ID }
 // Journal is an in-memory journaled.Journal plus fault injection: when
 // CrashAt equals the number of appends performed so far, the append fails
 // atomically (nothing is persisted) with ErrCrash — the process died. The
-// kernel itself ships only the Journal interface; the harness owns this
+// processor itself ships only the Journal interface; the harness owns this
 // simulated store the way consumer modules own the durable ones.
 type Journal struct {
 	header    journaled.Header

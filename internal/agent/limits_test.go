@@ -53,7 +53,7 @@ func TestResolveGuestLimitsIsBoundedByDefault(t *testing.T) {
 	}
 
 	// The crown-jewel property: the default must be a real, finite bound, never
-	// the kernel's "0 = unbounded" sentinel.
+	// the processor's "0 = unbounded" sentinel.
 	pages, timeout := resolveGuestLimits(0, 0)
 	if pages == 0 {
 		t.Fatal("default memory cap is 0 (unbounded) — a zero-value Config must still bound guest memory")

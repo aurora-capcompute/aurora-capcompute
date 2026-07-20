@@ -4,7 +4,7 @@ package agent
 // through a chain that has NO FlowMonitor — the manifest chain's flow enforcement
 // (Validator, FlowMonitor) is not in the rollback path; only the drivers are. A
 // production driver enforces flow per operation, by checking sys.Taint(ctx)
-// against its declared sink taints, NOT via a kernel Capability.Forbid (which
+// against its declared sink taints, NOT via a processor Capability.Forbid (which
 // real drivers never set — the registration-time gate that reads Forbid is inert
 // for them). So without settleRollback re-injecting the run's accumulated taint,
 // a driver's sink guard would see a nil taint during rollback and permit the
@@ -179,7 +179,7 @@ func TestCompensationCannotLaunderTaintPastRollbackSink(t *testing.T) {
 }
 
 // TestRollbackTaintRebuiltFromJournalAfterCrash is the crash twin of the test
-// above. r.taints is in-memory and is not rebuilt on restore — the kernel
+// above. r.taints is in-memory and is not rebuilt on restore — the processor
 // FlowMonitor that repopulates it on the forward path does not run on the
 // rollback path, and the revision laws forbid re-driving the guest. So after a
 // restart the snapshot is empty, and settleRollback would inject an EMPTY taint,

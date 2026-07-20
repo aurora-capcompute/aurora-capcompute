@@ -17,11 +17,11 @@ import (
 type GrantSource[K any] func(cred K) []sys.Capability
 
 // Validator is the reference-monitor decorator: complete mediation for the
-// dispatcher chain behind it (kernel law #4). Before delegating it checks
+// dispatcher chain behind it (law #4). Before delegating it checks
 // (1) the cred's grant set contains the syscall name — otherwise ErrnoDenied —
 // and (2) the args validate against the granted capability's InputSchema —
 // otherwise ErrnoInvalidArgs. Reserved control syscalls (sys.begin/sys.commit)
-// pass through: they are kernel markers, not capabilities.
+// pass through: they are processor markers, not capabilities.
 //
 // Policy refusals are results (StatusFailed), not Go errors: the guest sees a
 // classified errno and can react; the process does not crash.

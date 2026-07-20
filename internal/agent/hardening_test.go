@@ -176,7 +176,7 @@ func TestValidateManifestDeclassifyGrant(t *testing.T) {
 
 // The lifecycle admits sys.declassify to the grant set ONLY when the manifest
 // grants it — so the Validator accepts the call opt-in — and advertises it
-// (not hidden) so the model can discover and request it. The kernel Declassifier
+// (not hidden) so the model can discover and request it. The processor Declassifier
 // still gates every crossing on human approval, so this only makes the governed
 // path reachable; it does not let the guest self-lift.
 func TestLifecyclePublishesDeclassifyWhenGranted(t *testing.T) {
