@@ -148,13 +148,17 @@ chain for each process. Aurora defines only the generic grant envelope (`syscall
 
 ## How it works: the processor chain
 
-Every process's syscalls flow through a fixed monitor chain (assembled by
-`capcompute.Stack.ForProcess`, never by hand):
+Every process's syscalls flow through a fixed monitor chain (assembled by this
+repo's `monitor.Stack.ForProcess`, never by hand):
 
 ```
-Validator → FlowMonitor → [replay over the journal] →
-Labeler → Declassifier → savepoints → lifecycle → delegation → tasks → progress → drivers
+Validator → FlowMonitor → [replay over the journal] → Labeler → Declassifier →
+savepoints → world → lifecycle → delegation → tasks → progress → timer → drivers
 ```
+
+For the layer-by-layer tour — why the replay boundary sits where it does, and
+how one syscall, one crash, and one approval each travel the chain — see
+[`docs/WALKTHROUGH.md`](docs/WALKTHROUGH.md).
 
 - **Complete mediation** — the Validator admits only granted, schema‑checked
   syscall names; the runtime's own protocol calls (`sys.input`, `sys.output`,
