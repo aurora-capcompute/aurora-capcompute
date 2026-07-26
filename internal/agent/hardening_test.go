@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 	"github.com/aurora-capcompute/aurora-capcompute/replay"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
@@ -36,7 +38,7 @@ func TestSpawnAnswerStampsChildLabels(t *testing.T) {
 // through a (guest-controlled) failure or abort reason.
 func TestChildTerminalCarriesLabels(t *testing.T) {
 	answer, labels, done, err := childTerminal(ProcessSnapshot{
-		Status: ProcessCompleted, Answer: "a", Labels: []string{"untrusted_web"},
+		Status: durable.ProcessCompleted, Answer: "a", Labels: []string{"untrusted_web"},
 	})
 	if !done || err != nil || answer != "a" {
 		t.Fatalf("childTerminal = %q, %v, %v, %v", answer, labels, done, err)
@@ -46,9 +48,9 @@ func TestChildTerminalCarriesLabels(t *testing.T) {
 	}
 
 	// The error terminals must carry the taint too — these are the states the
-	// spawn error branches propagate. ProcessCompensated is the sharpest: its
+	// spawn error branches propagate. durable.ProcessCompensated is the sharpest: its
 	// error text embeds the guest's rollback reason, which can carry read data.
-	for _, status := range []ProcessStatus{ProcessFailed, ProcessStopped, ProcessInterrupted, ProcessCompensated} {
+	for _, status := range []durable.ProcessStatus{durable.ProcessFailed, durable.ProcessStopped, durable.ProcessInterrupted, durable.ProcessCompensated} {
 		_, labels, done, err := childTerminal(ProcessSnapshot{
 			Status: status, Answer: "leak", Labels: []string{"secret"},
 		})
@@ -72,7 +74,7 @@ func TestLifecycleCompensateHeldToReferenceMonitor(t *testing.T) {
 		InputSchema: json.RawMessage(`{"type":"object","required":["name"],"properties":{"name":{"type":"string"}},"additionalProperties":false}`),
 		Forbid:      []string{"untrusted_web"},
 	}}}
-	l := newLifecycleDispatcher(next, "msg", nil, nil, Manifest{}, 1, nil)
+	l := newLifecycleDispatcher(next, "msg", nil, nil, manifest.Manifest{}, 1, nil)
 	compensate := func(ctx context.Context, args string) sys.SyscallResult {
 		t.Helper()
 		result, err := l.Dispatch(ctx, ProcessContext{},
@@ -107,7 +109,7 @@ func TestSysInputOmitsHistoryLabelsFromGuestPayload(t *testing.T) {
 		{Role: "user", Content: "q"},
 		{Role: "assistant", Content: "a", Labels: []string{"untrusted_web", "credential:ONYX@abc"}},
 	}
-	l := newLifecycleDispatcher(nopNext{}, "task", nil, history, Manifest{}, 1, nil)
+	l := newLifecycleDispatcher(nopNext{}, "task", nil, history, manifest.Manifest{}, 1, nil)
 	result, err := l.Dispatch(context.Background(), ProcessContext{},
 		sys.Syscall{Abi: sys.ABIVersion, Name: callSysInput}, sys.Authorization{})
 	if err != nil {
@@ -129,9 +131,9 @@ func TestSysInputOmitsHistoryLabelsFromGuestPayload(t *testing.T) {
 // field is rejected (an un-recursed, un-validated child manifest must not ride
 // along).
 func TestValidateManifestRejectsTimerWithPrograms(t *testing.T) {
-	if _, err := ValidateManifest(Manifest{
-		Version:  ManifestVersion,
-		Syscalls: []Syscall{{Syscall: TimerSyscall, Programs: []Manifest{{Program: "x"}}}},
+	if _, err := manifest.Validate(manifest.Manifest{
+		Version:  manifest.Version,
+		Syscalls: []manifest.Syscall{{Syscall: manifest.TimerSyscall, Programs: []manifest.Manifest{{Program: "x"}}}},
 	}, &testDispatchers{}); err == nil {
 		t.Fatal("expected sys.timer with programs to be rejected")
 	}
@@ -141,11 +143,11 @@ func TestValidateManifestRejectsTimerWithPrograms(t *testing.T) {
 // caller that retains the input manifest cannot mutate a stored clone.
 func TestCloneManifestDeepCopiesPointers(t *testing.T) {
 	yes := true
-	original := Manifest{History: &yes, ShareCapabilities: &yes}
-	clone := cloneManifest(original)
+	original := manifest.Manifest{History: &yes, ShareCapabilities: &yes}
+	clone := original.Clone()
 	*original.History = false
 	*original.ShareCapabilities = false
-	if !clone.sharesHistory() || !clone.sharesCapabilities() {
+	if !clone.SharesHistory() || !clone.SharesCapabilities() {
 		t.Fatal("mutating the original manifest's pointers changed the clone's settings")
 	}
 }
@@ -153,22 +155,22 @@ func TestCloneManifestDeepCopiesPointers(t *testing.T) {
 // Declassify is grantable, opt-in per program: a bare grant validates; one that
 // carries settings or programs is refused.
 func TestValidateManifestDeclassifyGrant(t *testing.T) {
-	if _, err := ValidateManifest(Manifest{
-		Version:  ManifestVersion,
+	if _, err := manifest.Validate(manifest.Manifest{
+		Version:  manifest.Version,
 		Program:  "root",
-		Syscalls: []Syscall{{Syscall: DeclassifySyscall}},
+		Syscalls: []manifest.Syscall{{Syscall: manifest.DeclassifySyscall}},
 	}, &testDispatchers{}); err != nil {
 		t.Fatalf("a bare sys.declassify grant should validate: %v", err)
 	}
-	if _, err := ValidateManifest(Manifest{
-		Version:  ManifestVersion,
-		Syscalls: []Syscall{{Syscall: DeclassifySyscall, Config: json.RawMessage(`{"x":1}`)}},
+	if _, err := manifest.Validate(manifest.Manifest{
+		Version:  manifest.Version,
+		Syscalls: []manifest.Syscall{{Syscall: manifest.DeclassifySyscall, Config: json.RawMessage(`{"x":1}`)}},
 	}, &testDispatchers{}); err == nil {
 		t.Fatal("sys.declassify with settings should be rejected")
 	}
-	if _, err := ValidateManifest(Manifest{
-		Version:  ManifestVersion,
-		Syscalls: []Syscall{{Syscall: DeclassifySyscall, Programs: []Manifest{{Program: "x"}}}},
+	if _, err := manifest.Validate(manifest.Manifest{
+		Version:  manifest.Version,
+		Syscalls: []manifest.Syscall{{Syscall: manifest.DeclassifySyscall, Programs: []manifest.Manifest{{Program: "x"}}}},
 	}, &testDispatchers{}); err == nil {
 		t.Fatal("sys.declassify with programs should be rejected")
 	}
@@ -181,8 +183,8 @@ func TestValidateManifestDeclassifyGrant(t *testing.T) {
 // path reachable; it does not let the guest self-lift.
 func TestLifecyclePublishesDeclassifyWhenGranted(t *testing.T) {
 	granted := newLifecycleDispatcher(nopNext{}, "msg", nil, nil,
-		Manifest{Syscalls: []Syscall{{Syscall: DeclassifySyscall}}}, 1, nil)
-	cap, ok := sys.FindCapability(granted.Capabilities(), DeclassifySyscall)
+		manifest.Manifest{Syscalls: []manifest.Syscall{{Syscall: manifest.DeclassifySyscall}}}, 1, nil)
+	cap, ok := sys.FindCapability(granted.Capabilities(), manifest.DeclassifySyscall)
 	if !ok {
 		t.Fatal("a manifest granting sys.declassify must advertise it in the grant set")
 	}
@@ -192,8 +194,8 @@ func TestLifecyclePublishesDeclassifyWhenGranted(t *testing.T) {
 	if len(cap.InputSchema) == 0 {
 		t.Fatal("sys.declassify must carry an input schema for the Validator")
 	}
-	ungranted := newLifecycleDispatcher(nopNext{}, "msg", nil, nil, Manifest{}, 1, nil)
-	if _, ok := sys.FindCapability(ungranted.Capabilities(), DeclassifySyscall); ok {
+	ungranted := newLifecycleDispatcher(nopNext{}, "msg", nil, nil, manifest.Manifest{}, 1, nil)
+	if _, ok := sys.FindCapability(ungranted.Capabilities(), manifest.DeclassifySyscall); ok {
 		t.Fatal("sys.declassify must not appear unless the manifest grants it (opt-in)")
 	}
 }
@@ -228,7 +230,7 @@ func TestTimerRejectsOverflowingDuration(t *testing.T) {
 	dispatch := func(seconds int64) sys.SyscallResult {
 		t.Helper()
 		r, err := td.Dispatch(context.Background(), ProcessContext{},
-			sys.Syscall{Abi: sys.ABIVersion, Name: TimerSyscall,
+			sys.Syscall{Abi: sys.ABIVersion, Name: manifest.TimerSyscall,
 				Args: json.RawMessage(fmt.Sprintf(`{"duration_seconds":%d}`, seconds))},
 			sys.Authorization{})
 		if err != nil {

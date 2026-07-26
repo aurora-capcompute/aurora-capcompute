@@ -58,6 +58,8 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/capcompute/sys"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 )
 
@@ -397,7 +399,7 @@ func (r *Runtime) failNow(processID string, failure error) {
 		r.settleRollback(processID)
 		return
 	}
-	r.finish(processID, ProcessFailed, "", failure)
+	r.finish(processID, durable.ProcessFailed, "", failure)
 }
 
 // redriveAfterFailure relaunches a process that failed inside an open critical
@@ -448,7 +450,7 @@ func (r *Runtime) stopProcess(processID string, cause error) {
 		r.settleRollback(processID)
 		return
 	}
-	r.finish(processID, ProcessStopped, "", cause)
+	r.finish(processID, durable.ProcessStopped, "", cause)
 }
 
 // restartProcess abandons the current revision on behalf of an explicit
@@ -483,7 +485,7 @@ var errRollbackParked = errors.New("rollback parked on an external task")
 // failed rollback) continues where the last attempt stopped.
 func (r *Runtime) settleRollback(processID string) {
 	fail := func(err error) {
-		r.finish(processID, ProcessFailed, "", fmt.Errorf("rollback: %w", err))
+		r.finish(processID, durable.ProcessFailed, "", fmt.Errorf("rollback: %w", err))
 	}
 	r.mu.Lock()
 	proc := r.processes[processID]
@@ -598,19 +600,19 @@ func (r *Runtime) settleRollback(processID string) {
 	}
 	settleStopped := func(err error) {
 		if errors.Is(err, errRollbackParked) {
-			r.finish(processID, ProcessWaitingTask, "", nil)
+			r.finish(processID, durable.ProcessWaitingTask, "", nil)
 			return
 		}
 		if errors.Is(err, context.Canceled) {
 			// Shutdown (Close cancels baseCtx) interrupted the rollback mid-inverse.
 			// The compensation intent stays open on the journal, so this is a
 			// resumable interruption, not a failure — surfacing it as
-			// ProcessInterrupted (still in the resumable set) keeps a clean shutdown
+			// durable.ProcessInterrupted (still in the resumable set) keeps a clean shutdown
 			// from reading as data loss or tripping failure alerting.
-			r.finish(processID, ProcessInterrupted, rollbackReport(state, reportReason, undone), nil)
+			r.finish(processID, durable.ProcessInterrupted, rollbackReport(state, reportReason, undone), nil)
 			return
 		}
-		r.finish(processID, ProcessFailed, rollbackReport(state, reportReason, undone), fmt.Errorf("rollback stopped: %w", err))
+		r.finish(processID, durable.ProcessFailed, rollbackReport(state, reportReason, undone), fmt.Errorf("rollback stopped: %w", err))
 	}
 
 	if state.Resume != nil {
@@ -651,10 +653,10 @@ func (r *Runtime) concludeRollback(ctx context.Context, processID string, cred P
 		if reason == "" {
 			reason = "process failed"
 		}
-		r.finish(processID, ProcessFailed, report, errors.New(reason))
+		r.finish(processID, durable.ProcessFailed, report, errors.New(reason))
 		return
 	case abandonStop:
-		r.finish(processID, ProcessStopped, report, context.Canceled)
+		r.finish(processID, durable.ProcessStopped, report, context.Canceled)
 		return
 	case abandonRestart:
 		// Cleaned up, now re-run from scratch. The abandonment was recorded
@@ -664,7 +666,7 @@ func (r *Runtime) concludeRollback(ctx context.Context, processID string, cred P
 		return
 	}
 	if state.RetrySeconds == nil {
-		r.finish(processID, ProcessCompensated, report, nil)
+		r.finish(processID, durable.ProcessCompensated, report, nil)
 		return
 	}
 	// The retry budget counts rollback cycles, not quanta: every abort retry
@@ -680,7 +682,7 @@ func (r *Runtime) concludeRollback(ctx context.Context, processID string, cred P
 	limit := uint64(r.maxAbortRetries)
 	r.mu.Unlock()
 	if rollbacks >= limit {
-		r.finish(processID, ProcessCompensated, report,
+		r.finish(processID, durable.ProcessCompensated, report,
 			fmt.Errorf("abort retry budget exhausted after %d rollbacks", rollbacks))
 		return
 	}
@@ -690,10 +692,10 @@ func (r *Runtime) concludeRollback(ctx context.Context, processID string, cred P
 		return
 	}
 	if err := r.parkForRetry(ctx, cred, state, delay); err != nil {
-		r.finish(processID, ProcessFailed, report, fmt.Errorf("schedule abort retry: %w", err))
+		r.finish(processID, durable.ProcessFailed, report, fmt.Errorf("schedule abort retry: %w", err))
 		return
 	}
-	r.finish(processID, ProcessWaitingTask, "", nil)
+	r.finish(processID, durable.ProcessWaitingTask, "", nil)
 }
 
 // retrySection re-runs an abandoned-and-settled process as a fresh revision
@@ -738,7 +740,7 @@ func (r *Runtime) parkForRetry(ctx context.Context, cred ProcessContext, state *
 		// The retry task speaks sys.timer — the runtime's own syscall — so
 		// the distribution's timer service arms and fires abort retries with
 		// no special handling.
-		Syscall:   sys.Syscall{Abi: sys.ABIVersion, Name: TimerSyscall, Args: args},
+		Syscall:   sys.Syscall{Abi: sys.ABIVersion, Name: manifest.TimerSyscall, Args: args},
 		Summary:   retrySummary(state.Reason),
 		State:     task.StatePending,
 		CreatedAt: now,

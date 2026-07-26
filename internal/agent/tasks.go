@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 )
@@ -60,7 +61,7 @@ func (s *eventTaskStore) Create(ctx context.Context, record task.Record) error {
 		s.mu.Unlock()
 		return task.ErrConflict
 	}
-	ev, err := taskCreatedEvent(s.now().UTC(), record)
+	ev, err := durable.TaskCreatedEvent(s.now().UTC(), record)
 	if err != nil {
 		s.mu.Unlock()
 		return err
@@ -129,7 +130,7 @@ func (s *eventTaskStore) Resolve(ctx context.Context, tenantID, taskID string, t
 	record.Resolution = resolution
 	resolvedAt := now
 	record.ResolvedAt = &resolvedAt
-	ev, err := taskResolvedEvent(s.now().UTC(), record)
+	ev, err := durable.TaskResolvedEvent(s.now().UTC(), record)
 	if err != nil {
 		s.mu.Unlock()
 		return task.Record{}, err
@@ -152,7 +153,7 @@ func (s *eventTaskStore) MarkExecuted(ctx context.Context, tenantID, taskID stri
 		return task.ErrNotFound
 	}
 	record.State = task.StateExecuted
-	ev, err := taskExecutedEvent(s.now().UTC(), record.Scope.ProcessID, record.Scope.Revision, taskID)
+	ev, err := durable.TaskExecutedEvent(s.now().UTC(), record.Scope.ProcessID, record.Scope.Revision, taskID)
 	if err != nil {
 		s.mu.Unlock()
 		return err

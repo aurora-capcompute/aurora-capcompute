@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
@@ -99,17 +100,17 @@ func assertValid(t *testing.T, schema *jsonschema.Schema, doc string, want bool)
 // TestProgramShareDefaults: a program node's share settings default to sharing
 // (the runtime's standing behavior); an explicit false withholds.
 func TestProgramShareDefaults(t *testing.T) {
-	var omitted Manifest
-	if !omitted.sharesHistory() || !omitted.sharesCapabilities() {
+	var omitted manifest.Manifest
+	if !omitted.SharesHistory() || !omitted.SharesCapabilities() {
 		t.Fatal("omitted settings should share both history and capabilities")
 	}
 	no, yes := false, true
-	off := Manifest{History: &no, ShareCapabilities: &no}
-	if off.sharesHistory() || off.sharesCapabilities() {
+	off := manifest.Manifest{History: &no, ShareCapabilities: &no}
+	if off.SharesHistory() || off.SharesCapabilities() {
 		t.Fatal("explicit false should withhold")
 	}
-	on := Manifest{History: &yes}
-	if !on.sharesHistory() || !on.sharesCapabilities() {
+	on := manifest.Manifest{History: &yes}
+	if !on.SharesHistory() || !on.SharesCapabilities() {
 		t.Fatal("explicit true / omitted should share")
 	}
 }
@@ -118,9 +119,9 @@ func TestProgramShareDefaults(t *testing.T) {
 // on the child's own manifest (off its menu, still dispatchable); the spawnable
 // spec is never mutated, and the version is filled from the root's.
 func TestBuildChildManifestCapabilitiesGate(t *testing.T) {
-	spec := Manifest{
+	spec := manifest.Manifest{
 		Program: "child",
-		Syscalls: []Syscall{
+		Syscalls: []manifest.Syscall{
 			{Syscall: "net.http"},
 			{Syscall: "core.openaiApi", Hidden: true},
 		},
@@ -135,8 +136,8 @@ func TestBuildChildManifestCapabilitiesGate(t *testing.T) {
 			t.Fatalf("grant %d (%s) should be hidden", i, grant.Syscall)
 		}
 	}
-	if hidden.Version != ManifestVersion {
-		t.Fatalf("child version = %d, want %d", hidden.Version, ManifestVersion)
+	if hidden.Version != manifest.Version {
+		t.Fatalf("child version = %d, want %d", hidden.Version, manifest.Version)
 	}
 	if spec.Syscalls[0].Hidden {
 		t.Fatal("buildChildManifest mutated the spawnable spec")
@@ -147,27 +148,27 @@ func TestBuildChildManifestCapabilitiesGate(t *testing.T) {
 // now, so a sys.spawn grant that carries them on the grant is rejected, while a
 // grant with a program that carries them validates.
 func TestSpawnGrantTakesNoSettings(t *testing.T) {
-	onGrant := Manifest{
-		Version: ManifestVersion,
-		Syscalls: []Syscall{{
-			Syscall:  SpawnSyscall,
+	onGrant := manifest.Manifest{
+		Version: manifest.Version,
+		Syscalls: []manifest.Syscall{{
+			Syscall:  manifest.SpawnSyscall,
 			Config:   json.RawMessage(`{"history":false}`),
-			Programs: []Manifest{{Program: "child"}},
+			Programs: []manifest.Manifest{{Program: "child"}},
 		}},
 	}
-	if _, err := ValidateManifest(onGrant, &testDispatchers{}); err == nil {
+	if _, err := manifest.Validate(onGrant, &testDispatchers{}); err == nil {
 		t.Fatal("expected grant-level spawn settings to be rejected")
 	}
 	no := false
-	onProgram := Manifest{
-		Version: ManifestVersion,
+	onProgram := manifest.Manifest{
+		Version: manifest.Version,
 		Program: "parent",
-		Syscalls: []Syscall{{
-			Syscall:  SpawnSyscall,
-			Programs: []Manifest{{Program: "child", History: &no, ShareCapabilities: &no}},
+		Syscalls: []manifest.Syscall{{
+			Syscall:  manifest.SpawnSyscall,
+			Programs: []manifest.Manifest{{Program: "child", History: &no, ShareCapabilities: &no}},
 		}},
 	}
-	if _, err := ValidateManifest(onProgram, &testDispatchers{}); err != nil {
+	if _, err := manifest.Validate(onProgram, &testDispatchers{}); err != nil {
 		t.Fatalf("program-level spawn settings should validate: %v", err)
 	}
 }

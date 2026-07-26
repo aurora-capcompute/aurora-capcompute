@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -13,33 +12,12 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/monitor"
 	"github.com/aurora-capcompute/capcompute/sys"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
 	internalhost "github.com/aurora-capcompute/aurora-capcompute/internal/agent/host"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/program"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
-)
-
-var (
-	ErrNotFound = errors.New("not found")
-	ErrConflict = errors.New("lifecycle conflict")
-	ErrInvalid  = errors.New("invalid request")
-)
-
-type ProcessStatus string
-
-const (
-	ProcessQueued      ProcessStatus = "queued"
-	ProcessRunning     ProcessStatus = "running"
-	ProcessStopping    ProcessStatus = "stopping"
-	ProcessYielded     ProcessStatus = "yielded"
-	ProcessWaitingTask ProcessStatus = "waiting_for_task"
-	ProcessInterrupted ProcessStatus = "interrupted"
-	ProcessCompleted   ProcessStatus = "completed"
-	ProcessStopped     ProcessStatus = "stopped"
-	ProcessFailed      ProcessStatus = "failed"
-	// ProcessCompensated is terminal: the guest rolled the process back with
-	// sys.abort — its registered compensations ran — and declared no retry,
-	// or exhausted the retry budget.
-	ProcessCompensated ProcessStatus = "compensated"
 )
 
 type RetryMode string
@@ -58,6 +36,16 @@ type HistoryMessage struct {
 	// with these labels, so data a prior run observed (e.g. a source class it
 	// read) cannot be laundered across turns by re-reading the answer.
 	Labels []string `json:"labels,omitempty"`
+}
+
+// DispatcherProvider builds the capability dispatcher one process runs under,
+// and canonicalizes the grant configs a manifest declares. It lives here rather
+// than beside the manifest because building a dispatcher needs a process
+// credential, which the manifest layer knows nothing about; manifest validation
+// asks only for the Normalize half (manifest.Normalizer), which this satisfies.
+type DispatcherProvider interface {
+	Normalize(syscall string, config json.RawMessage) (json.RawMessage, error)
+	NewDispatcher(context.Context, ProcessContext, manifest.Manifest) (sys.Dispatcher[ProcessContext], error)
 }
 
 // Config wires a Runtime. Everything concrete is injected: programs, capability
@@ -126,7 +114,7 @@ type Runtime struct {
 	// do NOT use it — they must complete on shutdown to persist final state.
 	baseCtx         context.Context
 	cancel          context.CancelFunc
-	programs        *loadedPrograms
+	programs        *program.Registry
 	scheduler       *sched.Scheduler[string, ProcessContext]
 	taints          *monitor.Taints[string]
 	log             eventlog.Log
@@ -170,7 +158,7 @@ type processState struct {
 	sessionID   string
 	input       string
 	history     []HistoryMessage
-	status      ProcessStatus
+	status      durable.ProcessStatus
 	attempt     int
 	createdAt   time.Time
 	updatedAt   time.Time
@@ -195,7 +183,7 @@ type processState struct {
 	// quantum is in flight.
 	stop          func()
 	stopRequested bool
-	manifest      Manifest
+	manifest      manifest.Manifest
 	revision      uint64
 	programDigest string
 	// hideHistory suppresses the session history in this process's sys.input —
@@ -341,21 +329,21 @@ type SessionSnapshot struct {
 }
 
 type ProcessSnapshot struct {
-	ID            string        `json:"id"`
-	SessionID     string        `json:"session_id"`
-	Input         string        `json:"input"`
-	Status        ProcessStatus `json:"status"`
-	Attempt       int           `json:"attempt"`
-	Revision      uint64        `json:"revision"`
-	Answer        string        `json:"answer,omitempty"`
-	Error         string        `json:"error,omitempty"`
-	JournalLength int           `json:"journal_length"`
-	CreatedAt     time.Time     `json:"created_at"`
-	UpdatedAt     time.Time     `json:"updated_at"`
-	StartedAt     *time.Time    `json:"started_at,omitempty"`
-	CompletedAt   *time.Time    `json:"completed_at,omitempty"`
-	Manifest      Manifest      `json:"manifest"`
-	ProgramDigest string        `json:"program_digest"`
+	ID            string                `json:"id"`
+	SessionID     string                `json:"session_id"`
+	Input         string                `json:"input"`
+	Status        durable.ProcessStatus `json:"status"`
+	Attempt       int                   `json:"attempt"`
+	Revision      uint64                `json:"revision"`
+	Answer        string                `json:"answer,omitempty"`
+	Error         string                `json:"error,omitempty"`
+	JournalLength int                   `json:"journal_length"`
+	CreatedAt     time.Time             `json:"created_at"`
+	UpdatedAt     time.Time             `json:"updated_at"`
+	StartedAt     *time.Time            `json:"started_at,omitempty"`
+	CompletedAt   *time.Time            `json:"completed_at,omitempty"`
+	Manifest      manifest.Manifest     `json:"manifest"`
+	ProgramDigest string                `json:"program_digest"`
 	// Labels is the run's accumulated taint at snapshot time (the union of every
 	// source class it has observed). A completed process carries its final taint,
 	// which the spawn boundary reads to propagate a child's provenance to its
@@ -363,7 +351,7 @@ type ProcessSnapshot struct {
 	// read to a child and reading the answer back.
 	Labels []string `json:"labels,omitempty"`
 	// Delegation lineage, so a single-process read shows the call tree the same
-	// way StoredProcess and the session graph do.
+	// way durable.Process and the session graph do.
 	ParentProcessID string   `json:"parent_process_id,omitempty"`
 	ChildProcessIDs []string `json:"child_process_ids,omitempty"`
 }

@@ -19,6 +19,8 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/capcompute"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/errs"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
 )
 
@@ -46,15 +48,15 @@ func (r *Runtime) activateProcess(ctx context.Context, pid string) (*capcompute.
 	}
 	r.mu.Unlock()
 	if proc == nil {
-		return nil, fmt.Errorf("%w: no process for pid %s", ErrNotFound, pid)
+		return nil, fmt.Errorf("%w: no process for pid %s", errs.NotFound, pid)
 	}
 	if err := r.programBinding(proc); err != nil {
 		return nil, err
 	}
 	// The registry holds the program's compiled image; a process whose program has
 	// been withdrawn finds nothing here and never runs again.
-	program, err := r.programs.Resolve(programID)
-	if err != nil || program.image == nil {
+	artifact, err := r.programs.Resolve(programID)
+	if err != nil || artifact.Image() == nil {
 		return nil, fmt.Errorf("program %q is unavailable", programID)
 	}
 
@@ -62,7 +64,7 @@ func (r *Runtime) activateProcess(ctx context.Context, pid string) (*capcompute.
 	if err != nil {
 		return nil, err
 	}
-	process, err := capcompute.NewProcess(ctx, program.image, capcompute.ProcessSpec[ProcessContext]{
+	process, err := capcompute.NewProcess(ctx, artifact.Image(), capcompute.ProcessSpec[ProcessContext]{
 		Entrypoint:    "run",
 		Cred:          cred,
 		Dispatcher:    chain,
@@ -85,7 +87,7 @@ func (r *Runtime) resumeProcess(ctx context.Context, process *capcompute.Process
 		programID = proc.manifest.Program
 	}
 	r.mu.Unlock()
-	if program, err := r.programs.Resolve(programID); err != nil || program.image == nil {
+	if artifact, err := r.programs.Resolve(programID); err != nil || artifact.Image() == nil {
 		return nil, fmt.Errorf("program %q is unavailable", programID)
 	}
 	handle, err := capcompute.Resume(ctx, process)
@@ -121,7 +123,7 @@ func (r *Runtime) execute(processID string) {
 			err = errors.New("process is leased by another Aurora instance")
 		}
 		r.mu.Unlock()
-		r.finish(processID, ProcessInterrupted, "", err)
+		r.finish(processID, durable.ProcessInterrupted, "", err)
 		return
 	}
 	defer r.leases.Release(
@@ -147,10 +149,10 @@ func (r *Runtime) execute(processID string) {
 		}
 	}
 	if err != nil {
-		if r.failureStatus(err) == ProcessFailed {
+		if r.failureStatus(err) == durable.ProcessFailed {
 			r.failProcess(processID, err)
 		} else {
-			r.finish(processID, ProcessInterrupted, "", err)
+			r.finish(processID, durable.ProcessInterrupted, "", err)
 		}
 		return
 	}
@@ -159,7 +161,7 @@ func (r *Runtime) execute(processID string) {
 	proc = r.processes[processID]
 	now := r.now().UTC()
 	proc.stop = stop
-	proc.status = ProcessRunning
+	proc.status = durable.ProcessRunning
 	proc.startedAt = &now
 	proc.updatedAt = now
 	stopRequested := proc.stopRequested
@@ -191,13 +193,13 @@ func (r *Runtime) execute(processID string) {
 			r.failProcess(processID, err)
 			return
 		}
-		r.finish(processID, ProcessCompleted, answer, nil)
+		r.finish(processID, durable.ProcessCompleted, answer, nil)
 	case capcompute.ResumeYielded:
 		tasks, taskErr := r.tasks.List(context.Background(), r.tenantID, processID)
 		if taskErr == nil && hasPendingTask(tasks) {
-			r.finish(processID, ProcessWaitingTask, "", nil)
+			r.finish(processID, durable.ProcessWaitingTask, "", nil)
 		} else {
-			r.finish(processID, ProcessYielded, "", taskErr)
+			r.finish(processID, durable.ProcessYielded, "", taskErr)
 		}
 	case capcompute.ResumeStopped:
 		r.mu.Lock()
@@ -206,7 +208,7 @@ func (r *Runtime) execute(processID string) {
 		if closing {
 			// A closing host interrupts, never aborts: the restart resumes the
 			// open section mid-flight — a host restart must not touch effects.
-			r.finish(processID, ProcessInterrupted, "", result.Err)
+			r.finish(processID, durable.ProcessInterrupted, "", result.Err)
 		} else {
 			r.stopProcess(processID, result.Err)
 		}
@@ -245,14 +247,14 @@ func (r *Runtime) driveDirect(pid string) (<-chan capcompute.ResumeResult, func(
 // finish with: a scheduling conflict is an interruption (the process can be
 // re-driven); everything else — an incompatible journal, a missing program —
 // is a failure.
-func (r *Runtime) failureStatus(err error) ProcessStatus {
+func (r *Runtime) failureStatus(err error) durable.ProcessStatus {
 	if errors.Is(err, sched.ErrAlreadyScheduled) || errors.Is(err, sched.ErrClosed) {
-		return ProcessInterrupted
+		return durable.ProcessInterrupted
 	}
-	return ProcessFailed
+	return durable.ProcessFailed
 }
 
-func (r *Runtime) finish(processID string, status ProcessStatus, answer string, err error) {
+func (r *Runtime) finish(processID string, status durable.ProcessStatus, answer string, err error) {
 	r.mu.Lock()
 	proc := r.processes[processID]
 	if proc == nil {
@@ -276,7 +278,7 @@ func (r *Runtime) finish(processID string, status ProcessStatus, answer string, 
 	}
 }
 
-func (r *Runtime) finishLocked(proc *processState, status ProcessStatus, answer string, err error) {
+func (r *Runtime) finishLocked(proc *processState, status durable.ProcessStatus, answer string, err error) {
 	now := r.now().UTC()
 	proc.status = status
 	proc.answer = answer
@@ -303,7 +305,7 @@ func (r *Runtime) finishLocked(proc *processState, status ProcessStatus, answer 
 	}
 	session := r.sessions[proc.sessionID]
 	if session != nil {
-		if status != ProcessYielded && status != ProcessWaitingTask && session.activeProcessID == proc.id {
+		if status != durable.ProcessYielded && status != durable.ProcessWaitingTask && session.activeProcessID == proc.id {
 			// When a child process finishes in the parent's session, return activeProcessID to
 			// the parent so the parent goroutine can resume on the same session.
 			if proc.parentProcessID != "" {
@@ -317,7 +319,7 @@ func (r *Runtime) finishLocked(proc *processState, status ProcessStatus, answer 
 			}
 		}
 		session.updatedAt = now
-		if status == ProcessCompleted && proc.parentProcessID == "" {
+		if status == durable.ProcessCompleted && proc.parentProcessID == "" {
 			session.history = append(session.history,
 				HistoryMessage{Role: "user", Content: proc.input},
 				HistoryMessage{Role: "assistant", Content: answer, Labels: proc.labels},
@@ -368,7 +370,7 @@ func (r *Runtime) journalAppendPublisher(sessionID string) func(string, uint64, 
 // shutdown to persist final state (unlike rollback compensations, which derive
 // from the cancellable baseCtx).
 func (r *Runtime) appendProcess(proc *processState) error {
-	ev, err := processStateEvent(r.now().UTC(), r.storedProcessLocked(proc))
+	ev, err := durable.ProcessStateEvent(r.now().UTC(), r.storedProcessLocked(proc))
 	if err != nil {
 		return err
 	}
@@ -377,7 +379,7 @@ func (r *Runtime) appendProcess(proc *processState) error {
 }
 
 func (r *Runtime) appendSession(session *sessionState) error {
-	ev, err := sessionStateEvent(r.now().UTC(), r.storedSessionLocked(session))
+	ev, err := durable.SessionStateEvent(r.now().UTC(), r.storedSessionLocked(session))
 	if err != nil {
 		return err
 	}

@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 )
 
 func bootSessionRuntime(t *testing.T, store *runtimeStore) *Runtime {
@@ -81,7 +83,7 @@ func TestSessionNamePersistsAcrossRestart(t *testing.T) {
 	}
 	// A process-less session has no derived title, but must round-trip to the
 	// same placeholder the live runtime assigns at creation — not an empty string.
-	if restored.Title != defaultSessionTitle {
-		t.Fatalf("restored title = %q, want %q to survive restart", restored.Title, defaultSessionTitle)
+	if restored.Title != durable.DefaultSessionTitle {
+		t.Fatalf("restored title = %q, want %q to survive restart", restored.Title, durable.DefaultSessionTitle)
 	}
 }

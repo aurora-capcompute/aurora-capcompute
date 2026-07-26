@@ -9,6 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/errs"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
@@ -29,7 +32,7 @@ const childCompletionPollInterval = 250 * time.Millisecond
 // and replay, so spawn results are journaled effects.
 type spawnRouter struct {
 	next     sys.Dispatcher[ProcessContext]
-	programs []Manifest
+	programs []manifest.Manifest
 	hidden   bool
 	runtime  *Runtime
 }
@@ -43,7 +46,7 @@ type spawnResult struct {
 	Answer string `json:"answer"`
 }
 
-func newSpawnRouter(next sys.Dispatcher[ProcessContext], grant Syscall, runtime *Runtime) *spawnRouter {
+func newSpawnRouter(next sys.Dispatcher[ProcessContext], grant manifest.Syscall, runtime *Runtime) *spawnRouter {
 	return &spawnRouter{
 		next:     next,
 		programs: grant.Programs,
@@ -53,7 +56,7 @@ func newSpawnRouter(next sys.Dispatcher[ProcessContext], grant Syscall, runtime 
 }
 
 func (r *spawnRouter) Dispatch(ctx context.Context, cred ProcessContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
-	if syscall.Name != SpawnSyscall {
+	if syscall.Name != manifest.SpawnSyscall {
 		return r.next.Dispatch(ctx, cred, syscall, auth)
 	}
 	var args spawnArgs
@@ -86,7 +89,7 @@ func (r *spawnRouter) Dispatch(ctx context.Context, cred ProcessContext, syscall
 
 // spawnInputToString collapses the typed spawn `input` value into the canonical
 // process-input string — the inverse of the string-first rule (Schema.Validate in
-// program.go): a JSON string input carries its plain text; any other JSON value
+// the program package): a JSON string input carries its plain text; any other JSON value
 // carries its compact text, which the child re-parses under the same rule.
 func spawnInputToString(input json.RawMessage) (string, error) {
 	trimmed := bytes.TrimSpace(input)
@@ -107,13 +110,13 @@ func spawnInputToString(input json.RawMessage) (string, error) {
 	return buf.String(), nil
 }
 
-func (r *spawnRouter) program(name string) (Manifest, bool) {
+func (r *spawnRouter) program(name string) (manifest.Manifest, bool) {
 	for _, spec := range r.programs {
 		if spec.Program == name {
 			return spec, true
 		}
 	}
-	return Manifest{}, false
+	return manifest.Manifest{}, false
 }
 
 func (r *spawnRouter) programNames() []string {
@@ -144,10 +147,10 @@ func (r *spawnRouter) capability() sys.Capability {
 			desc.WriteString(";")
 		}
 		desc.WriteString("\n- " + spec.Program)
-		program, err := r.runtime.programs.Resolve(spec.Program)
+		artifact, err := r.runtime.programs.Resolve(spec.Program)
 		known := err == nil
-		if known && program.Description != "" {
-			desc.WriteString(": " + program.Description)
+		if known && artifact.Description != "" {
+			desc.WriteString(": " + artifact.Description)
 		}
 		if grants := visibleGrantNames(spec); len(grants) > 0 {
 			desc.WriteString(" [can use: " + strings.Join(grants, ", ") + "]")
@@ -159,16 +162,16 @@ func (r *spawnRouter) capability() sys.Capability {
 		// then fails cleanly with "program is not registered").
 		inputSchema := json.RawMessage(`{}`)
 		if known {
-			desc.WriteString(" input=" + compactSchema(program.Input.Document) + " output=" + compactSchema(program.Output.Document))
-			if len(program.Input.Document) > 0 {
-				inputSchema = program.Input.Document
+			desc.WriteString(" input=" + compactSchema(artifact.Input.Document) + " output=" + compactSchema(artifact.Output.Document))
+			if len(artifact.Input.Document) > 0 {
+				inputSchema = artifact.Input.Document
 			}
 		}
 		branches = append(branches, spawnBranchSchema(spec.Program, inputSchema))
 	}
 	desc.WriteString("\nCall {\"program\":\"<name>\",\"input\":<value>} where input matches the chosen program's declared input schema: a JSON string for a string schema, a JSON document for a structured one.")
 	return sys.Capability{
-		Name:        SpawnSyscall,
+		Name:        manifest.SpawnSyscall,
 		Description: desc.String(),
 		InputSchema: spawnADTSchema(branches),
 		Hidden:      r.hidden,
@@ -208,7 +211,7 @@ func compactSchema(raw json.RawMessage) string {
 
 // visibleGrantNames summarizes a spawnable program's non-hidden grants for
 // the spawn menu.
-func visibleGrantNames(spec Manifest) []string {
+func visibleGrantNames(spec manifest.Manifest) []string {
 	out := make([]string, 0, len(spec.Syscalls))
 	for _, grant := range spec.Syscalls {
 		if !grant.Hidden {
@@ -218,7 +221,7 @@ func visibleGrantNames(spec Manifest) []string {
 	return out
 }
 
-func (r *spawnRouter) spawn(ctx context.Context, parent ProcessContext, spec Manifest, input string) (sys.SyscallResult, error) {
+func (r *spawnRouter) spawn(ctx context.Context, parent ProcessContext, spec manifest.Manifest, input string) (sys.SyscallResult, error) {
 	// Deep cascade resume: when the parent process is being restarted (or
 	// re-driven after a child's HITL approval), re-execution re-issues the
 	// same deterministic sequence of spawn calls. Rather than spawning a
@@ -257,9 +260,9 @@ func (r *spawnRouter) spawn(ctx context.Context, parent ProcessContext, spec Man
 	}
 
 	// History and capability sharing are the child program's own settings now.
-	childManifest := buildChildManifest(spec, spec.sharesCapabilities())
+	childManifest := buildChildManifest(spec, spec.SharesCapabilities())
 	slog.Info("spawning child process in parent session", "parent", parent.ProcessID, "child", spec.Program)
-	proc, err := r.runtime.createChildProcess(parent.ProcessID, parent.SessionID, input, childManifest, spec.sharesHistory())
+	proc, err := r.runtime.createChildProcess(parent.ProcessID, parent.SessionID, input, childManifest, spec.SharesHistory())
 	if err != nil {
 		return sys.Fail(fmt.Sprintf("create child process: %v", err)), nil
 	}
@@ -294,9 +297,9 @@ func spawnAnswer(answer string, labels ...string) (sys.SyscallResult, error) {
 // program. When the sys.spawn grant withholds the capability menu
 // (Capabilities:false), every grant is hidden so the child's sys.input
 // advertises no tools; the grants stay dispatchable, just off the menu.
-func buildChildManifest(spec Manifest, shareCapabilities bool) Manifest {
-	child := cloneManifest(spec)
-	child.Version = ManifestVersion
+func buildChildManifest(spec manifest.Manifest, shareCapabilities bool) manifest.Manifest {
+	child := spec.Clone()
+	child.Version = manifest.Version
 	if !shareCapabilities {
 		for i := range child.Syscalls {
 			child.Syscalls[i].Hidden = true
@@ -349,17 +352,17 @@ func (r *Runtime) nextCascadeChild(parentProcessID string) (childID, sessionID s
 	// gets a new revision. Completed children cannot be resumed, so fall back to
 	// restart in that case.
 	mode := parent.cascadeMode
-	if mode == RetryResume && child.status == ProcessCompleted {
+	if mode == RetryResume && child.status == durable.ProcessCompleted {
 		mode = RetryRestart
 	}
 	return childID, child.sessionID, mode, false, true
 }
 
-func (r *Runtime) createChildProcess(parentProcessID string, sessionID string, input string, manifest Manifest, shareHistory bool) (ProcessSnapshot, error) {
+func (r *Runtime) createChildProcess(parentProcessID string, sessionID string, input string, manifest manifest.Manifest, shareHistory bool) (ProcessSnapshot, error) {
 	if input == "" {
-		return ProcessSnapshot{}, fmt.Errorf("%w: input is required", ErrInvalid)
+		return ProcessSnapshot{}, fmt.Errorf("%w: input is required", errs.Invalid)
 	}
-	program, err := r.programs.Resolve(manifest.Program)
+	artifact, err := r.programs.Resolve(manifest.Program)
 	if err != nil {
 		return ProcessSnapshot{}, err
 	}
@@ -372,16 +375,16 @@ func (r *Runtime) createChildProcess(parentProcessID string, sessionID string, i
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
-		return ProcessSnapshot{}, fmt.Errorf("%w: runtime is closed", ErrConflict)
+		return ProcessSnapshot{}, fmt.Errorf("%w: runtime is closed", errs.Conflict)
 	}
 	session := r.sessions[sessionID]
 	if session == nil {
 		r.mu.Unlock()
-		return ProcessSnapshot{}, fmt.Errorf("%w: session %s", ErrNotFound, sessionID)
+		return ProcessSnapshot{}, fmt.Errorf("%w: session %s", errs.NotFound, sessionID)
 	}
 	if session.activeProcessID != "" && session.activeProcessID != parentProcessID {
 		r.mu.Unlock()
-		return ProcessSnapshot{}, fmt.Errorf("%w: session already has active process %s", ErrConflict, session.activeProcessID)
+		return ProcessSnapshot{}, fmt.Errorf("%w: session already has active process %s", errs.Conflict, session.activeProcessID)
 	}
 	// The child's input was composed by the parent from whatever the parent had
 	// observed, so it inherits the parent's taint at spawn: snapshot it here and
@@ -399,13 +402,13 @@ func (r *Runtime) createChildProcess(parentProcessID string, sessionID string, i
 		input:           input,
 		inputLabels:     inputLabels,
 		history:         append([]HistoryMessage(nil), session.history...),
-		status:          ProcessQueued,
+		status:          durable.ProcessQueued,
 		attempt:         1,
 		createdAt:       now,
 		updatedAt:       now,
 		manifest:        manifest,
 		revision:        1,
-		programDigest:   program.Digest,
+		programDigest:   artifact.Digest,
 		parentProcessID: parentProcessID,
 		hideHistory:     !shareHistory,
 	}
@@ -534,15 +537,15 @@ func (r *Runtime) waitForCompletion(ctx context.Context, processID, sessionID st
 // while the process is still in flight.
 func childTerminal(snapshot ProcessSnapshot) (answer string, labels []string, done bool, err error) {
 	switch snapshot.Status {
-	case ProcessCompleted:
+	case durable.ProcessCompleted:
 		return snapshot.Answer, snapshot.Labels, true, nil
-	case ProcessFailed:
+	case durable.ProcessFailed:
 		return "", snapshot.Labels, true, fmt.Errorf("child process failed: %s", snapshot.Error)
-	case ProcessStopped:
+	case durable.ProcessStopped:
 		return "", snapshot.Labels, true, fmt.Errorf("child process stopped")
-	case ProcessInterrupted:
+	case durable.ProcessInterrupted:
 		return "", snapshot.Labels, true, fmt.Errorf("child process interrupted")
-	case ProcessCompensated:
+	case durable.ProcessCompensated:
 		return "", snapshot.Labels, true, fmt.Errorf("child process rolled back: %s", snapshot.Answer)
 	default:
 		return "", nil, false, nil
@@ -552,7 +555,7 @@ func childTerminal(snapshot ProcessSnapshot) (answer string, labels []string, do
 // childParked reports whether a child process is durably suspended awaiting out-of-band
 // resolution (its own HITL approval) rather than terminal or still in flight.
 func childParked(s ProcessSnapshot) bool {
-	return s.Status == ProcessWaitingTask || s.Status == ProcessYielded
+	return s.Status == durable.ProcessWaitingTask || s.Status == durable.ProcessYielded
 }
 
 // resumeParentIfWaiting re-drives a parent that suspended on a delegated child's
@@ -564,7 +567,7 @@ func childParked(s ProcessSnapshot) bool {
 func (r *Runtime) resumeParentIfWaiting(parentProcessID string) {
 	r.mu.Lock()
 	parent := r.processes[parentProcessID]
-	resumable := parent != nil && (parent.status == ProcessYielded || parent.status == ProcessWaitingTask)
+	resumable := parent != nil && (parent.status == durable.ProcessYielded || parent.status == durable.ProcessWaitingTask)
 	if resumable {
 		parent.reconnectChildren = true
 	}
@@ -578,9 +581,9 @@ func (r *Runtime) resumeParentIfWaiting(parentProcessID string) {
 }
 
 // isTerminal reports whether a process status is a final state (no further execution).
-func isTerminal(status ProcessStatus) bool {
+func isTerminal(status durable.ProcessStatus) bool {
 	switch status {
-	case ProcessCompleted, ProcessFailed, ProcessStopped, ProcessInterrupted, ProcessCompensated:
+	case durable.ProcessCompleted, durable.ProcessFailed, durable.ProcessStopped, durable.ProcessInterrupted, durable.ProcessCompensated:
 		return true
 	default:
 		return false

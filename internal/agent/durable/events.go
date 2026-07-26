@@ -1,4 +1,4 @@
-package agent
+package durable
 
 import (
 	"bytes"
@@ -39,31 +39,32 @@ type taskExecutedData struct {
 	TaskID string `json:"task_id"`
 }
 
-func processStateEvent(now time.Time, r StoredProcess) (eventlog.Event, error) {
-	return encodeEvent(evProcessState, r.ID, r.Revision, now, r)
+// ProcessStateEvent records a process's full durable state.
+func ProcessStateEvent(now time.Time, r Process) (eventlog.Event, error) {
+	return EncodeEvent(evProcessState, r.ID, r.Revision, now, r)
 }
 
-// sessionStateEvent records a session's explicit identity (name, tags, creation
+// SessionStateEvent records a session's explicit identity (name, tags, creation
 // time). It is not tied to a process, so it carries no proc/rev.
-func sessionStateEvent(now time.Time, s StoredSession) (eventlog.Event, error) {
-	return encodeEvent(evSessionState, "", 0, now, s)
+func SessionStateEvent(now time.Time, s Session) (eventlog.Event, error) {
+	return EncodeEvent(evSessionState, "", 0, now, s)
 }
 
-func taskCreatedEvent(now time.Time, record task.Record) (eventlog.Event, error) {
-	return encodeEvent(evTaskCreated, record.Scope.ProcessID, record.Scope.Revision, now,
+func TaskCreatedEvent(now time.Time, record task.Record) (eventlog.Event, error) {
+	return EncodeEvent(evTaskCreated, record.Scope.ProcessID, record.Scope.Revision, now,
 		taskEventData{Record: record, TokenHash: record.TokenHash})
 }
 
-func taskResolvedEvent(now time.Time, record task.Record) (eventlog.Event, error) {
-	return encodeEvent(evTaskResolved, record.Scope.ProcessID, record.Scope.Revision, now,
+func TaskResolvedEvent(now time.Time, record task.Record) (eventlog.Event, error) {
+	return EncodeEvent(evTaskResolved, record.Scope.ProcessID, record.Scope.Revision, now,
 		taskEventData{Record: record, TokenHash: record.TokenHash})
 }
 
-func taskExecutedEvent(now time.Time, processID string, rev uint64, taskID string) (eventlog.Event, error) {
-	return encodeEvent(evTaskExecuted, processID, rev, now, taskExecutedData{TaskID: taskID})
+func TaskExecutedEvent(now time.Time, processID string, rev uint64, taskID string) (eventlog.Event, error) {
+	return EncodeEvent(evTaskExecuted, processID, rev, now, taskExecutedData{TaskID: taskID})
 }
 
-func encodeEvent(kind, proc string, rev uint64, now time.Time, payload any) (eventlog.Event, error) {
+func EncodeEvent(kind, proc string, rev uint64, now time.Time, payload any) (eventlog.Event, error) {
 	data, err := marshalVerbatim(payload)
 	if err != nil {
 		return eventlog.Event{}, fmt.Errorf("encode %s event: %w", kind, err)
@@ -91,8 +92,8 @@ func marshalVerbatim(payload any) (json.RawMessage, error) {
 // StoredState + task records the runtime previously loaded from the CRUD stores,
 // now derived from the append-only log.
 type Projection struct {
-	Session   StoredSession
-	Processes map[string]StoredProcess
+	Session   Session
+	Processes map[string]Process
 	Tasks     map[string]task.Record
 }
 
@@ -103,20 +104,20 @@ type Projection struct {
 // Folding is last-writer-wins per id.
 func Fold(events []eventlog.Event) (Projection, error) {
 	proj := Projection{
-		Processes: make(map[string]StoredProcess),
+		Processes: make(map[string]Process),
 		Tasks:     make(map[string]task.Record),
 	}
-	var sessionEvent *StoredSession
+	var sessionEvent *Session
 	for _, ev := range events {
 		switch ev.Kind {
 		case evSessionState:
-			var s StoredSession
+			var s Session
 			if err := json.Unmarshal(ev.Data, &s); err != nil {
 				return Projection{}, fmt.Errorf("decode session.state: %w", err)
 			}
 			sessionEvent = &s
 		case evProcessState:
-			var r StoredProcess
+			var r Process
 			if err := json.Unmarshal(ev.Data, &r); err != nil {
 				return Projection{}, fmt.Errorf("decode proc.state: %w", err)
 			}
@@ -141,7 +142,7 @@ func Fold(events []eventlog.Event) (Projection, error) {
 		// syscall.recorded / journal.header belong to the journal view
 		// (foldJournals); any other kind is skipped.
 	}
-	proj.Session = deriveStoredSession(proj.Processes)
+	proj.Session = deriveSession(proj.Processes)
 	if sessionEvent != nil {
 		// The session.state event is authoritative for the session's explicit
 		// identity — id, name, tags, creation time — while the title and active
@@ -158,7 +159,7 @@ func Fold(events []eventlog.Event) (Projection, error) {
 	return proj, nil
 }
 
-// deriveStoredSession reconstructs the process-projection half of session
+// deriveSession reconstructs the process-projection half of session
 // metadata; Fold merges the authoritative session.state event over it. It derives:
 //   - identity (ID, TenantID) and Tags from the earliest process — the fallback
 //     for pre-session.state streams that carry no session event
@@ -166,11 +167,11 @@ func Fold(events []eventlog.Event) (Projection, error) {
 //   - CreatedAt is the earliest process's CreatedAt
 //   - UpdatedAt is the latest process's UpdatedAt
 //   - ActiveProcessID is the ID of the one process (if any) that is not in a terminal state
-func deriveStoredSession(processes map[string]StoredProcess) StoredSession {
+func deriveSession(processes map[string]Process) Session {
 	if len(processes) == 0 {
-		return StoredSession{}
+		return Session{}
 	}
-	ordered := make([]StoredProcess, 0, len(processes))
+	ordered := make([]Process, 0, len(processes))
 	for _, proc := range processes {
 		ordered = append(ordered, proc)
 	}
@@ -183,13 +184,13 @@ func deriveStoredSession(processes map[string]StoredProcess) StoredSession {
 		return ordered[i].ID < ordered[j].ID
 	})
 
-	session := StoredSession{
+	session := Session{
 		TenantID:  ordered[0].TenantID,
 		ID:        ordered[0].SessionID,
-		Title:     sessionTitle(ordered[0].Input),
+		Title:     SessionTitle(ordered[0].Input),
 		CreatedAt: ordered[0].CreatedAt,
 		UpdatedAt: ordered[0].UpdatedAt,
-		Tags:      cloneTags(ordered[0].Tags),
+		Tags:      CloneTags(ordered[0].Tags),
 	}
 	for _, proc := range ordered {
 		if proc.UpdatedAt.After(session.UpdatedAt) {

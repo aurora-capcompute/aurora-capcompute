@@ -21,7 +21,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 	"github.com/aurora-capcompute/aurora-capcompute/monitor"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
@@ -38,7 +40,7 @@ func (launderDispatchers) Normalize(_ string, settings json.RawMessage) (json.Ra
 	return append(json.RawMessage(nil), settings...), nil
 }
 
-func (p launderDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ Manifest) (sys.Dispatcher[ProcessContext], error) {
+func (p launderDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ manifest.Manifest) (sys.Dispatcher[ProcessContext], error) {
 	return p.d, nil
 }
 
@@ -141,8 +143,8 @@ func TestCompensationCannotLaunderTaintPastRollbackSink(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	proc, err := runtime.CreateProcess(session.ID, "exfiltrate the secret", Manifest{
-		Version:  ManifestVersion,
+	proc, err := runtime.CreateProcess(session.ID, "exfiltrate the secret", manifest.Manifest{
+		Version:  manifest.Version,
 		Program:  "program@1",
 		Syscalls: cognitionGrants("vault.read", "web.post"),
 	})
@@ -151,7 +153,7 @@ func TestCompensationCannotLaunderTaintPastRollbackSink(t *testing.T) {
 	}
 
 	// Wait for any terminal status (not only failed): were the injection reverted,
-	// the rollback would SETTLE and the process reach ProcessCompensated — the
+	// the rollback would SETTLE and the process reach durable.ProcessCompensated — the
 	// laundered outcome — so we must observe that case to fail with the security
 	// diagnostic rather than time out.
 	snap := waitForTerminal(t, runtime, proc.ID)
@@ -170,7 +172,7 @@ func TestCompensationCannotLaunderTaintPastRollbackSink(t *testing.T) {
 	if !containsLabel(sinkTaint, "secret") {
 		t.Fatalf("SECURITY: the rollback dispatched the inverse with taint %v — settleRollback did not inject the run's `secret` taint, so a sink guard would see nothing", sinkTaint)
 	}
-	if snap.Status != ProcessFailed {
+	if snap.Status != durable.ProcessFailed {
 		t.Fatalf("process status = %v, want failed (rollback blocked, unsettled)", snap.Status)
 	}
 }

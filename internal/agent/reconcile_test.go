@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
@@ -27,7 +28,7 @@ type fixedProvider struct{ caps []sys.Capability }
 func (fixedProvider) Normalize(_ string, settings json.RawMessage) (json.RawMessage, error) {
 	return settings, nil
 }
-func (p fixedProvider) NewDispatcher(context.Context, ProcessContext, Manifest) (sys.Dispatcher[ProcessContext], error) {
+func (p fixedProvider) NewDispatcher(context.Context, ProcessContext, manifest.Manifest) (sys.Dispatcher[ProcessContext], error) {
 	return capsDispatcher{caps: p.caps}, nil
 }
 
@@ -36,25 +37,25 @@ func (p fixedProvider) NewDispatcher(context.Context, ProcessContext, Manifest) 
 // advertised capabilities, so anything advertised beyond the manifest would be a
 // silent authority widening.
 func TestReconcileGrants(t *testing.T) {
-	manifest := Manifest{Version: ManifestVersion, Syscalls: []Syscall{
+	spec := manifest.Manifest{Version: manifest.Version, Syscalls: []manifest.Syscall{
 		{Syscall: "core.openaiApi", Hidden: true},
 		{Syscall: "core.internet"},
 	}}
 
 	t.Run("faithful advertisement is admitted", func(t *testing.T) {
-		if err := reconcileGrants([]sys.Capability{leafCap("core.openaiApi"), leafCap("core.internet")}, manifest); err != nil {
+		if err := reconcileGrants([]sys.Capability{leafCap("core.openaiApi"), leafCap("core.internet")}, spec); err != nil {
 			t.Fatalf("faithful provider rejected: %v", err)
 		}
 	})
 
 	t.Run("under-advertisement is admitted (not a leak)", func(t *testing.T) {
-		if err := reconcileGrants([]sys.Capability{leafCap("core.internet")}, manifest); err != nil {
+		if err := reconcileGrants([]sys.Capability{leafCap("core.internet")}, spec); err != nil {
 			t.Fatalf("under-advertising provider rejected: %v", err)
 		}
 	})
 
 	t.Run("over-advertisement is rejected and names the leak", func(t *testing.T) {
-		err := reconcileGrants([]sys.Capability{leafCap("core.internet"), leafCap("core.filesystem")}, manifest)
+		err := reconcileGrants([]sys.Capability{leafCap("core.internet"), leafCap("core.filesystem")}, spec)
 		if err == nil || !strings.Contains(err.Error(), "core.filesystem") {
 			t.Fatalf("err = %v, want a rejection naming core.filesystem", err)
 		}
@@ -63,12 +64,12 @@ func TestReconcileGrants(t *testing.T) {
 	t.Run("a driver may not advertise a runtime-served capability", func(t *testing.T) {
 		// sys.spawn is runtime-served, so it is not a leaf grant; a driver that
 		// published it would be shadowing the runtime's own — refused.
-		spawnManifest := Manifest{Version: ManifestVersion, Syscalls: []Syscall{
-			{Syscall: SpawnSyscall, Programs: []Manifest{{Program: "child"}}},
+		spawnManifest := manifest.Manifest{Version: manifest.Version, Syscalls: []manifest.Syscall{
+			{Syscall: manifest.SpawnSyscall, Programs: []manifest.Manifest{{Program: "child"}}},
 		}}
-		err := reconcileGrants([]sys.Capability{leafCap(SpawnSyscall)}, spawnManifest)
-		if err == nil || !strings.Contains(err.Error(), SpawnSyscall) {
-			t.Fatalf("err = %v, want a driver advertising %s to be rejected", err, SpawnSyscall)
+		err := reconcileGrants([]sys.Capability{leafCap(manifest.SpawnSyscall)}, spawnManifest)
+		if err == nil || !strings.Contains(err.Error(), manifest.SpawnSyscall) {
+			t.Fatalf("err = %v, want a driver advertising %s to be rejected", err, manifest.SpawnSyscall)
 		}
 	})
 }
@@ -80,7 +81,7 @@ func TestProcessDriversRejectsOverAdvertisingProvider(t *testing.T) {
 	r := &Runtime{
 		dispatchers: fixedProvider{caps: []sys.Capability{leafCap("core.openaiApi"), leafCap("core.leak")}},
 		processes: map[string]*processState{
-			"p1": {id: "p1", manifest: Manifest{Version: ManifestVersion, Syscalls: []Syscall{
+			"p1": {id: "p1", manifest: manifest.Manifest{Version: manifest.Version, Syscalls: []manifest.Syscall{
 				{Syscall: "core.openaiApi", Hidden: true},
 			}}},
 		},
@@ -95,7 +96,7 @@ func TestProcessDriversAdmitsFaithfulProvider(t *testing.T) {
 	r := &Runtime{
 		dispatchers: fixedProvider{caps: []sys.Capability{leafCap("core.openaiApi")}},
 		processes: map[string]*processState{
-			"p1": {id: "p1", manifest: Manifest{Version: ManifestVersion, Syscalls: []Syscall{
+			"p1": {id: "p1", manifest: manifest.Manifest{Version: manifest.Version, Syscalls: []manifest.Syscall{
 				{Syscall: "core.openaiApi", Hidden: true},
 			}}},
 		},
@@ -112,25 +113,25 @@ func TestProcessDriversAdmitsFaithfulProvider(t *testing.T) {
 func TestManifestRejectsReservedSyscallNamespace(t *testing.T) {
 	provider := fixedProvider{}
 	for _, name := range []string{"sys.log", "sys.now", "sys.input", "sys.output", "sys.begin", "sys.compensate"} {
-		_, err := ValidateManifest(Manifest{Version: ManifestVersion, Syscalls: []Syscall{{Syscall: name}}}, provider)
+		_, err := manifest.Validate(manifest.Manifest{Version: manifest.Version, Syscalls: []manifest.Syscall{{Syscall: name}}}, provider)
 		if err == nil || !strings.Contains(err.Error(), "reserved") {
 			t.Fatalf("granting %q: err = %v, want a reserved-namespace rejection", name, err)
 		}
 	}
 
 	// The two runtime-served members remain grantable.
-	if _, err := ValidateManifest(Manifest{Version: ManifestVersion, Program: "parent", Syscalls: []Syscall{
-		{Syscall: SpawnSyscall, Programs: []Manifest{{Program: "child"}}},
+	if _, err := manifest.Validate(manifest.Manifest{Version: manifest.Version, Program: "parent", Syscalls: []manifest.Syscall{
+		{Syscall: manifest.SpawnSyscall, Programs: []manifest.Manifest{{Program: "child"}}},
 	}}, provider); err != nil {
 		t.Fatalf("sys.spawn grant rejected: %v", err)
 	}
-	if _, err := ValidateManifest(Manifest{Version: ManifestVersion, Program: "parent", Syscalls: []Syscall{
-		{Syscall: TimerSyscall},
+	if _, err := manifest.Validate(manifest.Manifest{Version: manifest.Version, Program: "parent", Syscalls: []manifest.Syscall{
+		{Syscall: manifest.TimerSyscall},
 	}}, provider); err != nil {
 		t.Fatalf("sys.timer grant rejected: %v", err)
 	}
-	if _, err := ValidateManifest(Manifest{Version: ManifestVersion, Program: "parent", Syscalls: []Syscall{
-		{Syscall: DeclassifySyscall},
+	if _, err := manifest.Validate(manifest.Manifest{Version: manifest.Version, Program: "parent", Syscalls: []manifest.Syscall{
+		{Syscall: manifest.DeclassifySyscall},
 	}}, provider); err != nil {
 		t.Fatalf("sys.declassify grant rejected: %v", err)
 	}

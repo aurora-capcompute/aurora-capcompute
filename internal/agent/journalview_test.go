@@ -70,7 +70,7 @@ func TestLogJournalLinearRoundTrip(t *testing.T) {
 	}
 }
 
-// Syscall args and results must round-trip through the event log
+// manifest.Syscall args and results must round-trip through the event log
 // byte-identically — including <, >, and &, which encoding/json would rewrite
 // to <-style escapes inside raw messages. A restored journal holding
 // different bytes than the guest re-issues would refuse its own history as a

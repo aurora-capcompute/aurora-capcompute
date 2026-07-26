@@ -31,7 +31,11 @@ import (
 	"github.com/aurora-capcompute/capcompute"
 	"github.com/aurora-capcompute/capcompute/sys"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/errs"
 	internalhost "github.com/aurora-capcompute/aurora-capcompute/internal/agent/host"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/program"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 
 	extism "github.com/extism/go-sdk"
@@ -101,7 +105,7 @@ func resolveGuestLimits(memoryPages int, timeout time.Duration) (uint32, time.Du
 // appear in `advertised` and need no exception here. Under-advertising (a leaf
 // grant the provider chose not to serve) is not a leak — the guest simply cannot
 // call it — so only over-advertising fails the check.
-func reconcileGrants(advertised []sys.Capability, manifest Manifest) error {
+func reconcileGrants(advertised []sys.Capability, manifest manifest.Manifest) error {
 	granted := make(map[string]struct{}, len(manifest.Syscalls))
 	for _, leaf := range manifest.LeafSyscalls() {
 		granted[leaf.Syscall] = struct{}{}
@@ -115,7 +119,7 @@ func reconcileGrants(advertised []sys.Capability, manifest Manifest) error {
 	if len(leaked) > 0 {
 		sort.Strings(leaked)
 		return fmt.Errorf("%w: dispatcher provider advertises capabilities the manifest did not grant: %s",
-			ErrInvalid, strings.Join(leaked, ", "))
+			errs.Invalid, strings.Join(leaked, ", "))
 	}
 	return nil
 }
@@ -149,23 +153,23 @@ func openIntentPolicy(nonIdempotent []string) replay.OpenIntentPolicy {
 
 func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 	if config.Dispatchers == nil {
-		return nil, fmt.Errorf("%w: dispatcher provider is required", ErrInvalid)
+		return nil, fmt.Errorf("%w: dispatcher provider is required", errs.Invalid)
 	}
 	if config.Log == nil {
-		return nil, fmt.Errorf("%w: event log is required", ErrInvalid)
+		return nil, fmt.Errorf("%w: event log is required", errs.Invalid)
 	}
 	if config.Leases == nil {
-		return nil, fmt.Errorf("%w: leases are required", ErrInvalid)
+		return nil, fmt.Errorf("%w: leases are required", errs.Invalid)
 	}
 	if len(config.TaskSecret) == 0 {
-		return nil, fmt.Errorf("%w: task secret is required", ErrInvalid)
+		return nil, fmt.Errorf("%w: task secret is required", errs.Invalid)
 	}
 	baseCtx, cancel := context.WithCancel(context.Background())
 	var err error
 	runtime := &Runtime{
 		baseCtx:         baseCtx,
 		cancel:          cancel,
-		programs:        newPrograms(),
+		programs:        program.NewRegistry(),
 		taints:          monitor.NewTaints[string](),
 		log:             config.Log,
 		leases:          config.Leases,
@@ -267,22 +271,22 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 func (r *Runtime) processDrivers(resolveCtx context.Context, cred ProcessContext) (sys.Dispatcher[ProcessContext], error) {
 	r.mu.Lock()
 	proc := r.processes[cred.ProcessID]
-	var manifest Manifest
+	var spec manifest.Manifest
 	if proc != nil {
-		manifest = cloneManifest(proc.manifest)
+		spec = proc.manifest.Clone()
 	}
 	r.mu.Unlock()
 	if proc == nil {
-		return nil, fmt.Errorf("%w: process %s", ErrNotFound, cred.ProcessID)
+		return nil, fmt.Errorf("%w: process %s", errs.NotFound, cred.ProcessID)
 	}
-	base, err := r.dispatchers.NewDispatcher(resolveCtx, cred, manifest)
+	base, err := r.dispatchers.NewDispatcher(resolveCtx, cred, spec)
 	if err != nil {
 		return nil, err
 	}
-	if err := reconcileGrants(base.Capabilities(), manifest); err != nil {
+	if err := reconcileGrants(base.Capabilities(), spec); err != nil {
 		return nil, err
 	}
-	if grant, ok := manifest.grant(TimerSyscall); ok {
+	if grant, ok := spec.Grant(manifest.TimerSyscall); ok {
 		// sys.timer is the runtime's own, served below the task layer so its
 		// yield becomes a durable timer task.
 		base = newTimerDispatcher(base, grant)
@@ -298,13 +302,13 @@ func (r *Runtime) processDrivers(resolveCtx context.Context, cred ProcessContext
 func (r *Runtime) wrapProtocol(cred ProcessContext, next sys.Dispatcher[ProcessContext]) (sys.Dispatcher[ProcessContext], error) {
 	r.mu.Lock()
 	proc := r.processes[cred.ProcessID]
-	var manifest Manifest
+	var spec manifest.Manifest
 	var input string
 	var inputLabels []string
 	var history []HistoryMessage
 	var attempt int
 	if proc != nil {
-		manifest = cloneManifest(proc.manifest)
+		spec = proc.manifest.Clone()
 		input = proc.input
 		// The input's provenance (a delegated child's parent-taint snapshot)
 		// rides sys.input regardless of history sharing: history:false isolates
@@ -320,12 +324,12 @@ func (r *Runtime) wrapProtocol(cred ProcessContext, next sys.Dispatcher[ProcessC
 	}
 	r.mu.Unlock()
 	if proc == nil {
-		return nil, fmt.Errorf("%w: process %s", ErrNotFound, cred.ProcessID)
+		return nil, fmt.Errorf("%w: process %s", errs.NotFound, cred.ProcessID)
 	}
-	if grant, ok := manifest.grant(SpawnSyscall); ok {
+	if grant, ok := spec.Grant(manifest.SpawnSyscall); ok {
 		next = newSpawnRouter(next, grant, r)
 	}
-	return newLifecycleDispatcher(next, input, inputLabels, history, manifest, attempt, r.programs.answerValidator(manifest.Program)), nil
+	return newLifecycleDispatcher(next, input, inputLabels, history, spec, attempt, r.programs.AnswerValidator(spec.Program)), nil
 }
 
 // programBinding checks that the process's program is loaded with the exact
@@ -342,16 +346,9 @@ func (r *Runtime) programBinding(proc *processState) error {
 	if artifact.Digest != proc.programDigest {
 		return fmt.Errorf(
 			"program %q changed (loaded %s, process bound to %s): a process is immutable — its code and interface are fixed; spawn a new process from the new program, or kill this one to settle its effects",
-			proc.manifest.Program, shortDigest(artifact.Digest), shortDigest(proc.programDigest))
+			proc.manifest.Program, program.ShortDigest(artifact.Digest), program.ShortDigest(proc.programDigest))
 	}
 	return nil
-}
-
-func shortDigest(digest string) string {
-	if len(digest) > 12 {
-		return digest[:12]
-	}
-	return digest
 }
 
 // journalFor returns the process's live journal view.
@@ -360,11 +357,11 @@ func (r *Runtime) journalFor(_ context.Context, cred ProcessContext) (journaled.
 	proc := r.processes[cred.ProcessID]
 	r.mu.Unlock()
 	if proc == nil || proc.journal == nil {
-		return nil, fmt.Errorf("%w: process %s has no journal", ErrNotFound, cred.ProcessID)
+		return nil, fmt.Errorf("%w: process %s has no journal", errs.NotFound, cred.ProcessID)
 	}
 	if proc.journal.rev != cred.Revision {
 		return nil, fmt.Errorf("%w: process %s journal is at revision %d, not %d",
-			ErrConflict, cred.ProcessID, proc.journal.rev, cred.Revision)
+			errs.Conflict, cred.ProcessID, proc.journal.rev, cred.Revision)
 	}
 	return proc.journal, nil
 }
@@ -390,7 +387,7 @@ func (r *Runtime) headerFor(cred ProcessContext) journaled.Header {
 func (r *Runtime) compileProgram(ctx context.Context, id string, wasm []byte) (*capcompute.Program, error) {
 	image, err := capcompute.NewProgram(ctx, capcompute.Config{
 		Image: extism.Manifest{
-			Wasm: []extism.Wasm{extism.WasmData{Data: wasm, Hash: digestOf(wasm), Name: id}},
+			Wasm: []extism.Wasm{extism.WasmData{Data: wasm, Hash: program.DigestOf(wasm), Name: id}},
 		},
 		PluginConfig:   extism.PluginConfig{EnableWasi: true},
 		MaxMemoryPages: r.memoryPages,
@@ -406,27 +403,29 @@ func (r *Runtime) compileProgram(ctx context.Context, id string, wasm []byte) (*
 // processes are immutably bound to the (name, identity) they were created from.
 // Re-adding the byte-identical program under the same id is a no-op, so a control
 // plane can re-assert its desired set on a ticker without disturbing anything; the
-// same id with a different identity is refused (ErrConflict) and the caller removes
+// same id with a different identity is refused (errs.Conflict) and the caller removes
 // the old program first, which settles the processes bound to it. Compilation
 // happens outside the runtime mutex, so dispatch is only briefly paused for the
 // swap.
-func (r *Runtime) AddProgram(ctx context.Context, data ProgramData) error {
+func (r *Runtime) AddProgram(ctx context.Context, data program.Data) error {
 	// Preparing the program is the cheap half — interface normalization and
 	// schema compilation — and it pins the digest, so an unchanged program is
 	// settled without compiling any wasm.
-	program, err := loadProgram(data)
+	artifact, err := program.Load(data)
 	if err != nil {
 		return err
 	}
-	if existing, err := r.programs.Resolve(program.ID); err == nil && existing.Digest == program.Digest {
+	if existing, err := r.programs.Resolve(artifact.ID); err == nil && existing.Digest == artifact.Digest {
 		return nil
 	}
-	if program.image, err = r.compileProgram(ctx, program.ID, data.SourceCode); err != nil {
+	image, err := r.compileProgram(ctx, artifact.ID, data.SourceCode)
+	if err != nil {
 		return err
 	}
-	added, err := r.programs.add(program)
+	artifact = artifact.WithImage(image)
+	added, err := r.programs.Add(artifact)
 	if err != nil || !added {
-		_ = program.image.Close(context.Background())
+		_ = image.Close(context.Background())
 		return err
 	}
 	// A Close that raced this registration has already drained the registry, so
@@ -436,9 +435,9 @@ func (r *Runtime) AddProgram(ctx context.Context, data ProgramData) error {
 	closed := r.closed
 	r.mu.Unlock()
 	if closed {
-		r.programs.remove(program.ID)
-		_ = program.image.Close(context.Background())
-		return fmt.Errorf("%w: runtime is closed", ErrConflict)
+		r.programs.Remove(artifact.ID)
+		_ = image.Close(context.Background())
+		return fmt.Errorf("%w: runtime is closed", errs.Conflict)
 	}
 	return nil
 }
@@ -455,9 +454,9 @@ func (r *Runtime) AddProgram(ctx context.Context, data ProgramData) error {
 // changed program.
 func (r *Runtime) RemoveProgram(ctx context.Context, id string) error {
 	id = strings.TrimSpace(id)
-	removed, ok := r.programs.remove(id)
+	removed, ok := r.programs.Remove(id)
 	if !ok {
-		return fmt.Errorf("%w: program %q is not registered", ErrNotFound, id)
+		return fmt.Errorf("%w: program %q is not registered", errs.NotFound, id)
 	}
 	r.mu.Lock()
 	var bound []string
@@ -481,8 +480,8 @@ func (r *Runtime) RemoveProgram(ctx context.Context, id string) error {
 	// live module is recovered by the processor, not a crash — but a process is an
 	// audit target and its final state must not turn on which of the two won.
 	r.drainProcesses(ctx, id, bound)
-	if removed.image != nil {
-		_ = removed.image.Close(context.Background())
+	if image := removed.Image(); image != nil {
+		_ = image.Close(context.Background())
 	}
 	return nil
 }
@@ -551,12 +550,12 @@ func (r *Runtime) CreateSession(name string, tags map[string]string) (SessionSna
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
-		return SessionSnapshot{}, fmt.Errorf("%w: runtime is closed", ErrConflict)
+		return SessionSnapshot{}, fmt.Errorf("%w: runtime is closed", errs.Conflict)
 	}
 	if err := r.checkSessionNameFreeLocked(name, ""); err != nil {
 		return SessionSnapshot{}, err
 	}
-	session := &sessionState{id: id, name: name, title: defaultSessionTitle, createdAt: now, updatedAt: now, tags: cloneTags(tags)}
+	session := &sessionState{id: id, name: name, title: durable.DefaultSessionTitle, createdAt: now, updatedAt: now, tags: durable.CloneTags(tags)}
 	r.sessions[id] = session
 	if err := r.appendSession(session); err != nil {
 		delete(r.sessions, id)
@@ -572,11 +571,11 @@ func (r *Runtime) RenameSession(sessionID, name string) (SessionSnapshot, error)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
-		return SessionSnapshot{}, fmt.Errorf("%w: runtime is closed", ErrConflict)
+		return SessionSnapshot{}, fmt.Errorf("%w: runtime is closed", errs.Conflict)
 	}
 	session := r.sessions[sessionID]
 	if session == nil {
-		return SessionSnapshot{}, fmt.Errorf("%w: session %s", ErrNotFound, sessionID)
+		return SessionSnapshot{}, fmt.Errorf("%w: session %s", errs.NotFound, sessionID)
 	}
 	if err := r.checkSessionNameFreeLocked(name, sessionID); err != nil {
 		return SessionSnapshot{}, err
@@ -599,7 +598,7 @@ func (r *Runtime) checkSessionNameFreeLocked(name, exceptID string) error {
 	}
 	for id, session := range r.sessions {
 		if id != exceptID && session.name == name {
-			return fmt.Errorf("%w: a session named %q already exists", ErrConflict, name)
+			return fmt.Errorf("%w: a session named %q already exists", errs.Conflict, name)
 		}
 	}
 	return nil
@@ -615,7 +614,7 @@ func (r *Runtime) ListSessions() []SessionSummary {
 	return out
 }
 
-func (r *Runtime) Programs() []ProgramArtifact {
+func (r *Runtime) Programs() []program.Artifact {
 	return r.programs.List()
 }
 
@@ -624,33 +623,33 @@ func (r *Runtime) GetSession(sessionID string) (SessionSnapshot, error) {
 	defer r.mu.Unlock()
 	session := r.sessions[sessionID]
 	if session == nil {
-		return SessionSnapshot{}, fmt.Errorf("%w: session %s", ErrNotFound, sessionID)
+		return SessionSnapshot{}, fmt.Errorf("%w: session %s", errs.NotFound, sessionID)
 	}
 	return r.sessionSnapshotLocked(session), nil
 }
 
-func (r *Runtime) CreateProcess(sessionID string, input string, manifest Manifest) (ProcessSnapshot, error) {
+func (r *Runtime) CreateProcess(sessionID string, input string, spec manifest.Manifest) (ProcessSnapshot, error) {
 	if input == "" {
-		return ProcessSnapshot{}, fmt.Errorf("%w: input is required", ErrInvalid)
+		return ProcessSnapshot{}, fmt.Errorf("%w: input is required", errs.Invalid)
 	}
-	manifest, err := ValidateManifest(manifest, r.dispatchers)
+	spec, err := manifest.Validate(spec, r.dispatchers)
 	if err != nil {
 		return ProcessSnapshot{}, err
 	}
 	// A root that opts out of capability sharing keeps its grants off its own
 	// sys.input menu (it still holds them) — the same effect a spawned child gets
-	// through buildChildManifest. ValidateManifest returned a clone, so this is
+	// through buildChildManifest. manifest.Validate returned a clone, so this is
 	// local. History is applied below via hideHistory.
-	if !manifest.sharesCapabilities() {
-		for i := range manifest.Syscalls {
-			manifest.Syscalls[i].Hidden = true
+	if !spec.SharesCapabilities() {
+		for i := range spec.Syscalls {
+			spec.Syscalls[i].Hidden = true
 		}
 	}
-	program, err := r.programs.Resolve(manifest.Program)
+	artifact, err := r.programs.Resolve(spec.Program)
 	if err != nil {
 		return ProcessSnapshot{}, err
 	}
-	if err := r.programs.ValidateInput(manifest.Program, input); err != nil {
+	if err := r.programs.ValidateInput(spec.Program, input); err != nil {
 		return ProcessSnapshot{}, err
 	}
 	processID, err := r.idSource("proc_")
@@ -662,39 +661,39 @@ func (r *Runtime) CreateProcess(sessionID string, input string, manifest Manifes
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
-		return ProcessSnapshot{}, fmt.Errorf("%w: runtime is closed", ErrConflict)
+		return ProcessSnapshot{}, fmt.Errorf("%w: runtime is closed", errs.Conflict)
 	}
 	session := r.sessions[sessionID]
 	if session == nil {
 		r.mu.Unlock()
-		return ProcessSnapshot{}, fmt.Errorf("%w: session %s", ErrNotFound, sessionID)
+		return ProcessSnapshot{}, fmt.Errorf("%w: session %s", errs.NotFound, sessionID)
 	}
 	if session.activeProcessID != "" {
 		r.mu.Unlock()
-		return ProcessSnapshot{}, fmt.Errorf("%w: session already has active process %s", ErrConflict, session.activeProcessID)
+		return ProcessSnapshot{}, fmt.Errorf("%w: session already has active process %s", errs.Conflict, session.activeProcessID)
 	}
 	proc := &processState{
 		id:            processID,
 		sessionID:     sessionID,
 		input:         input,
 		history:       append([]HistoryMessage(nil), session.history...),
-		status:        ProcessQueued,
+		status:        durable.ProcessQueued,
 		attempt:       1,
 		createdAt:     now,
 		updatedAt:     now,
-		manifest:      manifest,
+		manifest:      spec,
 		revision:      1,
-		programDigest: program.Digest,
+		programDigest: artifact.Digest,
 		// A root manifest with history:false opts out of session-history sharing —
 		// each run sees only its own input and inherits no cross-run taint. Reuses
 		// the hideHistory delivery gate (and its persistence).
-		hideHistory: !manifest.sharesHistory(),
+		hideHistory: !spec.SharesHistory(),
 	}
 	proc.journal = r.newJournal(proc, newProcessHistory(), 0)
 	r.processes[processID] = proc
 	session.processIDs = append(session.processIDs, processID)
 	if len(session.processIDs) == 1 {
-		session.title = sessionTitle(input)
+		session.title = durable.SessionTitle(input)
 	}
 	session.activeProcessID = processID
 	session.updatedAt = now
@@ -722,7 +721,7 @@ func (r *Runtime) GetProcess(processID string) (ProcessSnapshot, error) {
 	defer r.mu.Unlock()
 	proc := r.processes[processID]
 	if proc == nil {
-		return ProcessSnapshot{}, fmt.Errorf("%w: process %s", ErrNotFound, processID)
+		return ProcessSnapshot{}, fmt.Errorf("%w: process %s", errs.NotFound, processID)
 	}
 	return r.processSnapshotLocked(proc), nil
 }
@@ -736,10 +735,10 @@ func (r *Runtime) Journal(processID string) ([]JournalEntry, error) {
 	proc := r.processes[processID]
 	r.mu.Unlock()
 	if proc == nil {
-		return nil, fmt.Errorf("%w: process %s", ErrNotFound, processID)
+		return nil, fmt.Errorf("%w: process %s", errs.NotFound, processID)
 	}
 	if proc.journal == nil {
-		return nil, fmt.Errorf("%w: process %s has no readable journal", ErrNotFound, processID)
+		return nil, fmt.Errorf("%w: process %s has no readable journal", errs.NotFound, processID)
 	}
 	return proc.journal.entries()
 }
@@ -755,10 +754,10 @@ func (r *Runtime) JournalRevisions(processID string) (map[uint64][]JournalEntry,
 	proc := r.processes[processID]
 	r.mu.Unlock()
 	if proc == nil {
-		return nil, fmt.Errorf("%w: process %s", ErrNotFound, processID)
+		return nil, fmt.Errorf("%w: process %s", errs.NotFound, processID)
 	}
 	if proc.journal == nil {
-		return nil, fmt.Errorf("%w: process %s has no readable journal", ErrNotFound, processID)
+		return nil, fmt.Errorf("%w: process %s has no readable journal", errs.NotFound, processID)
 	}
 	journal := proc.journal
 	revs := journal.history.allRevisions()
@@ -780,7 +779,7 @@ func (r *Runtime) Tasks(processID string) ([]TaskSnapshot, error) {
 	proc := r.processes[processID]
 	r.mu.Unlock()
 	if proc == nil {
-		return nil, fmt.Errorf("%w: process %s", ErrNotFound, processID)
+		return nil, fmt.Errorf("%w: process %s", errs.NotFound, processID)
 	}
 	records, err := r.tasks.List(context.Background(), r.tenantID, processID)
 	if err != nil {
@@ -797,10 +796,10 @@ func (r *Runtime) ResolveTask(taskID, token string, resolution task.Resolution) 
 	switch resolution.Decision {
 	case task.StateApproved, task.StateCompleted, task.StateFailed, task.StateDenied, task.StateCancelled:
 	default:
-		return TaskSnapshot{}, fmt.Errorf("%w: unsupported task decision %q", ErrInvalid, resolution.Decision)
+		return TaskSnapshot{}, fmt.Errorf("%w: unsupported task decision %q", errs.Invalid, resolution.Decision)
 	}
 	if resolution.Decision == task.StateCompleted && !json.Valid(resolution.Data) {
-		return TaskSnapshot{}, fmt.Errorf("%w: completed task data must be valid JSON", ErrInvalid)
+		return TaskSnapshot{}, fmt.Errorf("%w: completed task data must be valid JSON", errs.Invalid)
 	}
 	acquired, err := r.leases.Acquire(
 		context.Background(), r.tenantID, "task", taskID,
@@ -810,7 +809,7 @@ func (r *Runtime) ResolveTask(taskID, token string, resolution task.Resolution) 
 		return TaskSnapshot{}, err
 	}
 	if !acquired {
-		return TaskSnapshot{}, fmt.Errorf("%w: task is being resolved", ErrConflict)
+		return TaskSnapshot{}, fmt.Errorf("%w: task is being resolved", errs.Conflict)
 	}
 	defer r.leases.Release(context.Background(), r.tenantID, "task", taskID, r.instanceID)
 
@@ -825,7 +824,7 @@ func (r *Runtime) ResolveTask(taskID, token string, resolution task.Resolution) 
 
 	r.mu.Lock()
 	proc := r.processes[record.Scope.ProcessID]
-	shouldResume := proc != nil && proc.status == ProcessWaitingTask
+	shouldResume := proc != nil && proc.status == durable.ProcessWaitingTask
 	r.mu.Unlock()
 	if shouldResume {
 		if _, retryErr := r.Retry(record.Scope.ProcessID, RetryResume); retryErr != nil {
@@ -840,17 +839,17 @@ func (r *Runtime) Stop(processID string) (ProcessSnapshot, error) {
 	proc := r.processes[processID]
 	if proc == nil {
 		r.mu.Unlock()
-		return ProcessSnapshot{}, fmt.Errorf("%w: process %s", ErrNotFound, processID)
+		return ProcessSnapshot{}, fmt.Errorf("%w: process %s", errs.NotFound, processID)
 	}
 	switch proc.status {
-	case ProcessQueued, ProcessRunning:
+	case durable.ProcessQueued, durable.ProcessRunning:
 		proc.stopRequested = true
-		proc.status = ProcessStopping
+		proc.status = durable.ProcessStopping
 		proc.updatedAt = r.now().UTC()
 		if proc.stop != nil {
 			proc.stop()
 		}
-	case ProcessYielded, ProcessWaitingTask:
+	case durable.ProcessYielded, durable.ProcessWaitingTask:
 		_, started, unsettled := proc.unsettledRollback()
 		_, open := proc.journal.outermostOpenBegin()
 		switch {
@@ -860,23 +859,23 @@ func (r *Runtime) Stop(processID string) (ProcessSnapshot, error) {
 			// fails the rollback with the report — or resolve it to finish.
 			r.mu.Unlock()
 			return ProcessSnapshot{}, fmt.Errorf(
-				"%w: process %s is mid-rollback; resolve or deny its pending task instead", ErrConflict, processID)
+				"%w: process %s is mid-rollback; resolve or deny its pending task instead", errs.Conflict, processID)
 		case !started && open:
 			// Parked inside an open section: roll it back before stopping — a
 			// stop is an abandonment without a retry. The settle dispatches
 			// drivers, so it runs off-lock; Stopping guards concurrent retries.
-			return r.spawnSettleLocked(proc, ProcessStopping, func() {
+			return r.spawnSettleLocked(proc, durable.ProcessStopping, func() {
 				r.stopProcess(processID, context.Canceled)
 			}), nil
 		default:
 			// No open section — or a settled rollback, which already ran (the
 			// park is its retry timer, now moot): stop plainly.
-			r.finishLocked(proc, ProcessStopped, "", context.Canceled)
+			r.finishLocked(proc, durable.ProcessStopped, "", context.Canceled)
 		}
-	case ProcessStopping, ProcessStopped:
+	case durable.ProcessStopping, durable.ProcessStopped:
 	default:
 		r.mu.Unlock()
-		return ProcessSnapshot{}, fmt.Errorf("%w: process %s cannot be stopped from %s", ErrConflict, processID, proc.status)
+		return ProcessSnapshot{}, fmt.Errorf("%w: process %s cannot be stopped from %s", errs.Conflict, processID, proc.status)
 	}
 	snapshot := r.processSnapshotLocked(proc)
 	_ = r.appendProcess(proc)
@@ -887,28 +886,28 @@ func (r *Runtime) Stop(processID string) (ProcessSnapshot, error) {
 
 func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, error) {
 	if mode != RetryResume && mode != RetryRestart {
-		return ProcessSnapshot{}, fmt.Errorf("%w: retry mode must be resume or restart", ErrInvalid)
+		return ProcessSnapshot{}, fmt.Errorf("%w: retry mode must be resume or restart", errs.Invalid)
 	}
 
 	r.mu.Lock()
 	proc := r.processes[processID]
 	if proc == nil {
 		r.mu.Unlock()
-		return ProcessSnapshot{}, fmt.Errorf("%w: process %s", ErrNotFound, processID)
+		return ProcessSnapshot{}, fmt.Errorf("%w: process %s", errs.NotFound, processID)
 	}
 	switch proc.status {
-	case ProcessYielded, ProcessWaitingTask, ProcessStopped, ProcessFailed, ProcessInterrupted:
-	case ProcessCompleted:
+	case durable.ProcessYielded, durable.ProcessWaitingTask, durable.ProcessStopped, durable.ProcessFailed, durable.ProcessInterrupted:
+	case durable.ProcessCompleted:
 		// A completed process has nothing to resume, but it can be restarted from
 		// scratch (re-run as a new copy-on-write revision). This also lets a
 		// parent restart cascade into already-completed children.
 		if mode != RetryRestart {
 			r.mu.Unlock()
-			return ProcessSnapshot{}, fmt.Errorf("%w: completed process %s can only be restarted, not resumed", ErrConflict, processID)
+			return ProcessSnapshot{}, fmt.Errorf("%w: completed process %s can only be restarted, not resumed", errs.Conflict, processID)
 		}
 	default:
 		r.mu.Unlock()
-		return ProcessSnapshot{}, fmt.Errorf("%w: process %s cannot retry from %s", ErrConflict, processID, proc.status)
+		return ProcessSnapshot{}, fmt.Errorf("%w: process %s cannot retry from %s", errs.Conflict, processID, proc.status)
 	}
 	session := r.sessions[proc.sessionID]
 	if proc.parentProcessID == "" {
@@ -923,14 +922,14 @@ func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, erro
 		}
 		if lastRootID == "" || lastRootID != proc.id {
 			r.mu.Unlock()
-			return ProcessSnapshot{}, fmt.Errorf("%w: only the latest session process can be retried", ErrConflict)
+			return ProcessSnapshot{}, fmt.Errorf("%w: only the latest session process can be retried", errs.Conflict)
 		}
 	}
 	// Allow cascade retry of a child while its parent holds activeProcessID.
 	if session.activeProcessID != "" && session.activeProcessID != proc.id &&
 		(proc.parentProcessID == "" || session.activeProcessID != proc.parentProcessID) {
 		r.mu.Unlock()
-		return ProcessSnapshot{}, fmt.Errorf("%w: session already has active process %s", ErrConflict, session.activeProcessID)
+		return ProcessSnapshot{}, fmt.Errorf("%w: session already has active process %s", errs.Conflict, session.activeProcessID)
 	}
 
 	state, started, unsettled := proc.unsettledRollback()
@@ -943,12 +942,12 @@ func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, erro
 		// refuses concurrent retries.
 		if mode == RetryRestart {
 			r.mu.Unlock()
-			return ProcessSnapshot{}, fmt.Errorf("%w: process %s has an unfinished rollback; resume it first", ErrConflict, processID)
+			return ProcessSnapshot{}, fmt.Errorf("%w: process %s has an unfinished rollback; resume it first", errs.Conflict, processID)
 		}
 		if proc.abandoning != abandonFailure {
 			proc.err = ""
 		}
-		return r.spawnSettleLocked(proc, ProcessRunning, func() {
+		return r.spawnSettleLocked(proc, durable.ProcessRunning, func() {
 			r.settleRollback(processID)
 		}), nil
 	}
@@ -958,7 +957,7 @@ func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, erro
 	// never resumes or restarts under different program bytes.
 	if err := r.programBinding(proc); err != nil {
 		r.mu.Unlock()
-		return ProcessSnapshot{}, fmt.Errorf("%w: %v", ErrConflict, err)
+		return ProcessSnapshot{}, fmt.Errorf("%w: %v", errs.Conflict, err)
 	}
 
 	if mode == RetryRestart {
@@ -969,9 +968,9 @@ func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, erro
 		// off-lock and re-runs the process from scratch when it completes.
 		// A completed process committed its whole-process zone by finishing:
 		// nothing is uncommitted, so it restarts directly.
-		if proc.status != ProcessCompleted {
+		if proc.status != durable.ProcessCompleted {
 			proc.err = ""
-			return r.spawnSettleLocked(proc, ProcessRunning, func() {
+			return r.spawnSettleLocked(proc, durable.ProcessRunning, func() {
 				r.restartProcess(processID)
 			}), nil
 		}
@@ -985,7 +984,7 @@ func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, erro
 		// left no journal trace: the revision hit its wall and can never run
 		// again, so a retry must re-mint it, not replay it.
 		r.forkJournalLocked(proc, state.ScopeStart, RetryResume)
-	} else if proc.status == ProcessYielded || proc.status == ProcessWaitingTask {
+	} else if proc.status == durable.ProcessYielded || proc.status == durable.ProcessWaitingTask {
 		// Resume from a park: no fork. The journal's open intent at the tail is
 		// re-driven by replay under its original idempotency key; a resolved
 		// task's stored authorization is injected by the task layer. When the
@@ -1014,7 +1013,7 @@ func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, erro
 // runtime's wait group. The status it stamps (Running for a resumed
 // settlement, Stopping for a stop's rollback) is also the concurrency guard —
 // Retry and Stop refuse both. Called with r.mu held; unlocks it.
-func (r *Runtime) spawnSettleLocked(proc *processState, status ProcessStatus, settle func()) ProcessSnapshot {
+func (r *Runtime) spawnSettleLocked(proc *processState, status durable.ProcessStatus, settle func()) ProcessSnapshot {
 	// Don't enroll a settlement goroutine once shutdown has begun (same WaitGroup
 	// race as relaunchLocked). The open compensation intent stays on the journal,
 	// so a restart resumes the rollback — nothing is lost by deferring it.
@@ -1048,9 +1047,9 @@ func (r *Runtime) relaunchLocked(proc *processState) (ProcessSnapshot, error) {
 	// the WaitGroup would panic) — mirrors CreateProcess.
 	if r.closed {
 		r.mu.Unlock()
-		return ProcessSnapshot{}, fmt.Errorf("%w: runtime is closed", ErrConflict)
+		return ProcessSnapshot{}, fmt.Errorf("%w: runtime is closed", errs.Conflict)
 	}
-	proc.status = ProcessQueued
+	proc.status = durable.ProcessQueued
 	proc.attempt++
 	proc.answer = ""
 	proc.err = ""
@@ -1137,7 +1136,7 @@ func (r *Runtime) Subscribe(sessionID string) (Event, <-chan Event, func(), erro
 	session := r.sessions[sessionID]
 	if session == nil {
 		r.mu.Unlock()
-		return Event{}, nil, nil, fmt.Errorf("%w: session %s", ErrNotFound, sessionID)
+		return Event{}, nil, nil, fmt.Errorf("%w: session %s", errs.NotFound, sessionID)
 	}
 	r.nextSubID++
 	id := r.nextSubID
@@ -1169,7 +1168,7 @@ func (r *Runtime) Close(ctx context.Context) error {
 	r.closed = true
 	stops := make([]func(), 0)
 	for _, proc := range r.processes {
-		if proc.stop != nil && (proc.status == ProcessRunning || proc.status == ProcessStopping || proc.status == ProcessQueued) {
+		if proc.stop != nil && (proc.status == durable.ProcessRunning || proc.status == durable.ProcessStopping || proc.status == durable.ProcessQueued) {
 			stops = append(stops, proc.stop)
 		}
 	}
@@ -1196,11 +1195,12 @@ func (r *Runtime) Close(ctx context.Context) error {
 	}
 
 	closeErrors := []error{}
-	for _, program := range r.programs.drain() {
-		if program.image == nil {
+	for _, artifact := range r.programs.Drain() {
+		image := artifact.Image()
+		if image == nil {
 			continue
 		}
-		closeErrors = append(closeErrors, program.image.Close(context.Background()))
+		closeErrors = append(closeErrors, image.Close(context.Background()))
 	}
 	return errors.Join(closeErrors...)
 }

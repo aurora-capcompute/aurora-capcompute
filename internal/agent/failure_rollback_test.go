@@ -19,6 +19,9 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/capcompute/sys"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/errs"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 )
 
@@ -32,7 +35,7 @@ func TestFailureInsideSectionRollsBackThenRetryRecovers(t *testing.T) {
 	runtime := newCompensationRuntime(t, disp)
 	proc := startCompensationProcess(t, runtime)
 
-	failed := waitForStatus(t, runtime, proc.ID, ProcessFailed)
+	failed := waitForStatus(t, runtime, proc.ID, durable.ProcessFailed)
 	if !strings.Contains(failed.Error, "kaboom.unavailable") {
 		t.Fatalf("failure = %q, want the guest's original error preserved", failed.Error)
 	}
@@ -74,7 +77,7 @@ func TestFailureInsideSectionRollsBackThenRetryRecovers(t *testing.T) {
 	if _, err := runtime.Retry(proc.ID, RetryResume); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
-	final := waitForStatus(t, runtime, proc.ID, ProcessCompleted)
+	final := waitForStatus(t, runtime, proc.ID, durable.ProcessCompleted)
 	if final.Answer != "recovered-after-rollback" || final.Attempt != 3 {
 		t.Fatalf("answer = %q attempt = %d, want recovery on attempt 3 (one re-drive, one rollback retry)", final.Answer, final.Attempt)
 	}
@@ -112,11 +115,11 @@ func TestRetryAfterRollbackReExecutesIdenticalEffects(t *testing.T) {
 	runtime := newCompensationRuntime(t, disp)
 	proc := startCompensationProcess(t, runtime)
 
-	waitForStatus(t, runtime, proc.ID, ProcessFailed)
+	waitForStatus(t, runtime, proc.ID, durable.ProcessFailed)
 	if _, err := runtime.Retry(proc.ID, RetryResume); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
-	final := waitForStatus(t, runtime, proc.ID, ProcessCompleted)
+	final := waitForStatus(t, runtime, proc.ID, durable.ProcessCompleted)
 	if final.Answer != "recharged" {
 		t.Fatalf("answer = %q", final.Answer)
 	}
@@ -140,7 +143,7 @@ func TestInfraFailureInTheGapHealsByRedrive(t *testing.T) {
 	runtime := newCompensationRuntime(t, disp)
 	proc := startCompensationProcess(t, runtime)
 
-	final := waitForStatus(t, runtime, proc.ID, ProcessCompensated)
+	final := waitForStatus(t, runtime, proc.ID, durable.ProcessCompensated)
 	disp.mu.Lock()
 	charges, refunds := disp.charges, disp.refunds
 	disp.mu.Unlock()
@@ -160,11 +163,11 @@ func TestStopInsideSectionRollsBack(t *testing.T) {
 	runtime := newCompensationRuntime(t, disp)
 	proc := startCompensationProcess(t, runtime)
 
-	waitForStatus(t, runtime, proc.ID, ProcessWaitingTask)
+	waitForStatus(t, runtime, proc.ID, durable.ProcessWaitingTask)
 	if _, err := runtime.Stop(proc.ID); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
-	stopped := waitForStatus(t, runtime, proc.ID, ProcessStopped)
+	stopped := waitForStatus(t, runtime, proc.ID, durable.ProcessStopped)
 	if !strings.Contains(stopped.Answer, "billing.refund") {
 		t.Fatalf("rollback report = %q, want the executed undo named", stopped.Answer)
 	}
@@ -186,11 +189,11 @@ func TestRestartAbandonsOpenSection(t *testing.T) {
 	runtime := newCompensationRuntime(t, disp)
 	proc := startCompensationProcess(t, runtime)
 
-	waitForStatus(t, runtime, proc.ID, ProcessWaitingTask)
+	waitForStatus(t, runtime, proc.ID, durable.ProcessWaitingTask)
 	if _, err := runtime.Retry(proc.ID, RetryRestart); err != nil {
 		t.Fatalf("restart: %v", err)
 	}
-	final := waitForStatus(t, runtime, proc.ID, ProcessCompleted)
+	final := waitForStatus(t, runtime, proc.ID, durable.ProcessCompleted)
 	if final.Answer != "recovered-after-rollback" {
 		t.Fatalf("answer = %q, want the fresh run's attempt-2 conclusion", final.Answer)
 	}
@@ -213,9 +216,9 @@ func TestStopRefusedMidRollback(t *testing.T) {
 	runtime := newCompensationRuntime(t, disp)
 	proc := startCompensationProcess(t, runtime)
 
-	waitForStatus(t, runtime, proc.ID, ProcessWaitingTask)
-	if _, err := runtime.Stop(proc.ID); !errors.Is(err, ErrConflict) {
-		t.Fatalf("stop mid-rollback = %v, want ErrConflict", err)
+	waitForStatus(t, runtime, proc.ID, durable.ProcessWaitingTask)
+	if _, err := runtime.Stop(proc.ID); !errors.Is(err, errs.Conflict) {
+		t.Fatalf("stop mid-rollback = %v, want errs.Conflict", err)
 	}
 
 	// Denying the pending inverse resolves the rollback the honest way: it
@@ -229,7 +232,7 @@ func TestStopRefusedMidRollback(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("deny: %v", err)
 	}
-	failed := waitForStatus(t, runtime, proc.ID, ProcessFailed)
+	failed := waitForStatus(t, runtime, proc.ID, durable.ProcessFailed)
 	if !strings.Contains(failed.Answer, "outstanding: billing.refund") {
 		t.Fatalf("report = %q, want the outstanding undo listed", failed.Answer)
 	}
@@ -323,7 +326,7 @@ func TestRollbackViewSemantics(t *testing.T) {
 // policy; malformed args are rejected at dispatch and empty args are a bare
 // "roll back now, no retry".
 func TestLifecycleAbortArgs(t *testing.T) {
-	l := newLifecycleDispatcher(stubNext{}, "msg", nil, nil, Manifest{}, 1, nil)
+	l := newLifecycleDispatcher(stubNext{}, "msg", nil, nil, manifest.Manifest{}, 1, nil)
 	dispatch := func(args string) sys.SyscallResult {
 		t.Helper()
 		result, err := l.Dispatch(context.Background(), ProcessContext{},
@@ -356,7 +359,7 @@ func TestLifecycleValidatesAnswer(t *testing.T) {
 		}
 		return nil
 	}
-	l := newLifecycleDispatcher(stubNext{}, "msg", nil, nil, Manifest{}, 1, reject)
+	l := newLifecycleDispatcher(stubNext{}, "msg", nil, nil, manifest.Manifest{}, 1, reject)
 	output := func(args string) sys.SyscallResult {
 		t.Helper()
 		result, err := l.Dispatch(context.Background(), ProcessContext{},

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/program"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
@@ -76,7 +78,7 @@ type lifecycleDispatcher struct {
 	// labels, never serialized into the guest payload.
 	inputLabels []string
 	history     []HistoryMessage
-	manifest    Manifest
+	manifest    manifest.Manifest
 	attempt     int
 	// validateAnswer checks a finished answer against the program's declared
 	// output schema; a rejected answer comes back as a failed result the guest
@@ -89,7 +91,7 @@ func newLifecycleDispatcher(
 	input string,
 	inputLabels []string,
 	history []HistoryMessage,
-	manifest Manifest,
+	manifest manifest.Manifest,
 	attempt int,
 	validateAnswer func(string) error,
 ) *lifecycleDispatcher {
@@ -221,9 +223,9 @@ func (l *lifecycleDispatcher) Capabilities() []sys.Capability {
 	// per program). It is advertised (not hidden) so the model can discover and
 	// request it; every crossing still yields for human approval, so the guest
 	// can propose a lift but never perform one itself.
-	if _, ok := l.manifest.grant(DeclassifySyscall); ok {
+	if _, ok := l.manifest.Grant(manifest.DeclassifySyscall); ok {
 		caps = appendMissing(caps, sys.Capability{
-			Name:        DeclassifySyscall,
+			Name:        manifest.DeclassifySyscall,
 			Description: "request lifting labels from this run's taint; each crossing requires human approval and is journaled with its reason",
 			InputSchema: declassifyInputSchema,
 		})
@@ -249,6 +251,25 @@ var declassifyInputSchema = json.RawMessage(`{
 // history entry — the taint the loopback carries. It seeds the reading run's
 // taint (via the sys.input result), so a prior run's provenance is not laundered
 // by re-reading its answer.
+// validateCompensationArgs holds a deferred inverse's args to the same input
+// schema its forward call would face. The rollback path that fires the inverse
+// at abort time does not re-run the Validator, so this is where a compensation
+// with args that violate the capability's schema (its authority boundary) is
+// refused — at registration, before it can be journaled and later executed.
+func validateCompensationArgs(capability sys.Capability, rawArgs json.RawMessage) error {
+	if len(capability.InputSchema) == 0 {
+		return nil
+	}
+	schema, err := program.PrepareSchema("compensation", capability.InputSchema)
+	if err != nil {
+		return fmt.Errorf("compile %s schema: %w", capability.Name, err)
+	}
+	if err := schema.ValidateJSON(rawArgs); err != nil {
+		return fmt.Errorf("%s args violate its input schema: %w", capability.Name, err)
+	}
+	return nil
+}
+
 func historyLabels(history []HistoryMessage) []string {
 	var labels []string
 	for i := range history {

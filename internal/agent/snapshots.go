@@ -7,11 +7,11 @@ package agent
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"strings"
 	"time"
 
 	"github.com/aurora-capcompute/capcompute/sys"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 )
 
@@ -24,38 +24,20 @@ func (r *Runtime) sessionSummaryLocked(session *sessionState) SessionSummary {
 		UpdatedAt:       session.updatedAt,
 		ProcessCount:    len(session.processIDs),
 		ActiveProcessID: session.activeProcessID,
-		Tags:            cloneTags(session.tags),
+		Tags:            durable.CloneTags(session.tags),
 	}
 }
 
 // storedSessionLocked builds the durable identity a session.state event carries.
-func (r *Runtime) storedSessionLocked(session *sessionState) StoredSession {
-	return StoredSession{
+func (r *Runtime) storedSessionLocked(session *sessionState) durable.Session {
+	return durable.Session{
 		TenantID:  r.tenantID,
 		ID:        session.id,
 		Name:      session.name,
 		CreatedAt: session.createdAt,
 		UpdatedAt: session.updatedAt,
-		Tags:      cloneTags(session.tags),
+		Tags:      durable.CloneTags(session.tags),
 	}
-}
-
-// defaultSessionTitle is the placeholder headline a session carries until one of
-// its processes supplies one. It is applied identically on creation and on
-// restore so a process-less named session round-trips to the same title.
-const defaultSessionTitle = "New session"
-
-func sessionTitle(input string) string {
-	fields := strings.Fields(input)
-	if len(fields) == 0 {
-		return defaultSessionTitle
-	}
-	title := strings.Join(fields, " ")
-	runes := []rune(title)
-	if len(runes) <= 60 {
-		return title
-	}
-	return string(runes[:60]) + "…"
 }
 
 func (r *Runtime) sessionSnapshotLocked(session *sessionState) SessionSnapshot {
@@ -92,7 +74,7 @@ func (r *Runtime) processSnapshotLocked(proc *processState) ProcessSnapshot {
 		UpdatedAt:       proc.updatedAt,
 		StartedAt:       copyTime(proc.startedAt),
 		CompletedAt:     copyTime(proc.completedAt),
-		Manifest:        cloneManifest(proc.manifest),
+		Manifest:        proc.manifest.Clone(),
 		ProgramDigest:   proc.programDigest,
 		ParentProcessID: proc.parentProcessID,
 		ChildProcessIDs: append([]string(nil), proc.childProcessIDs...),
@@ -156,12 +138,12 @@ func (r *Runtime) processContextLocked(proc *processState) ProcessContext {
 	}
 }
 
-func (r *Runtime) storedProcessLocked(proc *processState) StoredProcess {
+func (r *Runtime) storedProcessLocked(proc *processState) durable.Process {
 	var tags map[string]string
 	if session := r.sessions[proc.sessionID]; session != nil {
-		tags = cloneTags(session.tags)
+		tags = durable.CloneTags(session.tags)
 	}
-	return StoredProcess{
+	return durable.Process{
 		TenantID:          r.tenantID,
 		ID:                proc.id,
 		SessionID:         proc.sessionID,
@@ -175,7 +157,7 @@ func (r *Runtime) storedProcessLocked(proc *processState) StoredProcess {
 		CompletedAt:       copyTime(proc.completedAt),
 		Answer:            proc.answer,
 		Error:             proc.err,
-		Manifest:          cloneManifest(proc.manifest),
+		Manifest:          proc.manifest.Clone(),
 		ProgramDigest:     proc.programDigest,
 		HideHistory:       proc.hideHistory,
 		Labels:            append([]string(nil), proc.labels...),
@@ -195,15 +177,4 @@ func randomID(prefix string) (string, error) {
 		return "", err
 	}
 	return prefix + hex.EncodeToString(raw[:]), nil
-}
-
-func cloneTags(tags map[string]string) map[string]string {
-	if len(tags) == 0 {
-		return nil
-	}
-	out := make(map[string]string, len(tags))
-	for k, v := range tags {
-		out[k] = v
-	}
-	return out
 }

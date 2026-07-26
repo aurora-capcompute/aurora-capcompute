@@ -20,7 +20,9 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/capcompute/sys"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 )
 
@@ -105,7 +107,7 @@ func (*matrixDispatcher) Normalize(_ string, settings json.RawMessage) (json.Raw
 	return append(json.RawMessage(nil), settings...), nil
 }
 
-func (d *matrixDispatcher) NewDispatcher(_ context.Context, _ ProcessContext, _ Manifest) (sys.Dispatcher[ProcessContext], error) {
+func (d *matrixDispatcher) NewDispatcher(_ context.Context, _ ProcessContext, _ manifest.Manifest) (sys.Dispatcher[ProcessContext], error) {
 	return d, nil
 }
 
@@ -187,7 +189,7 @@ func fireRetryTimers(runtime *Runtime, processID string) {
 		return
 	}
 	for _, pending := range tasks {
-		if pending.State != task.StatePending || pending.Syscall.Name != TimerSyscall {
+		if pending.State != task.StatePending || pending.Syscall.Name != manifest.TimerSyscall {
 			continue
 		}
 		_, _ = runtime.ResolveTask(pending.ID, pending.ResolutionToken, task.Resolution{
@@ -232,8 +234,8 @@ func runRollbackFlow(t *testing.T, crashAt int, failMidSection bool) matrixOutco
 	first := newMatrixRuntime(t, world, disp)
 	var processID string
 	if session, err := first.CreateSession("", nil); err == nil {
-		if proc, err := first.CreateProcess(session.ID, "place the order", Manifest{
-			Version:  ManifestVersion,
+		if proc, err := first.CreateProcess(session.ID, "place the order", manifest.Manifest{
+			Version:  manifest.Version,
 			Program:  "program@1",
 			Syscalls: cognitionGrants("billing.charge", "billing.refund"),
 		}); err == nil {
@@ -247,14 +249,14 @@ func runRollbackFlow(t *testing.T, crashAt int, failMidSection bool) matrixOutco
 			break
 		}
 		switch snap.Status {
-		case ProcessWaitingTask:
+		case durable.ProcessWaitingTask:
 			fireRetryTimers(first, processID)
-		case ProcessFailed:
+		case durable.ProcessFailed:
 			// The failure story's convergence: the section rolled back, a
 			// retry re-runs it fresh (a human or a policy would drive this).
 			_, _ = first.Retry(processID, RetryResume)
 		}
-		if snap.Status == ProcessCompleted {
+		if snap.Status == durable.ProcessCompleted {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
@@ -266,7 +268,7 @@ func runRollbackFlow(t *testing.T, crashAt int, failMidSection bool) matrixOutco
 	charges, refunds := disp.counts()
 	outcome := matrixOutcome{appends: world.appends(), charges: charges, refunds: refunds}
 	if !world.crashed() && processID != "" {
-		if snap, err := first.GetProcess(processID); err == nil && snap.Status == ProcessCompleted {
+		if snap, err := first.GetProcess(processID); err == nil && snap.Status == durable.ProcessCompleted {
 			outcome.answer = snap.Answer
 			return outcome // the no-crash baseline
 		}
@@ -297,7 +299,7 @@ func runRollbackFlow(t *testing.T, crashAt int, failMidSection bool) matrixOutco
 			t.Fatalf("crashAt=%d: get process after restart: %v", crashAt, err)
 		}
 		switch snap.Status {
-		case ProcessCompleted:
+		case durable.ProcessCompleted:
 			outcome.answer = snap.Answer
 			outcome.charges, outcome.refunds = disp.counts()
 			second.mu.Lock()
@@ -306,9 +308,9 @@ func runRollbackFlow(t *testing.T, crashAt int, failMidSection bool) matrixOutco
 			}
 			second.mu.Unlock()
 			return outcome
-		case ProcessWaitingTask:
+		case durable.ProcessWaitingTask:
 			fireRetryTimers(second, processID)
-		case ProcessInterrupted, ProcessFailed, ProcessStopped:
+		case durable.ProcessInterrupted, durable.ProcessFailed, durable.ProcessStopped:
 			_, _ = second.Retry(processID, RetryResume)
 		}
 		time.Sleep(5 * time.Millisecond)

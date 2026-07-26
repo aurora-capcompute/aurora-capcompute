@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/errs"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
 )
 
@@ -16,7 +18,7 @@ type SessionGraphProcess struct {
 	ProcessID       string
 	Input           string
 	ParentProcessID string
-	Status          ProcessStatus
+	Status          durable.ProcessStatus
 	Answer          string
 	Error           string
 	Attempt         int
@@ -42,12 +44,12 @@ func (r *Runtime) SessionGraph(sessionID string) (SessionGraph, error) {
 	session := r.sessions[sessionID]
 	if session == nil {
 		r.mu.Unlock()
-		return SessionGraph{}, fmt.Errorf("%w: session %s", ErrNotFound, sessionID)
+		return SessionGraph{}, fmt.Errorf("%w: session %s", errs.NotFound, sessionID)
 	}
 	graph := SessionGraph{SessionID: session.id, Title: session.title}
 	type runMeta struct {
 		id, input, parentProcessID string
-		status                     ProcessStatus
+		status                     durable.ProcessStatus
 		answer, err                string
 		attempt                    int
 		currentRevision            uint64
@@ -129,7 +131,7 @@ type ProcessGraphNode struct {
 	Name            string
 	SessionID       string
 	ParentProcessID string
-	Status          ProcessStatus
+	Status          durable.ProcessStatus
 	Attempt         int
 	Revision        uint64
 	Answer          string
@@ -143,7 +145,7 @@ func (r *Runtime) CallGraph(processID string) (ProcessGraphNode, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, ok := r.processes[processID]; !ok {
-		return ProcessGraphNode{}, fmt.Errorf("%w: process %s", ErrNotFound, processID)
+		return ProcessGraphNode{}, fmt.Errorf("%w: process %s", errs.NotFound, processID)
 	}
 	return r.callGraphLocked(processID, make(map[string]bool)), nil
 }

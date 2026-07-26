@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
@@ -35,8 +36,8 @@ type timerDispatcher struct {
 	hidden      bool
 }
 
-func newTimerDispatcher(next sys.Dispatcher[ProcessContext], grant Syscall) *timerDispatcher {
-	var settings TimerSettings
+func newTimerDispatcher(next sys.Dispatcher[ProcessContext], grant manifest.Syscall) *timerDispatcher {
+	var settings manifest.TimerSettings
 	if len(grant.Config) > 0 {
 		// Validated at the manifest door; a decode failure here leaves the
 		// default bound.
@@ -52,7 +53,7 @@ func newTimerDispatcher(next sys.Dispatcher[ProcessContext], grant Syscall) *tim
 // Dispatch validates the request and yields a durable task. A valid call
 // always yields; invalid input fails immediately so the agent gets feedback.
 func (t *timerDispatcher) Dispatch(ctx context.Context, cred ProcessContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
-	if syscall.Name != TimerSyscall {
+	if syscall.Name != manifest.TimerSyscall {
 		return t.next.Dispatch(ctx, cred, syscall, auth)
 	}
 	var request timerRequest
@@ -78,7 +79,7 @@ func (t *timerDispatcher) Dispatch(ctx context.Context, cred ProcessContext, sys
 
 func (t *timerDispatcher) Capabilities() []sys.Capability {
 	return append(t.next.Capabilities(), sys.Capability{
-		Name: TimerSyscall,
+		Name: manifest.TimerSyscall,
 		Description: fmt.Sprintf(
 			"Set a relative timer and be replayed when it fires. The process pauses until the duration elapses, then continues. Maximum %s.",
 			t.maxDuration,

@@ -1,7 +1,6 @@
-package agent
+package durable
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -9,36 +8,23 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 )
 
-// appendAll encodes and appends events to a stream, failing the test on error.
-func mustAppend(t *testing.T, log *memLog, scope eventlog.Scope, events ...eventlog.Event) {
-	t.Helper()
-	if _, err := log.Append(context.Background(), scope, events...); err != nil {
-		t.Fatalf("append: %v", err)
-	}
-}
-
 func TestFoldReconstructsLatestRunAndSessionState(t *testing.T) {
-	log := newMemLog()
-	scope := eventlog.Scope{TenantID: "t", SessionID: "th1"}
 	now := time.Unix(0, 0).UTC()
 
 	// Run goes running → completed; session state is derived from runs.
-	r1, _ := processStateEvent(now, StoredProcess{
+	r1, _ := ProcessStateEvent(now, Process{
 		TenantID: "t", ID: "proc1", SessionID: "th1", Revision: 1,
 		Input: "hello", Status: ProcessRunning,
 		CreatedAt: now, UpdatedAt: now,
 		Tags: map[string]string{"binding_ref": "ops"},
 	})
-	r2, _ := processStateEvent(now.Add(time.Second), StoredProcess{
+	r2, _ := ProcessStateEvent(now.Add(time.Second), Process{
 		TenantID: "t", ID: "proc1", SessionID: "th1", Revision: 1,
 		Input: "hello", Status: ProcessCompleted, Answer: "done",
 		CreatedAt: now, UpdatedAt: now.Add(time.Second),
 		Tags: map[string]string{"binding_ref": "ops"},
 	})
-	mustAppend(t, log, scope, r1, r2)
-
-	events, _ := log.Read(context.Background(), scope, 0)
-	proj, err := Fold(events)
+	proj, err := Fold([]eventlog.Event{r1, r2})
 	if err != nil {
 		t.Fatalf("fold: %v", err)
 	}
@@ -57,8 +43,6 @@ func TestFoldReconstructsLatestRunAndSessionState(t *testing.T) {
 }
 
 func TestFoldTaskLifecycle(t *testing.T) {
-	log := newMemLog()
-	scope := eventlog.Scope{TenantID: "t", SessionID: "th1"}
 	now := time.Unix(0, 0).UTC()
 	rec := task.Record{
 		Scope:     task.Scope{TenantID: "t", SessionID: "th1", ProcessID: "proc1", Revision: 1},
@@ -67,17 +51,14 @@ func TestFoldTaskLifecycle(t *testing.T) {
 		TokenHash: []byte{1, 2, 3},
 		CreatedAt: now,
 	}
-	created, _ := taskCreatedEvent(now, rec)
+	created, _ := TaskCreatedEvent(now, rec)
 
 	resolved := rec
 	resolved.State = task.StateApproved
-	resolvedEv, _ := taskResolvedEvent(now.Add(time.Second), resolved)
+	resolvedEv, _ := TaskResolvedEvent(now.Add(time.Second), resolved)
 
-	executed, _ := taskExecutedEvent(now.Add(2*time.Second), "proc1", 1, "task1")
-	mustAppend(t, log, scope, created, resolvedEv, executed)
-
-	events, _ := log.Read(context.Background(), scope, 0)
-	proj, err := Fold(events)
+	executed, _ := TaskExecutedEvent(now.Add(2*time.Second), "proc1", 1, "task1")
+	proj, err := Fold([]eventlog.Event{created, resolvedEv, executed})
 	if err != nil {
 		t.Fatalf("fold: %v", err)
 	}

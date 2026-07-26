@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
 
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
@@ -235,7 +236,7 @@ func (j *logJournal) Header() (journaled.Header, bool, error) {
 }
 
 func (j *logJournal) SetHeader(header journaled.Header) error {
-	ev, err := encodeEvent(evJournalHeader, j.proc, j.rev, j.now(), journalHeaderData{
+	ev, err := durable.EncodeEvent(evJournalHeader, j.proc, j.rev, j.now(), journalHeaderData{
 		Revision: j.rev,
 		Header:   header,
 	})
@@ -287,7 +288,7 @@ func (j *logJournal) Append(rec journaled.Record) error {
 	// open intent keeps its original key; a rolled-back section's re-execution
 	// writes fresh records here and gets a fresh key space.
 	stored.Revision = j.rev
-	ev, err := encodeEvent(evSyscall, j.proc, j.rev, j.now(), syscallRecordData{
+	ev, err := durable.EncodeEvent(evSyscall, j.proc, j.rev, j.now(), syscallRecordData{
 		Revision: j.rev,
 		Record:   stored,
 	})

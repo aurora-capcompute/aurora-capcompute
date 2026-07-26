@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"sync"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 )
 
 // cognitionGrants are the leaf grants a fake-provider process needs so the
@@ -27,10 +29,10 @@ import (
 // the guest calls to think — and some also advertise domain tools; the manifest
 // must grant that advertised set, exactly as a real assembly does. `extra` names
 // the domain tools a given fake also advertises.
-func cognitionGrants(extra ...string) []Syscall {
-	grants := []Syscall{{Syscall: "core.openaiApi", Hidden: true}}
+func cognitionGrants(extra ...string) []manifest.Syscall {
+	grants := []manifest.Syscall{{Syscall: "core.openaiApi", Hidden: true}}
 	for _, name := range extra {
-		grants = append(grants, Syscall{Syscall: name})
+		grants = append(grants, manifest.Syscall{Syscall: name})
 	}
 	return grants
 }
@@ -184,4 +186,23 @@ func jsonDigest(v any) (string, error) {
 	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:]), nil
+}
+
+type testDispatchers struct {
+	normalized []string
+}
+
+func (p *testDispatchers) Normalize(syscall string, config json.RawMessage) (json.RawMessage, error) {
+	if syscall == "unknown" {
+		return nil, fmt.Errorf("unsupported syscall")
+	}
+	p.normalized = append(p.normalized, syscall)
+	if len(config) == 0 {
+		return json.RawMessage(`{}`), nil
+	}
+	return append(json.RawMessage(nil), config...), nil
+}
+
+func (*testDispatchers) NewDispatcher(context.Context, ProcessContext, manifest.Manifest) (sys.Dispatcher[ProcessContext], error) {
+	return nil, nil
 }

@@ -5,14 +5,18 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/errs"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/program"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 )
 
 // DTOs
 
-type Manifest = agent.Manifest
-type Syscall = agent.Syscall
+type Manifest = manifest.Manifest
+type Syscall = manifest.Syscall
 type SessionSummary = agent.SessionSummary
 type SessionSnapshot = agent.SessionSnapshot
 type HistoryMessage = agent.HistoryMessage
@@ -26,25 +30,25 @@ type SessionGraphProcess = agent.SessionGraphProcess
 type Event = agent.Event
 type JournalEvent = agent.JournalEvent
 type ProgressEvent = agent.ProgressEvent
-type ProgramArtifact = agent.ProgramArtifact
-type ProgramData = agent.ProgramData
-type Schema = agent.Schema
+type ProgramArtifact = program.Artifact
+type ProgramData = program.Data
+type Schema = program.Schema
 
 // Status types
 
-type ProcessStatus = agent.ProcessStatus
+type ProcessStatus = durable.ProcessStatus
 
 const (
-	ProcessQueued      = agent.ProcessQueued
-	ProcessRunning     = agent.ProcessRunning
-	ProcessStopping    = agent.ProcessStopping
-	ProcessYielded     = agent.ProcessYielded
-	ProcessWaitingTask = agent.ProcessWaitingTask
-	ProcessInterrupted = agent.ProcessInterrupted
-	ProcessCompleted   = agent.ProcessCompleted
-	ProcessStopped     = agent.ProcessStopped
-	ProcessFailed      = agent.ProcessFailed
-	ProcessCompensated = agent.ProcessCompensated
+	ProcessQueued      = durable.ProcessQueued
+	ProcessRunning     = durable.ProcessRunning
+	ProcessStopping    = durable.ProcessStopping
+	ProcessYielded     = durable.ProcessYielded
+	ProcessWaitingTask = durable.ProcessWaitingTask
+	ProcessInterrupted = durable.ProcessInterrupted
+	ProcessCompleted   = durable.ProcessCompleted
+	ProcessStopped     = durable.ProcessStopped
+	ProcessFailed      = durable.ProcessFailed
+	ProcessCompensated = durable.ProcessCompensated
 )
 
 type RetryMode = agent.RetryMode
@@ -95,9 +99,9 @@ const (
 // Error sentinels
 
 var (
-	ErrNotFound = agent.ErrNotFound
-	ErrConflict = agent.ErrConflict
-	ErrInvalid  = agent.ErrInvalid
+	ErrNotFound = errs.NotFound
+	ErrConflict = errs.Conflict
+	ErrInvalid  = errs.Invalid
 
 	ErrTaskNotFound     = task.ErrNotFound
 	ErrTaskConflict     = task.ErrConflict
@@ -109,8 +113,8 @@ var (
 
 const (
 	DefaultTenantID   = agent.DefaultTenantID
-	ManifestVersion   = agent.ManifestVersion
-	SpawnSyscall      = agent.SpawnSyscall
-	TimerSyscall      = agent.TimerSyscall
-	DeclassifySyscall = agent.DeclassifySyscall
+	ManifestVersion   = manifest.Version
+	SpawnSyscall      = manifest.SpawnSyscall
+	TimerSyscall      = manifest.TimerSyscall
+	DeclassifySyscall = manifest.DeclassifySyscall
 )

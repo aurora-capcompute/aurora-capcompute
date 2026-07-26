@@ -6,6 +6,9 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 )
 
 // vanishedToolDispatchers refuses one tool type, standing in for a driver set
@@ -26,14 +29,14 @@ func TestRestoreQuarantinesStaleManifests(t *testing.T) {
 	store := newRuntimeStore()
 	now := time.Now().UTC().Add(-time.Hour)
 	store.seed(
-		StoredProcess{
+		durable.Process{
 			TenantID: "local", ID: "run_old", SessionID: "ses_old", Revision: 1,
-			Input: "old work", Status: ProcessFailed,
+			Input: "old work", Status: durable.ProcessFailed,
 			CreatedAt: now, UpdatedAt: now,
-			Manifest: Manifest{
-				Version:  ManifestVersion,
+			Manifest: manifest.Manifest{
+				Version:  manifest.Version,
 				Program:  "program@1",
-				Syscalls: []Syscall{{Syscall: "core.gone"}},
+				Syscalls: []manifest.Syscall{{Syscall: "core.gone"}},
 			},
 			ProgramDigest: "stale-digest",
 		},

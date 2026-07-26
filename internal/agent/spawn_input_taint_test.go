@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
@@ -23,7 +25,7 @@ import (
 func TestSysInputStampsInputLabels(t *testing.T) {
 	history := []HistoryMessage{{Role: "assistant", Content: "prior", Labels: []string{"untrusted_web"}}}
 	l := newLifecycleDispatcher(nopNext{}, "summarize: <data the parent read>", []string{"onyx_data"},
-		history, Manifest{}, 1, nil)
+		history, manifest.Manifest{}, 1, nil)
 
 	result, err := l.Dispatch(context.Background(), ProcessContext{},
 		sys.Syscall{Abi: sys.ABIVersion, Name: callSysInput}, sys.Authorization{})
@@ -54,7 +56,7 @@ func TestStoredProcessCarriesInputLabels(t *testing.T) {
 		id: "proc_1", sessionID: "ses_1", inputLabels: []string{"onyx_data"},
 	})
 	if len(stored.InputLabels) != 1 || stored.InputLabels[0] != "onyx_data" {
-		t.Fatalf("StoredProcess.InputLabels = %v, want the input seed persisted", stored.InputLabels)
+		t.Fatalf("durable.Process.InputLabels = %v, want the input seed persisted", stored.InputLabels)
 	}
 }
 
@@ -72,15 +74,15 @@ func (spawnTaintDispatchers) Normalize(_ string, settings json.RawMessage) (json
 	return append(json.RawMessage(nil), settings...), nil
 }
 
-func (spawnTaintDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, manifest Manifest) (sys.Dispatcher[ProcessContext], error) {
+func (spawnTaintDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, manifest manifest.Manifest) (sys.Dispatcher[ProcessContext], error) {
 	return spawnTaintDispatcher{manifest: manifest}, nil
 }
 
-type spawnTaintDispatcher struct{ manifest Manifest }
+type spawnTaintDispatcher struct{ manifest manifest.Manifest }
 
 func (d spawnTaintDispatcher) Capabilities() []sys.Capability {
 	caps := []sys.Capability{llmCapability()}
-	if _, ok := d.manifest.grant("onyx.search"); ok {
+	if _, ok := d.manifest.Grant("onyx.search"); ok {
 		caps = append(caps, sys.Capability{Name: "onyx.search", Description: "search the trusted KB"})
 	}
 	return caps
@@ -164,11 +166,11 @@ func TestSpawnSeedsChildWithParentTaint(t *testing.T) {
 		closeRT(runtime)
 		t.Fatalf("create session: %v", err)
 	}
-	proc, err := runtime.CreateProcess(session.ID, "parent task", Manifest{
-		Version: ManifestVersion,
+	proc, err := runtime.CreateProcess(session.ID, "parent task", manifest.Manifest{
+		Version: manifest.Version,
 		Program: "program@1",
-		Syscalls: []Syscall{
-			{Syscall: SpawnSyscall, Programs: []Manifest{{Program: "program@1", Syscalls: cognitionGrants()}}},
+		Syscalls: []manifest.Syscall{
+			{Syscall: manifest.SpawnSyscall, Programs: []manifest.Manifest{{Program: "program@1", Syscalls: cognitionGrants()}}},
 			{Syscall: "core.openaiApi", Hidden: true},
 			{Syscall: "onyx.search"},
 		},
@@ -177,7 +179,7 @@ func TestSpawnSeedsChildWithParentTaint(t *testing.T) {
 		closeRT(runtime)
 		t.Fatalf("create run: %v", err)
 	}
-	if first := waitForStatus(t, runtime, proc.ID, ProcessCompleted); first.Answer != "parent-done" {
+	if first := waitForStatus(t, runtime, proc.ID, durable.ProcessCompleted); first.Answer != "parent-done" {
 		closeRT(runtime)
 		t.Fatalf("parent answer = %q, want parent-done", first.Answer)
 	}

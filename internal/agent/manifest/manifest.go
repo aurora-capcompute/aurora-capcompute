@@ -1,16 +1,27 @@
-package agent
+// Package manifest is the grant tree: what a process may do, declared as data.
+//
+// A Manifest is one program node — the program it runs plus its granted syscalls
+// — and a sys.spawn grant's spawnable children are themselves Manifests, the
+// recursion that makes the whole tree one shape. Validate normalizes a tree and
+// refuses one that grants what cannot be served, so an invalid manifest never
+// reaches a process.
+//
+// The package interprets only the fields the runtime owns; a leaf grant's Config
+// is opaque here and normalized by whoever serves that syscall, reached through
+// the one-method Normalizer this package asks for.
+package manifest
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/errs"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-const ManifestVersion = 4
+const Version = 4
 
 // reservedSyscallPrefix namespaces the processor/runtime syscalls. A manifest may
 // grant only the runtime-served members in it (sys.spawn, sys.timer); any other
@@ -73,11 +84,11 @@ type Manifest struct {
 
 // sharesHistory reports whether this program's process inherits session history
 // (the default when unset).
-func (m Manifest) sharesHistory() bool { return m.History == nil || *m.History }
+func (m Manifest) SharesHistory() bool { return m.History == nil || *m.History }
 
 // sharesCapabilities reports whether this program's capability menu is advertised
 // on its sys.input (the default when unset).
-func (m Manifest) sharesCapabilities() bool {
+func (m Manifest) SharesCapabilities() bool {
 	return m.ShareCapabilities == nil || *m.ShareCapabilities
 }
 
@@ -185,7 +196,7 @@ func (m Manifest) LeafSyscalls() []Syscall {
 
 // grant returns the node's grant of one syscall, if present. Validation
 // guarantees at most one per syscall.
-func (m Manifest) grant(syscall string) (Syscall, bool) {
+func (m Manifest) Grant(syscall string) (Syscall, bool) {
 	for _, s := range m.Syscalls {
 		if s.Syscall == syscall {
 			return s, true
@@ -194,47 +205,53 @@ func (m Manifest) grant(syscall string) (Syscall, bool) {
 	return Syscall{}, false
 }
 
-type DispatcherProvider interface {
+// Normalizer canonicalizes one leaf grant's Config — the only thing validation
+// needs from whoever serves that syscall. The runtime's dispatcher provider
+// satisfies it; asking for just this keeps manifest validation independent of how
+// a dispatcher is built, and of the process credential building one needs.
+type Normalizer interface {
 	Normalize(syscall string, config json.RawMessage) (json.RawMessage, error)
-	NewDispatcher(context.Context, ProcessContext, Manifest) (sys.Dispatcher[ProcessContext], error)
 }
 
-func ValidateManifest(manifest Manifest, provider DispatcherProvider) (Manifest, error) {
-	if provider == nil {
-		return Manifest{}, fmt.Errorf("%w: dispatcher provider is required", ErrInvalid)
+// Validate checks and normalizes a manifest tree, returning a clone the caller
+// owns. A nil Normalizer is refused: an unnormalized leaf grant is one whose
+// authority nobody has checked.
+func Validate(spec Manifest, normalizer Normalizer) (Manifest, error) {
+	if normalizer == nil {
+		return Manifest{}, fmt.Errorf("%w: dispatcher provider is required", errs.Invalid)
 	}
-	if manifest.Version != ManifestVersion {
-		return Manifest{}, fmt.Errorf("%w: manifest version must be %d", ErrInvalid, ManifestVersion)
+	if spec.Version != Version {
+		return Manifest{}, fmt.Errorf("%w: manifest version must be %d", errs.Invalid, Version)
 	}
-	if err := validateNode(&manifest, provider); err != nil {
+	if err := validateNode(&spec, normalizer); err != nil {
 		return Manifest{}, err
 	}
 	// The runtime keeps no default program — a process names the program it runs,
 	// the way every spawnable child in the tree does.
-	if manifest.Program == "" {
-		return Manifest{}, fmt.Errorf("%w: a program is required", ErrInvalid)
+	if spec.Program == "" {
+		return Manifest{}, fmt.Errorf("%w: a program is required", errs.Invalid)
 	}
-	return cloneManifest(manifest), nil
+	return spec.Clone(), nil
 }
 
 // validateNode normalizes one manifest node — the root, or a spawnable
 // program inside a sys.spawn grant — and recurses into its grant set.
-func validateNode(node *Manifest, provider DispatcherProvider) error {
+func validateNode(node *Manifest, normalizer Normalizer) error {
 	node.Program = strings.TrimSpace(node.Program)
 	node.BindingRef = strings.TrimSpace(node.BindingRef)
-	return validateSyscalls(node.Syscalls, provider)
+	return validateSyscalls(node.Syscalls, normalizer)
 }
 
 // validateSyscalls normalizes a grant set: driver grants against their
 // registrations, the runtime-served ones (spawn's programs, the timer's
 // bound) in place. Nothing is named, so a syscall may be granted once.
-func validateSyscalls(syscalls []Syscall, provider DispatcherProvider) error {
+func validateSyscalls(syscalls []Syscall, normalizer Normalizer) error {
 	seen := make(map[string]struct{}, len(syscalls))
 	for i := range syscalls {
 		grant := &syscalls[i]
 		grant.Syscall = strings.TrimSpace(grant.Syscall)
 		if grant.Syscall == "" {
-			return fmt.Errorf("%w: grant %d: a syscall is required", ErrInvalid, i)
+			return fmt.Errorf("%w: grant %d: a syscall is required", errs.Invalid, i)
 		}
 		// The sys.* namespace belongs to the processor and the runtime. A manifest
 		// may grant only its two runtime-served members (sys.spawn, sys.timer);
@@ -244,42 +261,42 @@ func validateSyscalls(syscalls []Syscall, provider DispatcherProvider) error {
 		// runtime's own protocol capability — so it is refused up front, the way
 		// the reserved "syscall:" label namespace is (sys.NormalizeLabels).
 		if strings.HasPrefix(grant.Syscall, reservedSyscallPrefix) && !grant.runtimeServed() {
-			return fmt.Errorf("%w: syscall %q is in the reserved %q namespace and may not be granted", ErrInvalid, grant.Syscall, reservedSyscallPrefix)
+			return fmt.Errorf("%w: syscall %q is in the reserved %q namespace and may not be granted", errs.Invalid, grant.Syscall, reservedSyscallPrefix)
 		}
 		if grant.isSpawn() {
 			if len(grant.Programs) == 0 {
-				return fmt.Errorf("%w: %s requires at least one program", ErrInvalid, SpawnSyscall)
+				return fmt.Errorf("%w: %s requires at least one program", errs.Invalid, SpawnSyscall)
 			}
 			// Context settings (history, share_capabilities) live on each program
 			// node now, not on the grant — so the grant carries only its programs.
 			if len(bytes.TrimSpace(grant.Config)) > 0 {
-				return fmt.Errorf("%w: %s takes no settings; set history/share_capabilities on each program", ErrInvalid, SpawnSyscall)
+				return fmt.Errorf("%w: %s takes no settings; set history/share_capabilities on each program", errs.Invalid, SpawnSyscall)
 			}
 			grant.Config = nil
 			programs := make(map[string]struct{}, len(grant.Programs))
 			for j := range grant.Programs {
 				child := &grant.Programs[j]
 				if child.Version != 0 {
-					return fmt.Errorf("%w: spawnable program %d carries a version; the root's governs", ErrInvalid, j)
+					return fmt.Errorf("%w: spawnable program %d carries a version; the root's governs", errs.Invalid, j)
 				}
-				if err := validateNode(child, provider); err != nil {
+				if err := validateNode(child, normalizer); err != nil {
 					return fmt.Errorf("spawnable program %d: %w", j, err)
 				}
 				if child.Program == "" {
-					return fmt.Errorf("%w: spawnable program %d requires a program", ErrInvalid, j)
+					return fmt.Errorf("%w: spawnable program %d requires a program", errs.Invalid, j)
 				}
 				if _, dup := programs[child.Program]; dup {
-					return fmt.Errorf("%w: duplicate spawnable program %q", ErrInvalid, child.Program)
+					return fmt.Errorf("%w: duplicate spawnable program %q", errs.Invalid, child.Program)
 				}
 				programs[child.Program] = struct{}{}
 			}
 		} else if grant.Syscall == TimerSyscall {
 			if len(grant.Programs) > 0 {
-				return fmt.Errorf("%w: syscall %q: only %s carries programs", ErrInvalid, grant.Syscall, SpawnSyscall)
+				return fmt.Errorf("%w: syscall %q: only %s carries programs", errs.Invalid, grant.Syscall, SpawnSyscall)
 			}
 			normalized, err := normalizeTimerSettings(grant.Config)
 			if err != nil {
-				return fmt.Errorf("%w: sys.timer settings: %v", ErrInvalid, err)
+				return fmt.Errorf("%w: sys.timer settings: %v", errs.Invalid, err)
 			}
 			grant.Config = normalized
 		} else if grant.Syscall == DeclassifySyscall {
@@ -287,24 +304,24 @@ func validateSyscalls(syscalls []Syscall, provider DispatcherProvider) error {
 			// carrying no settings and no programs. Its authority is fully gated at
 			// dispatch by the mandatory human approval.
 			if len(grant.Programs) > 0 {
-				return fmt.Errorf("%w: syscall %q: only %s carries programs", ErrInvalid, grant.Syscall, SpawnSyscall)
+				return fmt.Errorf("%w: syscall %q: only %s carries programs", errs.Invalid, grant.Syscall, SpawnSyscall)
 			}
 			if len(bytes.TrimSpace(grant.Config)) > 0 {
-				return fmt.Errorf("%w: %s takes no settings", ErrInvalid, DeclassifySyscall)
+				return fmt.Errorf("%w: %s takes no settings", errs.Invalid, DeclassifySyscall)
 			}
 			grant.Config = nil
 		} else {
 			if len(grant.Programs) > 0 {
-				return fmt.Errorf("%w: syscall %q: only %s carries programs", ErrInvalid, grant.Syscall, SpawnSyscall)
+				return fmt.Errorf("%w: syscall %q: only %s carries programs", errs.Invalid, grant.Syscall, SpawnSyscall)
 			}
-			normalized, err := provider.Normalize(grant.Syscall, grant.Config)
+			normalized, err := normalizer.Normalize(grant.Syscall, grant.Config)
 			if err != nil {
-				return fmt.Errorf("%w: syscall %q config: %v", ErrInvalid, grant.Syscall, err)
+				return fmt.Errorf("%w: syscall %q config: %v", errs.Invalid, grant.Syscall, err)
 			}
 			grant.Config = append(json.RawMessage(nil), normalized...)
 		}
 		if _, exists := seen[grant.Syscall]; exists {
-			return fmt.Errorf("%w: duplicate syscall %q", ErrInvalid, grant.Syscall)
+			return fmt.Errorf("%w: duplicate syscall %q", errs.Invalid, grant.Syscall)
 		}
 		seen[grant.Syscall] = struct{}{}
 	}
@@ -332,14 +349,14 @@ func normalizeTimerSettings(raw json.RawMessage) (json.RawMessage, error) {
 	return json.Marshal(settings)
 }
 
-func cloneManifest(manifest Manifest) Manifest {
-	out := manifest
-	// Deep-copy the pointer fields so a caller that retains the input manifest
-	// (or reuses one across CreateProcess calls) cannot later flip a stored
-	// clone's history/share_capabilities out from under a running process.
-	out.History = cloneBoolPtr(manifest.History)
-	out.ShareCapabilities = cloneBoolPtr(manifest.ShareCapabilities)
-	out.Syscalls = cloneSyscalls(manifest.Syscalls)
+// Clone deep-copies a manifest's pointer fields, so a caller that retains the
+// input manifest (or reuses one across CreateProcess calls) cannot later flip a
+// stored clone's history/share_capabilities out from under a running process.
+func (m Manifest) Clone() Manifest {
+	out := m
+	out.History = cloneBoolPtr(m.History)
+	out.ShareCapabilities = cloneBoolPtr(m.ShareCapabilities)
+	out.Syscalls = cloneSyscalls(m.Syscalls)
 	return out
 }
 
@@ -362,7 +379,7 @@ func cloneSyscalls(syscalls []Syscall) []Syscall {
 		if len(grant.Programs) > 0 {
 			out[i].Programs = make([]Manifest, len(grant.Programs))
 			for j, child := range grant.Programs {
-				out[i].Programs[j] = cloneManifest(child)
+				out[i].Programs[j] = child.Clone()
 			}
 		}
 	}

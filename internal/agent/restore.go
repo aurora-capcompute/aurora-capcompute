@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"sort"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 )
 
@@ -22,7 +24,7 @@ func (r *Runtime) restore(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		proj, err := Fold(events)
+		proj, err := durable.Fold(events)
 		if err != nil {
 			return err
 		}
@@ -42,7 +44,7 @@ func (r *Runtime) restore(ctx context.Context) error {
 // session, its processes (in creation order, deriving conversation history from
 // completed processes), and attaches each process's journal revision. Processes left mid-flight
 // by a crash are marked interrupted and re-recorded.
-func (r *Runtime) restoreSession(proj Projection, journals map[string]map[uint64]*logJournal, histories map[string]*processHistory) error {
+func (r *Runtime) restoreSession(proj durable.Projection, journals map[string]map[uint64]*logJournal, histories map[string]*processHistory) error {
 	stored := proj.Session
 	if stored.ID == "" {
 		return nil
@@ -54,16 +56,16 @@ func (r *Runtime) restoreSession(proj Projection, journals map[string]map[uint64
 		createdAt:       stored.CreatedAt,
 		updatedAt:       stored.UpdatedAt,
 		activeProcessID: stored.ActiveProcessID,
-		tags:            cloneTags(stored.Tags),
+		tags:            durable.CloneTags(stored.Tags),
 	}
 	// A process-less session has no derived title; give it the same placeholder
 	// the live runtime assigns at creation so its title survives a restart.
 	if session.title == "" {
-		session.title = defaultSessionTitle
+		session.title = durable.DefaultSessionTitle
 	}
 	r.sessions[session.id] = session
 
-	procs := make([]StoredProcess, 0, len(proj.Processes))
+	procs := make([]durable.Process, 0, len(proj.Processes))
 	for _, sr := range proj.Processes {
 		procs = append(procs, sr)
 	}
@@ -76,7 +78,7 @@ func (r *Runtime) restoreSession(proj Projection, journals map[string]map[uint64
 		// execution attempt fails with the provider's error. Dispatcher
 		// upgrades thereby follow the same drain-and-deprecate story as
 		// program upgrades.
-		em, err := ValidateManifest(sr.Manifest, r.dispatchers)
+		em, err := manifest.Validate(sr.Manifest, r.dispatchers)
 		if err != nil {
 			slog.Warn("process manifest no longer validates against the compiled driver set; quarantining",
 				"process_id", sr.ID, "session_id", sr.SessionID, "err", err)
@@ -87,8 +89,8 @@ func (r *Runtime) restoreSession(proj Projection, journals map[string]map[uint64
 		// here. If the program is unavailable when execution is attempted, execute()
 		// will fail the process cleanly at that point (program == nil check).
 		status := sr.Status
-		if status == ProcessQueued || status == ProcessRunning || status == ProcessStopping {
-			status = ProcessInterrupted
+		if status == durable.ProcessQueued || status == durable.ProcessRunning || status == durable.ProcessStopping {
+			status = durable.ProcessInterrupted
 		}
 		proc := &processState{
 			id:                sr.ID,
@@ -103,7 +105,7 @@ func (r *Runtime) restoreSession(proj Projection, journals map[string]map[uint64
 			completedAt:       copyTime(sr.CompletedAt),
 			answer:            sr.Answer,
 			err:               sr.Error,
-			manifest:          cloneManifest(em),
+			manifest:          em.Clone(),
 			programDigest:     sr.ProgramDigest,
 			hideHistory:       sr.HideHistory,
 			labels:            append([]string(nil), sr.Labels...),
@@ -139,7 +141,7 @@ func (r *Runtime) restoreSession(proj Projection, journals map[string]map[uint64
 		// every completed child's Q&A into the shared transcript — diverging
 		// history and cross-run taint from the pre-restart state, and disclosing a
 		// child's answer (even a history:false-isolated child's) into the session.
-		if proc.status == ProcessCompleted && proc.parentProcessID == "" {
+		if proc.status == durable.ProcessCompleted && proc.parentProcessID == "" {
 			session.history = append(session.history,
 				HistoryMessage{Role: "user", Content: proc.input},
 				HistoryMessage{Role: "assistant", Content: proc.answer, Labels: proc.labels},
@@ -169,9 +171,9 @@ func (r *Runtime) restoreSession(proj Projection, journals map[string]map[uint64
 		}
 		lost := false
 		switch proc.status {
-		case ProcessWaitingTask:
+		case durable.ProcessWaitingTask:
 			lost = !pending[proc.id]
-		case ProcessYielded:
+		case durable.ProcessYielded:
 			lost = true
 			for _, childID := range proc.childProcessIDs {
 				if child := r.processes[childID]; child != nil && !isTerminal(child.status) {
@@ -183,7 +185,7 @@ func (r *Runtime) restoreSession(proj Projection, journals map[string]map[uint64
 		if lost {
 			slog.Info("parked process lost its wakeup in a crash; folding to interrupted",
 				"process_id", proc.id, "status", proc.status)
-			proc.status = ProcessInterrupted
+			proc.status = durable.ProcessInterrupted
 			if err := r.appendProcess(proc); err != nil {
 				return err
 			}

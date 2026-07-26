@@ -16,13 +16,16 @@ import (
 
 	"github.com/aurora-capcompute/capcompute/sys"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/errs"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 )
 
 type runtimeDispatchers struct {
 	mu        sync.Mutex
-	manifests []Manifest
+	manifests []manifest.Manifest
 }
 
 func (*runtimeDispatchers) Normalize(_ string, settings json.RawMessage) (json.RawMessage, error) {
@@ -32,9 +35,9 @@ func (*runtimeDispatchers) Normalize(_ string, settings json.RawMessage) (json.R
 	return append(json.RawMessage(nil), settings...), nil
 }
 
-func (p *runtimeDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, manifest Manifest) (sys.Dispatcher[ProcessContext], error) {
+func (p *runtimeDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, manifest manifest.Manifest) (sys.Dispatcher[ProcessContext], error) {
 	p.mu.Lock()
-	p.manifests = append(p.manifests, cloneManifest(manifest))
+	p.manifests = append(p.manifests, manifest.Clone())
 	p.mu.Unlock()
 	return finalDispatcher{}, nil
 }
@@ -92,10 +95,10 @@ func (s *runtimeStore) Release(_ context.Context, tenant, kind, resource, holder
 
 // seed appends proc.state events so the runtime folds them on restore.
 // Session state is derived from the runs; no separate session event is needed.
-func (s *runtimeStore) seed(runs ...StoredProcess) {
+func (s *runtimeStore) seed(runs ...durable.Process) {
 	now := time.Now().UTC()
 	for _, r := range runs {
-		ev, _ := processStateEvent(now, r)
+		ev, _ := durable.ProcessStateEvent(now, r)
 		_, _ = s.log.Append(context.Background(), eventlog.Scope{TenantID: r.TenantID, SessionID: r.SessionID}, ev)
 	}
 }
@@ -188,10 +191,10 @@ func TestRuntimePassesManifestToDispatcherProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	proc, err := runtime.CreateProcess(session.ID, "finish", Manifest{
-		Version: ManifestVersion,
+	proc, err := runtime.CreateProcess(session.ID, "finish", manifest.Manifest{
+		Version: manifest.Version,
 		Program: "program@1",
-		Syscalls: []Syscall{
+		Syscalls: []manifest.Syscall{
 			{Syscall: "core.custom", Config: json.RawMessage(`{"value":2}`)},
 			{Syscall: "core.openaiApi", Hidden: true},
 		},
@@ -199,7 +202,7 @@ func TestRuntimePassesManifestToDispatcherProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
-	waitForStatus(t, runtime, proc.ID, ProcessCompleted)
+	waitForStatus(t, runtime, proc.ID, durable.ProcessCompleted)
 	// The program brackets its one turn in a sys.begin/sys.commit savepoint, so
 	// the journal narrative is input → begin → chat → commit → finish.
 	names := journalNames(t, runtime, proc.ID)
@@ -253,7 +256,7 @@ func TestRuntimeProgramLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session (no programs): %v", err)
 	}
-	if _, err := runtime.CreateProcess(emptyTh.ID, "task", Manifest{Version: ManifestVersion}); err == nil {
+	if _, err := runtime.CreateProcess(emptyTh.ID, "task", manifest.Manifest{Version: manifest.Version}); err == nil {
 		t.Fatal("creating a run with no registered program should fail")
 	}
 
@@ -268,15 +271,15 @@ func TestRuntimeProgramLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	proc, err := runtime.CreateProcess(session.ID, "finish", Manifest{
-		Version:  ManifestVersion,
+	proc, err := runtime.CreateProcess(session.ID, "finish", manifest.Manifest{
+		Version:  manifest.Version,
 		Program:  "program@1",
 		Syscalls: cognitionGrants(),
 	})
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
-	waitForStatus(t, runtime, proc.ID, ProcessCompleted)
+	waitForStatus(t, runtime, proc.ID, durable.ProcessCompleted)
 
 	// Re-adding the identical program is a no-op.
 	if err := runtime.AddProgram(context.Background(), testProgram("program@1", wasm)); err != nil {
@@ -289,8 +292,8 @@ func TestRuntimeProgramLifecycle(t *testing.T) {
 	// A different program under the same id is refused: the id is taken, and the
 	// caller withdraws the old program first.
 	changed := testProgram("program@1", buildEchoProgram(t))
-	if err := runtime.AddProgram(context.Background(), changed); !errors.Is(err, ErrConflict) {
-		t.Fatalf("add over a taken id = %v, want ErrConflict", err)
+	if err := runtime.AddProgram(context.Background(), changed); !errors.Is(err, errs.Conflict) {
+		t.Fatalf("add over a taken id = %v, want errs.Conflict", err)
 	}
 	if err := runtime.RemoveProgram(context.Background(), "program@1"); err != nil {
 		t.Fatalf("remove: %v", err)
@@ -298,8 +301,8 @@ func TestRuntimeProgramLifecycle(t *testing.T) {
 	if len(runtime.Programs()) != 0 {
 		t.Fatalf("expected empty registry after removal, got %v", runtime.Programs())
 	}
-	if err := runtime.RemoveProgram(context.Background(), "program@1"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("removing an unregistered program = %v, want ErrNotFound", err)
+	if err := runtime.RemoveProgram(context.Background(), "program@1"); !errors.Is(err, errs.NotFound) {
+		t.Fatalf("removing an unregistered program = %v, want errs.NotFound", err)
 	}
 	if err := runtime.AddProgram(context.Background(), changed); err != nil {
 		t.Fatalf("add after removal: %v", err)
@@ -336,8 +339,8 @@ func TestRemoveProgramEjectsLiveProcesses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	proc, err := runtime.CreateProcess(session.ID, "do the guarded thing", Manifest{
-		Version:  ManifestVersion,
+	proc, err := runtime.CreateProcess(session.ID, "do the guarded thing", manifest.Manifest{
+		Version:  manifest.Version,
 		Program:  "program@1",
 		Syscalls: cognitionGrants("tool.y"),
 	})
@@ -345,13 +348,13 @@ func TestRemoveProgramEjectsLiveProcesses(t *testing.T) {
 		t.Fatalf("create run: %v", err)
 	}
 	// Parked on its approval: live, and holding a pending task.
-	waitForStatus(t, runtime, proc.ID, ProcessWaitingTask)
+	waitForStatus(t, runtime, proc.ID, durable.ProcessWaitingTask)
 
 	if err := runtime.RemoveProgram(context.Background(), "program@1"); err != nil {
 		t.Fatalf("remove program: %v", err)
 	}
-	ejected := waitForStatus(t, runtime, proc.ID, ProcessStopped)
-	if ejected.Status != ProcessStopped {
+	ejected := waitForStatus(t, runtime, proc.ID, durable.ProcessStopped)
+	if ejected.Status != durable.ProcessStopped {
 		t.Fatalf("process after program removal = %s, want stopped", ejected.Status)
 	}
 	// It stays auditable — its journal is still readable.
@@ -364,8 +367,8 @@ func TestRemoveProgramEjectsLiveProcesses(t *testing.T) {
 	if err := runtime.AddProgram(context.Background(), changed); err != nil {
 		t.Fatalf("add replacement: %v", err)
 	}
-	if _, err := runtime.Retry(proc.ID, RetryRestart); !errors.Is(err, ErrConflict) {
-		t.Fatalf("retry under a replaced program = %v, want ErrConflict", err)
+	if _, err := runtime.Retry(proc.ID, RetryRestart); !errors.Is(err, errs.Conflict) {
+		t.Fatalf("retry under a replaced program = %v, want errs.Conflict", err)
 	}
 }
 
@@ -378,7 +381,7 @@ func TestProcessImmutablyBoundToProgramBytes(t *testing.T) {
 	disp := &compensationDispatcher{failMidTurn: true}
 	runtime := newCompensationRuntime(t, disp)
 	proc := startCompensationProcess(t, runtime)
-	waitForStatus(t, runtime, proc.ID, ProcessFailed)
+	waitForStatus(t, runtime, proc.ID, durable.ProcessFailed)
 
 	// Replace program@1: same name, different content digest. A replacement is a
 	// remove followed by an add — the id is never overwritten in place.
@@ -389,8 +392,8 @@ func TestProcessImmutablyBoundToProgramBytes(t *testing.T) {
 
 	for _, mode := range []RetryMode{RetryResume, RetryRestart} {
 		_, err := runtime.Retry(proc.ID, mode)
-		if err == nil || !errors.Is(err, ErrConflict) {
-			t.Fatalf("retry %q under changed bytes = %v, want ErrConflict", mode, err)
+		if err == nil || !errors.Is(err, errs.Conflict) {
+			t.Fatalf("retry %q under changed bytes = %v, want errs.Conflict", mode, err)
 		}
 		if !strings.Contains(err.Error(), "immutable") {
 			t.Fatalf("retry %q error = %q, want the immutability law named", mode, err)
@@ -402,15 +405,15 @@ func TestProcessImmutablyBoundToProgramBytes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	fresh, err := runtime.CreateProcess(session.ID, "hello from the new program", Manifest{
-		Version:  ManifestVersion,
+	fresh, err := runtime.CreateProcess(session.ID, "hello from the new program", manifest.Manifest{
+		Version:  manifest.Version,
 		Program:  "program@1",
 		Syscalls: cognitionGrants("billing.charge", "billing.refund", "shipping.book", "inventory.sync"),
 	})
 	if err != nil {
 		t.Fatalf("create process: %v", err)
 	}
-	final := waitForStatus(t, runtime, fresh.ID, ProcessCompleted)
+	final := waitForStatus(t, runtime, fresh.ID, durable.ProcessCompleted)
 	if final.Answer != "hello from the new program" {
 		t.Fatalf("answer = %q, want the echo program's answer", final.Answer)
 	}
@@ -424,7 +427,7 @@ func TestProcessStrandedBySchemaChange(t *testing.T) {
 	disp := &compensationDispatcher{failMidTurn: true}
 	runtime := newCompensationRuntime(t, disp)
 	proc := startCompensationProcess(t, runtime)
-	waitForStatus(t, runtime, proc.ID, ProcessFailed)
+	waitForStatus(t, runtime, proc.ID, durable.ProcessFailed)
 
 	// Re-register program@1 with the SAME wasm but a different output schema.
 	edited := testProgram("program@1", buildProgram(t))
@@ -438,8 +441,8 @@ func TestProcessStrandedBySchemaChange(t *testing.T) {
 
 	for _, mode := range []RetryMode{RetryResume, RetryRestart} {
 		_, err := runtime.Retry(proc.ID, mode)
-		if err == nil || !errors.Is(err, ErrConflict) {
-			t.Fatalf("retry %q under changed schema = %v, want ErrConflict", mode, err)
+		if err == nil || !errors.Is(err, errs.Conflict) {
+			t.Fatalf("retry %q under changed schema = %v, want errs.Conflict", mode, err)
 		}
 		if !strings.Contains(err.Error(), "immutable") {
 			t.Fatalf("retry %q error = %q, want the immutability law named", mode, err)
@@ -454,7 +457,7 @@ func TestProcessSurvivesDescriptionChange(t *testing.T) {
 	disp := &compensationDispatcher{failMidTurn: true}
 	runtime := newCompensationRuntime(t, disp)
 	proc := startCompensationProcess(t, runtime)
-	waitForStatus(t, runtime, proc.ID, ProcessFailed)
+	waitForStatus(t, runtime, proc.ID, durable.ProcessFailed)
 
 	reworded := testProgram("program@1", buildProgram(t))
 	reworded.Description = "program@1, described afresh"
@@ -493,7 +496,7 @@ func TestAddProgramRejectsInvalidWasm(t *testing.T) {
 	}
 }
 
-func waitForStatus(t *testing.T, runtime *Runtime, processID string, want ProcessStatus) ProcessSnapshot {
+func waitForStatus(t *testing.T, runtime *Runtime, processID string, want durable.ProcessStatus) ProcessSnapshot {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
@@ -504,7 +507,7 @@ func waitForStatus(t *testing.T, runtime *Runtime, processID string, want Proces
 		if proc.Status == want {
 			return proc
 		}
-		if proc.Status == ProcessFailed {
+		if proc.Status == durable.ProcessFailed {
 			t.Fatalf("run failed: %s", proc.Error)
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -615,7 +618,7 @@ func (cascadeDispatchers) Normalize(_ string, settings json.RawMessage) (json.Ra
 	return append(json.RawMessage(nil), settings...), nil
 }
 
-func (cascadeDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ Manifest) (sys.Dispatcher[ProcessContext], error) {
+func (cascadeDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ manifest.Manifest) (sys.Dispatcher[ProcessContext], error) {
 	return cascadeDispatcher{}, nil
 }
 
@@ -732,18 +735,18 @@ func TestRuntimeCascadeResumeReusesChildRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	proc, err := runtime.CreateProcess(session.ID, "parent task", Manifest{
-		Version: ManifestVersion,
+	proc, err := runtime.CreateProcess(session.ID, "parent task", manifest.Manifest{
+		Version: manifest.Version,
 		Program: "program@1",
-		Syscalls: []Syscall{
-			{Syscall: SpawnSyscall, Programs: []Manifest{{Program: "program@1", Syscalls: cognitionGrants()}}},
+		Syscalls: []manifest.Syscall{
+			{Syscall: manifest.SpawnSyscall, Programs: []manifest.Manifest{{Program: "program@1", Syscalls: cognitionGrants()}}},
 			{Syscall: "core.openaiApi", Hidden: true},
 		},
 	})
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
-	first := waitForStatus(t, runtime, proc.ID, ProcessCompleted)
+	first := waitForStatus(t, runtime, proc.ID, durable.ProcessCompleted)
 	if first.Answer != "parent-done" {
 		t.Fatalf("parent answer = %q, want parent-done", first.Answer)
 	}
@@ -774,7 +777,7 @@ func TestRuntimeCascadeResumeReusesChildRun(t *testing.T) {
 	if _, err := runtime.Retry(proc.ID, RetryRestart); err != nil {
 		t.Fatalf("retry parent: %v", err)
 	}
-	waitForStatus(t, runtime, proc.ID, ProcessCompleted)
+	waitForStatus(t, runtime, proc.ID, durable.ProcessCompleted)
 
 	reusedChildID := onlyChildProcess(t, runtime, proc.ID)
 	if reusedChildID != childID {
@@ -797,7 +800,7 @@ func (approvalDispatchers) Normalize(_ string, settings json.RawMessage) (json.R
 	return append(json.RawMessage(nil), settings...), nil
 }
 
-func (approvalDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ Manifest) (sys.Dispatcher[ProcessContext], error) {
+func (approvalDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ manifest.Manifest) (sys.Dispatcher[ProcessContext], error) {
 	return approvalToolDispatcher{}, nil
 }
 
@@ -865,8 +868,8 @@ func TestRuntimeApprovalCycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	proc, err := runtime.CreateProcess(session.ID, "do the guarded thing", Manifest{
-		Version:  ManifestVersion,
+	proc, err := runtime.CreateProcess(session.ID, "do the guarded thing", manifest.Manifest{
+		Version:  manifest.Version,
 		Program:  "program@1",
 		Syscalls: cognitionGrants("tool.y"),
 	})
@@ -874,7 +877,7 @@ func TestRuntimeApprovalCycle(t *testing.T) {
 		t.Fatalf("create run: %v", err)
 	}
 
-	waitForStatus(t, runtime, proc.ID, ProcessWaitingTask)
+	waitForStatus(t, runtime, proc.ID, durable.ProcessWaitingTask)
 	tasks, err := runtime.Tasks(proc.ID)
 	if err != nil || len(tasks) != 1 {
 		t.Fatalf("tasks = %+v, err=%v", tasks, err)
@@ -894,7 +897,7 @@ func TestRuntimeApprovalCycle(t *testing.T) {
 		t.Fatalf("resolve: %v", err)
 	}
 
-	completed := waitForStatus(t, runtime, proc.ID, ProcessCompleted)
+	completed := waitForStatus(t, runtime, proc.ID, durable.ProcessCompleted)
 	if completed.Answer != "approved-done" {
 		t.Fatalf("answer = %q, want approved-done", completed.Answer)
 	}
@@ -916,7 +919,7 @@ func (failingChildDispatchers) Normalize(_ string, settings json.RawMessage) (js
 	return append(json.RawMessage(nil), settings...), nil
 }
 
-func (failingChildDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ Manifest) (sys.Dispatcher[ProcessContext], error) {
+func (failingChildDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ manifest.Manifest) (sys.Dispatcher[ProcessContext], error) {
 	return failingChildDispatcher{}, nil
 }
 
@@ -973,11 +976,11 @@ func TestRuntimeHardSpawnFailsParentOnChildFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	proc, err := runtime.CreateProcess(session.ID, "parent task", Manifest{
-		Version: ManifestVersion,
+	proc, err := runtime.CreateProcess(session.ID, "parent task", manifest.Manifest{
+		Version: manifest.Version,
 		Program: "program@1",
-		Syscalls: []Syscall{
-			{Syscall: SpawnSyscall, Programs: []Manifest{{Program: "program@1", Syscalls: cognitionGrants()}}},
+		Syscalls: []manifest.Syscall{
+			{Syscall: manifest.SpawnSyscall, Programs: []manifest.Manifest{{Program: "program@1", Syscalls: cognitionGrants()}}},
 			{Syscall: "core.openaiApi", Hidden: true},
 		},
 	})
@@ -998,7 +1001,7 @@ func TestRuntimeHardSpawnFailsParentOnChildFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get child: %v", err)
 	}
-	if child.Status != ProcessFailed {
+	if child.Status != durable.ProcessFailed {
 		t.Fatalf("child status = %s, want failed", child.Status)
 	}
 }
@@ -1019,7 +1022,7 @@ func (*failThenSucceedDispatchers) Normalize(_ string, settings json.RawMessage)
 	return append(json.RawMessage(nil), settings...), nil
 }
 
-func (d *failThenSucceedDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ Manifest) (sys.Dispatcher[ProcessContext], error) {
+func (d *failThenSucceedDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ manifest.Manifest) (sys.Dispatcher[ProcessContext], error) {
 	return &failThenSucceedDispatcher{parent: d}, nil
 }
 
@@ -1069,7 +1072,7 @@ func (d *failThenSucceedDispatcher) Dispatch(_ context.Context, _ ProcessContext
 	}
 }
 
-// waitForProcessFailed polls until the run reaches ProcessFailed, fataling if it
+// waitForProcessFailed polls until the run reaches durable.ProcessFailed, fataling if it
 // reaches any other terminal state first.
 func waitForProcessFailed(t *testing.T, runtime *Runtime, processID string) ProcessSnapshot {
 	t.Helper()
@@ -1080,14 +1083,14 @@ func waitForProcessFailed(t *testing.T, runtime *Runtime, processID string) Proc
 			t.Fatalf("get run: %v", err)
 		}
 		switch snap.Status {
-		case ProcessFailed:
+		case durable.ProcessFailed:
 			return snap
-		case ProcessCompleted, ProcessStopped:
-			t.Fatalf("run reached %s, expected ProcessFailed", snap.Status)
+		case durable.ProcessCompleted, durable.ProcessStopped:
+			t.Fatalf("run reached %s, expected durable.ProcessFailed", snap.Status)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("run did not reach ProcessFailed within timeout")
+	t.Fatal("run did not reach durable.ProcessFailed within timeout")
 	return ProcessSnapshot{}
 }
 
@@ -1108,7 +1111,7 @@ func (*cascadeResumeDispatchers) Normalize(_ string, settings json.RawMessage) (
 	return append(json.RawMessage(nil), settings...), nil
 }
 
-func (d *cascadeResumeDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ Manifest) (sys.Dispatcher[ProcessContext], error) {
+func (d *cascadeResumeDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ manifest.Manifest) (sys.Dispatcher[ProcessContext], error) {
 	return &cascadeResumeDispatcherImpl{parent: d}, nil
 }
 
@@ -1190,11 +1193,11 @@ func TestRuntimeCascadeResumeUsesResumeModeForFailedChild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	proc, err := runtime.CreateProcess(session.ID, "parent task", Manifest{
-		Version: ManifestVersion,
+	proc, err := runtime.CreateProcess(session.ID, "parent task", manifest.Manifest{
+		Version: manifest.Version,
 		Program: "program@1",
-		Syscalls: []Syscall{
-			{Syscall: SpawnSyscall, Programs: []Manifest{{
+		Syscalls: []manifest.Syscall{
+			{Syscall: manifest.SpawnSyscall, Programs: []manifest.Manifest{{
 				Program:  "program@1",
 				Syscalls: cognitionGrants("tool.x"),
 			}}},
@@ -1215,7 +1218,7 @@ func TestRuntimeCascadeResumeUsesResumeModeForFailedChild(t *testing.T) {
 	if _, err := runtime.Retry(proc.ID, RetryResume); err != nil {
 		t.Fatalf("retry parent: %v", err)
 	}
-	completed := waitForStatus(t, runtime, proc.ID, ProcessCompleted)
+	completed := waitForStatus(t, runtime, proc.ID, durable.ProcessCompleted)
 	if completed.Answer != "parent-done" {
 		t.Fatalf("parent answer = %q, want parent-done", completed.Answer)
 	}
@@ -1256,8 +1259,8 @@ func TestRuntimeHardRetryForksFromBeginning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	proc, err := runtime.CreateProcess(session.ID, "task", Manifest{
-		Version:  ManifestVersion,
+	proc, err := runtime.CreateProcess(session.ID, "task", manifest.Manifest{
+		Version:  manifest.Version,
 		Program:  "program@1",
 		Syscalls: cognitionGrants("tool.x"),
 	})
@@ -1273,7 +1276,7 @@ func TestRuntimeHardRetryForksFromBeginning(t *testing.T) {
 	if _, err := runtime.Retry(proc.ID, RetryRestart); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
-	recovered := waitForStatus(t, runtime, proc.ID, ProcessCompleted)
+	recovered := waitForStatus(t, runtime, proc.ID, durable.ProcessCompleted)
 	if recovered.Answer != "recovered" {
 		t.Fatalf("answer = %q, want recovered", recovered.Answer)
 	}
@@ -1327,7 +1330,7 @@ func (compensationDispatchers) Normalize(_ string, settings json.RawMessage) (js
 	return append(json.RawMessage(nil), settings...), nil
 }
 
-func (p compensationDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ Manifest) (sys.Dispatcher[ProcessContext], error) {
+func (p compensationDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ manifest.Manifest) (sys.Dispatcher[ProcessContext], error) {
 	return p.d, nil
 }
 
@@ -1520,8 +1523,8 @@ func startCompensationProcess(t *testing.T, runtime *Runtime) ProcessSnapshot {
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	proc, err := runtime.CreateProcess(session.ID, "place the order", Manifest{
-		Version:  ManifestVersion,
+	proc, err := runtime.CreateProcess(session.ID, "place the order", manifest.Manifest{
+		Version:  manifest.Version,
 		Program:  "program@1",
 		Syscalls: cognitionGrants("billing.charge", "billing.refund", "shipping.book", "inventory.sync"),
 	})
@@ -1538,7 +1541,7 @@ func TestAbortRollsBackAndStops(t *testing.T) {
 	runtime := newCompensationRuntime(t, disp)
 	proc := startCompensationProcess(t, runtime)
 
-	final := waitForStatus(t, runtime, proc.ID, ProcessCompensated)
+	final := waitForStatus(t, runtime, proc.ID, durable.ProcessCompensated)
 
 	disp.mu.Lock()
 	charges, refunds, refundArgs := disp.charges, disp.refunds, disp.refundArgs
@@ -1581,7 +1584,7 @@ func TestAbortRetriesImmediately(t *testing.T) {
 	runtime := newCompensationRuntime(t, disp)
 	proc := startCompensationProcess(t, runtime)
 
-	final := waitForStatus(t, runtime, proc.ID, ProcessCompleted)
+	final := waitForStatus(t, runtime, proc.ID, durable.ProcessCompleted)
 	if final.Answer != "recovered-after-rollback" {
 		t.Fatalf("answer = %q", final.Answer)
 	}
@@ -1604,7 +1607,7 @@ func TestAbortParksOnDurableRetryTimer(t *testing.T) {
 	runtime := newCompensationRuntime(t, disp)
 	proc := startCompensationProcess(t, runtime)
 
-	waitForStatus(t, runtime, proc.ID, ProcessWaitingTask)
+	waitForStatus(t, runtime, proc.ID, durable.ProcessWaitingTask)
 	disp.mu.Lock()
 	refunds := disp.refunds
 	disp.mu.Unlock()
@@ -1618,7 +1621,7 @@ func TestAbortParksOnDurableRetryTimer(t *testing.T) {
 	}
 	var retry *TaskSnapshot
 	for i := range tasks {
-		if tasks[i].State == task.StatePending && tasks[i].Syscall.Name == TimerSyscall {
+		if tasks[i].State == task.StatePending && tasks[i].Syscall.Name == manifest.TimerSyscall {
 			retry = &tasks[i]
 		}
 	}
@@ -1638,7 +1641,7 @@ func TestAbortParksOnDurableRetryTimer(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("resolve retry timer: %v", err)
 	}
-	final := waitForStatus(t, runtime, proc.ID, ProcessCompleted)
+	final := waitForStatus(t, runtime, proc.ID, durable.ProcessCompleted)
 	if final.Answer != "recovered-after-rollback" || final.Attempt != 2 {
 		t.Fatalf("answer = %q attempt = %d, want recovery on attempt 2", final.Answer, final.Attempt)
 	}
@@ -1656,7 +1659,7 @@ func TestFailedCompensationFailsThenResumes(t *testing.T) {
 	runtime := newCompensationRuntime(t, disp)
 	proc := startCompensationProcess(t, runtime)
 
-	failed := waitForStatus(t, runtime, proc.ID, ProcessFailed)
+	failed := waitForStatus(t, runtime, proc.ID, durable.ProcessFailed)
 	if !strings.Contains(failed.Error, "billing.refund") || !strings.Contains(failed.Error, "card network down") {
 		t.Fatalf("failure = %q, want the failed compensation named", failed.Error)
 	}
@@ -1668,7 +1671,7 @@ func TestFailedCompensationFailsThenResumes(t *testing.T) {
 	if _, err := runtime.Retry(proc.ID, RetryResume); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
-	final := waitForStatus(t, runtime, proc.ID, ProcessCompensated)
+	final := waitForStatus(t, runtime, proc.ID, durable.ProcessCompensated)
 	disp.mu.Lock()
 	refunds := disp.refunds
 	disp.mu.Unlock()
@@ -1692,7 +1695,7 @@ func TestRollbackParksForApproval(t *testing.T) {
 	runtime := newCompensationRuntime(t, disp)
 	proc := startCompensationProcess(t, runtime)
 
-	waitForStatus(t, runtime, proc.ID, ProcessWaitingTask)
+	waitForStatus(t, runtime, proc.ID, durable.ProcessWaitingTask)
 	tasks, err := runtime.Tasks(proc.ID)
 	if err != nil {
 		t.Fatalf("tasks: %v", err)
@@ -1715,7 +1718,7 @@ func TestRollbackParksForApproval(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
-	final := waitForStatus(t, runtime, proc.ID, ProcessCompensated)
+	final := waitForStatus(t, runtime, proc.ID, durable.ProcessCompensated)
 
 	disp.mu.Lock()
 	refunds := disp.refunds
@@ -1739,7 +1742,7 @@ func TestRollbackDeniedApprovalFails(t *testing.T) {
 	runtime := newCompensationRuntime(t, disp)
 	proc := startCompensationProcess(t, runtime)
 
-	waitForStatus(t, runtime, proc.ID, ProcessWaitingTask)
+	waitForStatus(t, runtime, proc.ID, durable.ProcessWaitingTask)
 	tasks, err := runtime.Tasks(proc.ID)
 	if err != nil || len(tasks) == 0 {
 		t.Fatalf("tasks = %+v, err=%v", tasks, err)
@@ -1750,7 +1753,7 @@ func TestRollbackDeniedApprovalFails(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("deny: %v", err)
 	}
-	failed := waitForStatus(t, runtime, proc.ID, ProcessFailed)
+	failed := waitForStatus(t, runtime, proc.ID, durable.ProcessFailed)
 	if !strings.Contains(failed.Error, "billing.refund") {
 		t.Fatalf("failure = %q, want the denied undo named", failed.Error)
 	}

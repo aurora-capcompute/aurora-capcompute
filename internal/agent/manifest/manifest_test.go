@@ -1,19 +1,20 @@
-package agent
+package manifest
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"testing"
-
-	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-type testDispatchers struct {
+// testNormalizer is the only thing manifest validation asks of the layer above:
+// canonicalize one leaf grant's config. Building a dispatcher — what the
+// runtime's real provider also does — is none of this package's business, which
+// is why the double needs no process credential and no dispatcher.
+type testNormalizer struct {
 	normalized []string
 }
 
-func (p *testDispatchers) Normalize(syscall string, config json.RawMessage) (json.RawMessage, error) {
+func (p *testNormalizer) Normalize(syscall string, config json.RawMessage) (json.RawMessage, error) {
 	if syscall == "unknown" {
 		return nil, fmt.Errorf("unsupported syscall")
 	}
@@ -24,25 +25,21 @@ func (p *testDispatchers) Normalize(syscall string, config json.RawMessage) (jso
 	return append(json.RawMessage(nil), config...), nil
 }
 
-func (*testDispatchers) NewDispatcher(context.Context, ProcessContext, Manifest) (sys.Dispatcher[ProcessContext], error) {
-	return nil, nil
-}
-
 func TestValidateManifestUsesInjectedProvider(t *testing.T) {
-	provider := &testDispatchers{}
-	manifest, err := ValidateManifest(Manifest{
-		Version:  ManifestVersion,
+	provider := &testNormalizer{}
+	spec, err := Validate(Manifest{
+		Version:  Version,
 		Program:  "program",
 		Syscalls: []Syscall{{Syscall: " core.custom "}},
 	}, provider)
 	if err != nil {
 		t.Fatalf("validate: %v", err)
 	}
-	if manifest.Syscalls[0].Syscall != "core.custom" {
-		t.Fatalf("manifest = %+v", manifest)
+	if spec.Syscalls[0].Syscall != "core.custom" {
+		t.Fatalf("manifest = %+v", spec)
 	}
-	if string(manifest.Syscalls[0].Config) != "{}" {
-		t.Fatalf("config = %s", manifest.Syscalls[0].Config)
+	if string(spec.Syscalls[0].Config) != "{}" {
+		t.Fatalf("config = %s", spec.Syscalls[0].Config)
 	}
 }
 
@@ -86,23 +83,23 @@ func TestSyscallConfigCapture(t *testing.T) {
 }
 
 func TestValidateManifestRejectsMissingProviderAndUnknownSyscall(t *testing.T) {
-	if _, err := ValidateManifest(Manifest{Version: ManifestVersion}, nil); err == nil {
+	if _, err := Validate(Manifest{Version: Version}, nil); err == nil {
 		t.Fatal("expected missing provider error")
 	}
-	if _, err := ValidateManifest(Manifest{
-		Version:  ManifestVersion,
+	if _, err := Validate(Manifest{
+		Version:  Version,
 		Syscalls: []Syscall{{Syscall: "unknown"}},
-	}, &testDispatchers{}); err == nil {
+	}, &testNormalizer{}); err == nil {
 		t.Fatal("expected unsupported syscall error")
 	}
 }
 
 // Nothing is named, so a syscall may be granted once.
 func TestValidateManifestRefusesDuplicateSyscalls(t *testing.T) {
-	if _, err := ValidateManifest(Manifest{
-		Version:  ManifestVersion,
+	if _, err := Validate(Manifest{
+		Version:  Version,
 		Syscalls: []Syscall{{Syscall: "core.custom"}, {Syscall: "core.custom"}},
-	}, &testDispatchers{}); err == nil {
+	}, &testNormalizer{}); err == nil {
 		t.Fatal("expected duplicate syscall error")
 	}
 }
@@ -110,17 +107,17 @@ func TestValidateManifestRefusesDuplicateSyscalls(t *testing.T) {
 // A sys.timer grant is the runtime's own: its bound validates here, not
 // against a driver registration.
 func TestValidateManifestValidatesTimerGrant(t *testing.T) {
-	if _, err := ValidateManifest(Manifest{
-		Version:  ManifestVersion,
+	if _, err := Validate(Manifest{
+		Version:  Version,
 		Program:  "program@1",
 		Syscalls: []Syscall{{Syscall: TimerSyscall, Config: json.RawMessage(`{"max_duration_ms":60000}`)}},
-	}, &testDispatchers{}); err != nil {
+	}, &testNormalizer{}); err != nil {
 		t.Fatalf("timer grant rejected: %v", err)
 	}
-	if _, err := ValidateManifest(Manifest{
-		Version:  ManifestVersion,
+	if _, err := Validate(Manifest{
+		Version:  Version,
 		Syscalls: []Syscall{{Syscall: TimerSyscall, Config: json.RawMessage(`{"max_duration_ms":-1}`)}},
-	}, &testDispatchers{}); err == nil {
+	}, &testNormalizer{}); err == nil {
 		t.Fatal("negative max_duration_ms accepted")
 	}
 }
@@ -131,7 +128,7 @@ func TestValidateManifestValidatesTimerGrant(t *testing.T) {
 func TestValidateManifestValidatesSpawnPrograms(t *testing.T) {
 	no := false
 	valid := Manifest{
-		Version: ManifestVersion,
+		Version: Version,
 		Program: "root",
 		Syscalls: []Syscall{{
 			Syscall: SpawnSyscall,
@@ -143,7 +140,7 @@ func TestValidateManifestValidatesSpawnPrograms(t *testing.T) {
 			}},
 		}},
 	}
-	if _, err := ValidateManifest(valid, &testDispatchers{}); err != nil {
+	if _, err := Validate(valid, &testNormalizer{}); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
 
@@ -156,7 +153,7 @@ func TestValidateManifestValidatesSpawnPrograms(t *testing.T) {
 			Programs: []Manifest{{Program: "scout"}}}},
 		{"program required", Syscall{Syscall: SpawnSyscall, Programs: []Manifest{{}}}},
 		{"nested version", Syscall{Syscall: SpawnSyscall,
-			Programs: []Manifest{{Program: "scout", Version: ManifestVersion}}}},
+			Programs: []Manifest{{Program: "scout", Version: Version}}}},
 		{"duplicate programs", Syscall{Syscall: SpawnSyscall,
 			Programs: []Manifest{{Program: "scout"}, {Program: "scout"}}}},
 		{"bad nested grant", Syscall{Syscall: SpawnSyscall,
@@ -165,10 +162,10 @@ func TestValidateManifestValidatesSpawnPrograms(t *testing.T) {
 			Programs: []Manifest{{Program: "scout"}}}},
 	}
 	for _, tc := range cases {
-		if _, err := ValidateManifest(Manifest{
-			Version:  ManifestVersion,
+		if _, err := Validate(Manifest{
+			Version:  Version,
 			Syscalls: []Syscall{tc.grant},
-		}, &testDispatchers{}); err == nil {
+		}, &testNormalizer{}); err == nil {
 			t.Fatalf("%s: expected validation error", tc.name)
 		}
 	}

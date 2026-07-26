@@ -11,12 +11,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
 // blockingDispatchers hands every process a dispatcher that parks inside the
 // cognition call until the test releases it. A process waiting in there is
-// ProcessRunning with a live wasm module on the processor — mid-quantum — which
+// durable.ProcessRunning with a live wasm module on the processor — mid-quantum — which
 // is the exact window RemoveProgram has to survive.
 type blockingDispatchers struct {
 	entered chan struct{}
@@ -39,7 +41,7 @@ func (*blockingDispatchers) Normalize(_ string, settings json.RawMessage) (json.
 	return append(json.RawMessage(nil), settings...), nil
 }
 
-func (d *blockingDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ Manifest) (sys.Dispatcher[ProcessContext], error) {
+func (d *blockingDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ manifest.Manifest) (sys.Dispatcher[ProcessContext], error) {
 	return d, nil
 }
 
@@ -99,8 +101,8 @@ func midQuantumRuntime(t *testing.T, stoppable bool) (*Runtime, *blockingDispatc
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	proc, err := runtime.CreateProcess(session.ID, "think", Manifest{
-		Version:  ManifestVersion,
+	proc, err := runtime.CreateProcess(session.ID, "think", manifest.Manifest{
+		Version:  manifest.Version,
 		Program:  "program@1",
 		Syscalls: cognitionGrants(),
 	})
@@ -112,7 +114,7 @@ func midQuantumRuntime(t *testing.T, stoppable bool) (*Runtime, *blockingDispatc
 	case <-time.After(15 * time.Second):
 		t.Fatal("process never reached the blocking dispatch")
 	}
-	if snapshot, err := runtime.GetProcess(proc.ID); err != nil || snapshot.Status != ProcessRunning {
+	if snapshot, err := runtime.GetProcess(proc.ID); err != nil || snapshot.Status != durable.ProcessRunning {
 		t.Fatalf("process before removal = %+v (err %v), want running", snapshot, err)
 	}
 	return runtime, dispatchers, proc.ID
@@ -137,7 +139,7 @@ func TestRemoveProgramDrainsEvictedProcesses(t *testing.T) {
 	if !isTerminal(snapshot.Status) {
 		t.Fatalf("process is %s after RemoveProgram returned, want a terminal state", snapshot.Status)
 	}
-	if snapshot.Status != ProcessStopped {
+	if snapshot.Status != durable.ProcessStopped {
 		t.Fatalf("evicted process settled as %s (%q), want stopped", snapshot.Status, snapshot.Error)
 	}
 	if strings.Contains(snapshot.Error, "wazero") || strings.Contains(snapshot.Error, "module closed") {

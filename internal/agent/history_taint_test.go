@@ -5,6 +5,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
@@ -40,7 +41,7 @@ func TestSysInputStampsHistoryLabels(t *testing.T) {
 		{Role: "user", Content: "what is Hwaas"},
 		{Role: "assistant", Content: "HwaaS is …", Labels: []string{"onyx_data"}},
 	}
-	l := newLifecycleDispatcher(nopNext{}, "next task", nil, history, Manifest{}, 1, nil)
+	l := newLifecycleDispatcher(nopNext{}, "next task", nil, history, manifest.Manifest{}, 1, nil)
 
 	result, err := l.Dispatch(context.Background(), ProcessContext{},
 		sys.Syscall{Name: callSysInput}, sys.Authorization{})
@@ -59,7 +60,7 @@ func TestSysInputStampsHistoryLabels(t *testing.T) {
 // taint the run.
 func TestSysInputUnlabeledHistoryTaintsNothing(t *testing.T) {
 	l := newLifecycleDispatcher(nopNext{}, "task", nil,
-		[]HistoryMessage{{Role: "assistant", Content: "clean"}}, Manifest{}, 1, nil)
+		[]HistoryMessage{{Role: "assistant", Content: "clean"}}, manifest.Manifest{}, 1, nil)
 	result, err := l.Dispatch(context.Background(), ProcessContext{},
 		sys.Syscall{Name: callSysInput}, sys.Authorization{})
 	if err != nil {
@@ -85,7 +86,7 @@ func TestRootHistoryFalseHidesHistory(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			m := Manifest{History: tc.flag}
+			m := manifest.Manifest{History: tc.flag}
 			hide := m.History != nil && !*m.History
 			if hide != tc.hide {
 				t.Fatalf("hideHistory = %v, want %v", hide, tc.hide)
