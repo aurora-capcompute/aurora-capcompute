@@ -70,9 +70,6 @@ func (r *Runtime) restoreSession(proj Projection, journals map[string]map[uint64
 	sort.Slice(procs, func(i, j int) bool { return procs[i].CreatedAt.Before(procs[j].CreatedAt) })
 
 	for _, sr := range procs {
-		if sr.Manifest.Program == "" {
-			sr.Manifest.Program = r.programs.DefaultID()
-		}
 		// Quarantine, never refuse to boot: a historical process whose manifest no
 		// longer validates against the compiled driver set (a decommissioned
 		// driver type) is restored verbatim — visible, auditable — and any later
@@ -86,7 +83,7 @@ func (r *Runtime) restoreSession(proj Projection, journals map[string]map[uint64
 			em = sr.Manifest
 		}
 		// Processes are always restored regardless of program registration state:
-		// programs are loaded after restore via SetPrograms, so r.programs is empty
+		// programs are added after restore via AddProgram, so r.programs is empty
 		// here. If the program is unavailable when execution is attempted, execute()
 		// will fail the process cleanly at that point (program == nil check).
 		status := sr.Status

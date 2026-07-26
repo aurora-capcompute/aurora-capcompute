@@ -44,7 +44,6 @@ func (r *Runtime) activateProcess(ctx context.Context, pid string) (*capcompute.
 		cred = r.processContextLocked(proc)
 		programID = proc.manifest.Program
 	}
-	image := r.images[programID]
 	r.mu.Unlock()
 	if proc == nil {
 		return nil, fmt.Errorf("%w: no process for pid %s", ErrNotFound, pid)
@@ -52,7 +51,10 @@ func (r *Runtime) activateProcess(ctx context.Context, pid string) (*capcompute.
 	if err := r.programBinding(proc); err != nil {
 		return nil, err
 	}
-	if image == nil {
+	// The registry holds the program's compiled image; a process whose program has
+	// been withdrawn finds nothing here and never runs again.
+	program, err := r.programs.Resolve(programID)
+	if err != nil || program.image == nil {
 		return nil, fmt.Errorf("program %q is unavailable", programID)
 	}
 
@@ -60,7 +62,7 @@ func (r *Runtime) activateProcess(ctx context.Context, pid string) (*capcompute.
 	if err != nil {
 		return nil, err
 	}
-	process, err := capcompute.NewProcess(ctx, image, capcompute.ProcessSpec[ProcessContext]{
+	process, err := capcompute.NewProcess(ctx, program.image, capcompute.ProcessSpec[ProcessContext]{
 		Entrypoint:    "run",
 		Cred:          cred,
 		Dispatcher:    chain,
@@ -82,9 +84,8 @@ func (r *Runtime) resumeProcess(ctx context.Context, process *capcompute.Process
 	if proc := r.processes[process.Cred.ProcessID]; proc != nil {
 		programID = proc.manifest.Program
 	}
-	image := r.images[programID]
 	r.mu.Unlock()
-	if image == nil {
+	if program, err := r.programs.Resolve(programID); err != nil || program.image == nil {
 		return nil, fmt.Errorf("program %q is unavailable", programID)
 	}
 	handle, err := capcompute.Resume(ctx, process)

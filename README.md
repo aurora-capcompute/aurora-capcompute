@@ -80,7 +80,7 @@ assembly is [aurora-dist](https://github.com/aurora-capcompute/aurora-dist).
 | **Subscriptions** | `Subscribe(sessionID)` streams live events (snapshots, process/task updates, journal, progress) |
 | **Capability security** | Only granted, schema‑checked syscalls are admitted; the runtime fails closed if a driver over‑advertises what it can do |
 | **Program contracts** | Each program ships a manifest (description + input/output JSON Schemas), validated at registration and on every call |
-| **Hot‑swap** | `SetPrograms` reconciles the loaded Wasm set at runtime; in‑flight processes stay bound to their original code identity |
+| **Hot‑swap** | `AddProgram` / `RemoveProgram` change the loaded Wasm set at runtime; in‑flight processes stay bound to their original code identity, and removing a program stops and ejects the ones running under it |
 
 ## Quick start (5 minutes)
 
@@ -182,13 +182,14 @@ how one syscall, one crash, and one approval each travel the chain — see
 No env vars, no files, no ports — everything is the injected struct.
 
 - **Required:** `Dispatchers`, `Log`, `Leases`, `ProcessTable`, `TaskSecret`
-  (non‑empty). `Programs` may be nil (empty registry).
+  (non‑empty). Programs are not configured: a runtime boots with an empty
+  registry and gains programs through `AddProgram` / `RemoveProgram`.
 - **Optional knobs:** `TenantID`, `InstanceID`, `EventSize` (default 32),
   `TaskTTL` (24h), `LeaseTTL` (1h), `MaxConcurrentProcesses` (16),
   `MaxResidentProcesses` (64), `MaxAbortRetries` (10),
   `ProcessMemoryPages` (4096 = 256 MiB), `ResumeQuantumTimeout` (2 min),
   `QuotaOf` (per‑tenant quotas).
-- **Key constants:** `ManifestVersion = 4`, `DefaultProgramID = "aurora-default@1"`.
+- **Key constants:** `ManifestVersion = 4`.
 
 Concrete stores (in‑memory, SQLite) live in
 [aurora-dist](https://github.com/aurora-capcompute/aurora-dist); this module's tests

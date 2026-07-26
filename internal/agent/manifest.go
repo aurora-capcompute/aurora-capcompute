@@ -209,6 +209,11 @@ func ValidateManifest(manifest Manifest, provider DispatcherProvider) (Manifest,
 	if err := validateNode(&manifest, provider); err != nil {
 		return Manifest{}, err
 	}
+	// The runtime keeps no default program — a process names the program it runs,
+	// the way every spawnable child in the tree does.
+	if manifest.Program == "" {
+		return Manifest{}, fmt.Errorf("%w: a program is required", ErrInvalid)
+	}
 	return cloneManifest(manifest), nil
 }
 

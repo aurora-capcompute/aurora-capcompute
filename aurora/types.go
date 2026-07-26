@@ -27,7 +27,8 @@ type Event = agent.Event
 type JournalEvent = agent.JournalEvent
 type ProgressEvent = agent.ProgressEvent
 type ProgramArtifact = agent.ProgramArtifact
-type ProgramInterface = agent.ProgramInterface
+type ProgramData = agent.ProgramData
+type Schema = agent.Schema
 
 // Status types
 
@@ -56,8 +57,6 @@ const (
 // Construction
 
 type Config = agent.Config
-type ProgramSource = agent.ProgramSource
-type ProgramProvider = agent.ProgramProvider
 type DispatcherProvider = agent.DispatcherProvider
 
 // Event log: the single append-only source of truth. Applications provide an
@@ -110,7 +109,6 @@ var (
 
 const (
 	DefaultTenantID   = agent.DefaultTenantID
-	DefaultProgramID  = agent.DefaultProgramID
 	ManifestVersion   = agent.ManifestVersion
 	SpawnSyscall      = agent.SpawnSyscall
 	TimerSyscall      = agent.TimerSyscall

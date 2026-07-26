@@ -161,6 +161,7 @@ func TestSpawnGrantTakesNoSettings(t *testing.T) {
 	no := false
 	onProgram := Manifest{
 		Version: ManifestVersion,
+		Program: "parent",
 		Syscalls: []Syscall{{
 			Syscall:  SpawnSyscall,
 			Programs: []Manifest{{Program: "child", History: &no, ShareCapabilities: &no}},

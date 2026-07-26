@@ -63,6 +63,6 @@ func appendMissing(capabilities []sys.Capability, extra ...sys.Capability) []sys
 }
 
 type ProgressEvent struct {
-	ProcessID string `json:"process_id"`
-	Message   string `json:"message"`
+	ProcessID string
+	Message   string
 }

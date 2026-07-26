@@ -11,7 +11,6 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/internal/sched"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/aurora-capcompute/monitor"
-	"github.com/aurora-capcompute/capcompute"
 	"github.com/aurora-capcompute/capcompute/sys"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
@@ -65,7 +64,6 @@ type HistoryMessage struct {
 // drivers, the event log, leases, and the processor's process table are supplied
 // by the application — this module ships interfaces and orchestration only.
 type Config struct {
-	Programs    ProgramProvider
 	Dispatchers DispatcherProvider
 	Log         eventlog.Log
 	Leases      Leases
@@ -128,7 +126,6 @@ type Runtime struct {
 	// do NOT use it — they must complete on shutdown to persist final state.
 	baseCtx         context.Context
 	cancel          context.CancelFunc
-	images          map[string]*capcompute.Program
 	programs        *loadedPrograms
 	scheduler       *sched.Scheduler[string, ProcessContext]
 	taints          *monitor.Taints[string]
@@ -261,10 +258,10 @@ type processState struct {
 // revision — it continues the same attempt — and activates fresh by replay,
 // since the scheduler retains only yielded processes as warm residents.
 type ProcessContext struct {
-	TenantID  string `json:"tenant_id"`
-	SessionID string `json:"session_id"`
-	ProcessID string `json:"process_id"`
-	Revision  uint64 `json:"revision"`
+	TenantID  string
+	SessionID string
+	ProcessID string
+	Revision  uint64
 }
 
 func (r ProcessContext) PID() string {
@@ -339,8 +336,8 @@ type SessionSummary struct {
 
 type SessionSnapshot struct {
 	SessionSummary
-	History   []HistoryMessage  `json:"history"`
-	Processes []ProcessSnapshot `json:"processes"`
+	History   []HistoryMessage
+	Processes []ProcessSnapshot
 }
 
 type ProcessSnapshot struct {
@@ -413,16 +410,16 @@ type JournalOutcome struct {
 }
 
 type Event struct {
-	Type string `json:"type"`
-	Data any    `json:"data"`
+	Type string
+	Data any
 }
 
 type JournalEvent struct {
-	ProcessID     string            `json:"process_id"`
-	Position      int               `json:"position"`
-	Revision      uint64            `json:"revision"`
-	Kind          journaled.Kind    `json:"kind"`
-	Syscall       string            `json:"syscall"`
-	OutcomeStatus sys.SyscallStatus `json:"outcome_status,omitempty"`
-	OutcomeSize   int               `json:"outcome_size,omitempty"`
+	ProcessID     string
+	Position      int
+	Revision      uint64
+	Kind          journaled.Kind
+	Syscall       string
+	OutcomeStatus sys.SyscallStatus
+	OutcomeSize   int
 }

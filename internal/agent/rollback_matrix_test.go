@@ -199,10 +199,6 @@ func fireRetryTimers(runtime *Runtime, processID string) {
 func newMatrixRuntime(t *testing.T, world *crashLog, disp *matrixDispatcher) *Runtime {
 	t.Helper()
 	runtime, err := NewRuntime(context.Background(), Config{
-		Programs: staticPrograms{
-			defaultID: "program@1",
-			sources:   []ProgramSource{{ID: "program@1", Wasm: buildProgram(t)}},
-		},
 		Dispatchers: disp,
 		Log:         world,
 		Leases:      newRuntimeStore(), // fresh per life: a real restart outlives lease TTLs
@@ -212,6 +208,7 @@ func newMatrixRuntime(t *testing.T, world *crashLog, disp *matrixDispatcher) *Ru
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
 	}
+	addTestProgram(t, runtime, "program@1", buildProgram(t))
 	return runtime
 }
 

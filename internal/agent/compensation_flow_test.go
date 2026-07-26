@@ -121,10 +121,6 @@ func (d *launderDispatcher) Dispatch(ctx context.Context, _ ProcessContext, sysc
 func TestCompensationCannotLaunderTaintPastRollbackSink(t *testing.T) {
 	disp := &launderDispatcher{}
 	runtime, err := NewRuntime(context.Background(), Config{
-		Programs: staticPrograms{
-			defaultID: "program@1",
-			sources:   []ProgramSource{{ID: "program@1", Wasm: buildProgram(t)}},
-		},
 		Dispatchers: launderDispatchers{d: disp},
 		Log:         newMemLog(),
 		Leases:      newRuntimeStore(),
@@ -134,6 +130,7 @@ func TestCompensationCannotLaunderTaintPastRollbackSink(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
 	}
+	addTestProgram(t, runtime, "program@1", buildProgram(t))
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

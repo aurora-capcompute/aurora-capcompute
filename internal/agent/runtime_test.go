@@ -125,9 +125,8 @@ func (s *runtimeStore) minRev2Index(processID string) int {
 func TestNewRuntimeRequiresImplementationDependencies(t *testing.T) {
 	store := newRuntimeStore()
 	dispatchers := &runtimeDispatchers{}
-	programs := staticPrograms{defaultID: "program@1", sources: []ProgramSource{{ID: "program@1", Wasm: []byte("wasm")}}}
 	base := Config{
-		Programs: programs, Dispatchers: dispatchers, Log: store.log,
+		Dispatchers: dispatchers, Log: store.log,
 		Leases: store, TaskSecret: []byte("secret"),
 	}
 	tests := []struct {
@@ -168,10 +167,6 @@ func TestRuntimePassesManifestToDispatcherProvider(t *testing.T) {
 	dispatchers := &runtimeDispatchers{}
 	store := newRuntimeStore()
 	runtime, err := NewRuntime(context.Background(), Config{
-		Programs: staticPrograms{
-			defaultID: "program@1",
-			sources:   []ProgramSource{{ID: "program@1", Wasm: buildProgram(t)}},
-		},
 		Dispatchers: dispatchers,
 		Log:         store.log,
 		Leases:      store,
@@ -181,6 +176,7 @@ func TestRuntimePassesManifestToDispatcherProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
 	}
+	addTestProgram(t, runtime, "program@1", buildProgram(t))
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -194,6 +190,7 @@ func TestRuntimePassesManifestToDispatcherProvider(t *testing.T) {
 	}
 	proc, err := runtime.CreateProcess(session.ID, "finish", Manifest{
 		Version: ManifestVersion,
+		Program: "program@1",
 		Syscalls: []Syscall{
 			{Syscall: "core.custom", Config: json.RawMessage(`{"value":2}`)},
 			{Syscall: "core.openaiApi", Hidden: true},
@@ -224,15 +221,14 @@ func TestRuntimePassesManifestToDispatcherProvider(t *testing.T) {
 	}
 }
 
-// TestRuntimeSetProgramsLifecycle boots with no program (so program runs fail), then
-// hot-registers a program via SetPrograms and drives a run through it, then removes
-// it — covering the control plane's live Program CRD add/remove path.
-func TestRuntimeSetProgramsLifecycle(t *testing.T) {
+// TestRuntimeProgramLifecycle boots with no program (so program runs fail), then
+// hot-registers one via AddProgram and drives a run through it, then removes it —
+// covering the control plane's live Program CRD add/remove path.
+func TestRuntimeProgramLifecycle(t *testing.T) {
 	wasm := buildProgram(t)
 	dispatchers := &runtimeDispatchers{}
 	store := newRuntimeStore()
 	runtime, err := NewRuntime(context.Background(), Config{
-		Programs:    nil, // boot with zero programs
 		Dispatchers: dispatchers,
 		Log:         store.log,
 		Leases:      store,
@@ -262,9 +258,7 @@ func TestRuntimeSetProgramsLifecycle(t *testing.T) {
 	}
 
 	// Hot-register the program.
-	if err := runtime.SetPrograms(context.Background(), []ProgramSource{{ID: "program@1", Wasm: wasm, Interface: testStringInterface}}); err != nil {
-		t.Fatalf("set programs: %v", err)
-	}
+	addTestProgram(t, runtime, "program@1", wasm)
 	if got := runtime.Programs(); len(got) != 1 || got[0].ID != "program@1" {
 		t.Fatalf("programs after register = %v", got)
 	}
@@ -276,6 +270,7 @@ func TestRuntimeSetProgramsLifecycle(t *testing.T) {
 	}
 	proc, err := runtime.CreateProcess(session.ID, "finish", Manifest{
 		Version:  ManifestVersion,
+		Program:  "program@1",
 		Syscalls: cognitionGrants(),
 	})
 	if err != nil {
@@ -283,18 +278,94 @@ func TestRuntimeSetProgramsLifecycle(t *testing.T) {
 	}
 	waitForStatus(t, runtime, proc.ID, ProcessCompleted)
 
-	// Re-applying the same set is a no-op; removing it leaves an empty registry.
-	if err := runtime.SetPrograms(context.Background(), []ProgramSource{{ID: "program@1", Wasm: wasm, Interface: testStringInterface}}); err != nil {
-		t.Fatalf("re-apply: %v", err)
+	// Re-adding the identical program is a no-op.
+	if err := runtime.AddProgram(context.Background(), testProgram("program@1", wasm)); err != nil {
+		t.Fatalf("re-add the identical program: %v", err)
 	}
 	if len(runtime.Programs()) != 1 {
-		t.Fatalf("re-apply changed registry: %v", runtime.Programs())
+		t.Fatalf("re-add changed registry: %v", runtime.Programs())
 	}
-	if err := runtime.SetPrograms(context.Background(), nil); err != nil {
-		t.Fatalf("clear programs: %v", err)
+
+	// A different program under the same id is refused: the id is taken, and the
+	// caller withdraws the old program first.
+	changed := testProgram("program@1", buildEchoProgram(t))
+	if err := runtime.AddProgram(context.Background(), changed); !errors.Is(err, ErrConflict) {
+		t.Fatalf("add over a taken id = %v, want ErrConflict", err)
+	}
+	if err := runtime.RemoveProgram(context.Background(), "program@1"); err != nil {
+		t.Fatalf("remove: %v", err)
 	}
 	if len(runtime.Programs()) != 0 {
 		t.Fatalf("expected empty registry after removal, got %v", runtime.Programs())
+	}
+	if err := runtime.RemoveProgram(context.Background(), "program@1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("removing an unregistered program = %v, want ErrNotFound", err)
+	}
+	if err := runtime.AddProgram(context.Background(), changed); err != nil {
+		t.Fatalf("add after removal: %v", err)
+	}
+}
+
+// TestRemoveProgramEjectsLiveProcesses: withdrawing a program settles the
+// processes running against it. A process parked on its approval is live — not
+// terminal — so removal stops and ejects it rather than leaving it waiting on
+// code the app has withdrawn, and it can neither be resumed nor retried
+// afterwards while a different program holds its name.
+func TestRemoveProgramEjectsLiveProcesses(t *testing.T) {
+	store := newRuntimeStore()
+	runtime, err := NewRuntime(context.Background(), Config{
+		Dispatchers: approvalDispatchers{},
+		Log:         store.log,
+		Leases:      store,
+		TaskSecret:  []byte("stable-secret"),
+		IDSource:    sequentialIDs(),
+	})
+	if err != nil {
+		t.Fatalf("new runtime: %v", err)
+	}
+	addTestProgram(t, runtime, "program@1", buildProgram(t))
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := runtime.Close(ctx); err != nil {
+			t.Errorf("close runtime: %v", err)
+		}
+	})
+
+	session, err := runtime.CreateSession("", nil)
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	proc, err := runtime.CreateProcess(session.ID, "do the guarded thing", Manifest{
+		Version:  ManifestVersion,
+		Program:  "program@1",
+		Syscalls: cognitionGrants("tool.y"),
+	})
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	// Parked on its approval: live, and holding a pending task.
+	waitForStatus(t, runtime, proc.ID, ProcessWaitingTask)
+
+	if err := runtime.RemoveProgram(context.Background(), "program@1"); err != nil {
+		t.Fatalf("remove program: %v", err)
+	}
+	ejected := waitForStatus(t, runtime, proc.ID, ProcessStopped)
+	if ejected.Status != ProcessStopped {
+		t.Fatalf("process after program removal = %s, want stopped", ejected.Status)
+	}
+	// It stays auditable — its journal is still readable.
+	if _, err := runtime.Journal(proc.ID); err != nil {
+		t.Fatalf("journal of an ejected process: %v", err)
+	}
+	// And it stays bound to the identity it was created from: a different program
+	// under the same name leaves it stranded.
+	changed := testProgram("program@1", buildEchoProgram(t))
+	if err := runtime.AddProgram(context.Background(), changed); err != nil {
+		t.Fatalf("add replacement: %v", err)
+	}
+	if _, err := runtime.Retry(proc.ID, RetryRestart); !errors.Is(err, ErrConflict) {
+		t.Fatalf("retry under a replaced program = %v, want ErrConflict", err)
 	}
 }
 
@@ -309,12 +380,12 @@ func TestProcessImmutablyBoundToProgramBytes(t *testing.T) {
 	proc := startCompensationProcess(t, runtime)
 	waitForStatus(t, runtime, proc.ID, ProcessFailed)
 
-	// Replace program@1: same name, different content digest.
-	if err := runtime.SetPrograms(context.Background(), []ProgramSource{
-		{ID: "program@1", Wasm: buildEchoProgram(t), Interface: testStringInterface},
-	}); err != nil {
-		t.Fatalf("set programs: %v", err)
+	// Replace program@1: same name, different content digest. A replacement is a
+	// remove followed by an add — the id is never overwritten in place.
+	if err := runtime.RemoveProgram(context.Background(), "program@1"); err != nil {
+		t.Fatalf("remove program: %v", err)
 	}
+	addTestProgram(t, runtime, "program@1", buildEchoProgram(t))
 
 	for _, mode := range []RetryMode{RetryResume, RetryRestart} {
 		_, err := runtime.Retry(proc.ID, mode)
@@ -345,33 +416,30 @@ func TestProcessImmutablyBoundToProgramBytes(t *testing.T) {
 	}
 }
 
-// TestProcessStrandedByInterfaceChange: the interface is part of a program's
-// contract, so editing it — even with the wasm byte-for-byte unchanged — is a
-// program change. A process created under the old interface is stranded: it can
+// TestProcessStrandedBySchemaChange: the declared schemas are part of a program's
+// contract, so editing one — even with the wasm byte-for-byte unchanged — is a
+// program change. A process created under the old schema is stranded: it can
 // neither resume nor restart, exactly as it would be under a bytes change.
-func TestProcessStrandedByInterfaceChange(t *testing.T) {
+func TestProcessStrandedBySchemaChange(t *testing.T) {
 	disp := &compensationDispatcher{failMidTurn: true}
 	runtime := newCompensationRuntime(t, disp)
 	proc := startCompensationProcess(t, runtime)
 	waitForStatus(t, runtime, proc.ID, ProcessFailed)
 
-	// Re-register program@1 with the SAME wasm but a different interface
-	// manifest (a reworded description is enough to change the identity).
-	same, err := runtime.programs.Source("program@1")
-	if err != nil {
-		t.Fatalf("source: %v", err)
+	// Re-register program@1 with the SAME wasm but a different output schema.
+	edited := testProgram("program@1", buildProgram(t))
+	edited.Output = json.RawMessage(`{"type":"object"}`)
+	if err := runtime.RemoveProgram(context.Background(), "program@1"); err != nil {
+		t.Fatalf("remove program: %v", err)
 	}
-	edited := json.RawMessage(`{"description":"program@1, revised contract","input":{"type":"string"},"output":{"type":"string"}}`)
-	if err := runtime.SetPrograms(context.Background(), []ProgramSource{
-		{ID: "program@1", Wasm: same.Wasm, Interface: edited},
-	}); err != nil {
-		t.Fatalf("set programs: %v", err)
+	if err := runtime.AddProgram(context.Background(), edited); err != nil {
+		t.Fatalf("add edited program: %v", err)
 	}
 
 	for _, mode := range []RetryMode{RetryResume, RetryRestart} {
 		_, err := runtime.Retry(proc.ID, mode)
 		if err == nil || !errors.Is(err, ErrConflict) {
-			t.Fatalf("retry %q under changed interface = %v, want ErrConflict", mode, err)
+			t.Fatalf("retry %q under changed schema = %v, want ErrConflict", mode, err)
 		}
 		if !strings.Contains(err.Error(), "immutable") {
 			t.Fatalf("retry %q error = %q, want the immutability law named", mode, err)
@@ -379,20 +447,49 @@ func TestProcessStrandedByInterfaceChange(t *testing.T) {
 	}
 }
 
-func TestNewRuntimeRejectsInvalidProgramWasm(t *testing.T) {
+// TestProcessSurvivesDescriptionChange: the description is outside a program's
+// identity, so re-registering the same code and schemas with reworded prose does
+// not strand a process — it can still be retried.
+func TestProcessSurvivesDescriptionChange(t *testing.T) {
+	disp := &compensationDispatcher{failMidTurn: true}
+	runtime := newCompensationRuntime(t, disp)
+	proc := startCompensationProcess(t, runtime)
+	waitForStatus(t, runtime, proc.ID, ProcessFailed)
+
+	reworded := testProgram("program@1", buildProgram(t))
+	reworded.Description = "program@1, described afresh"
+	if err := runtime.RemoveProgram(context.Background(), "program@1"); err != nil {
+		t.Fatalf("remove program: %v", err)
+	}
+	if err := runtime.AddProgram(context.Background(), reworded); err != nil {
+		t.Fatalf("add reworded program: %v", err)
+	}
+	if _, err := runtime.Retry(proc.ID, RetryRestart); err != nil {
+		t.Fatalf("retry after a description change = %v, want it allowed", err)
+	}
+}
+
+func TestAddProgramRejectsInvalidWasm(t *testing.T) {
 	store := newRuntimeStore()
-	_, err := NewRuntime(context.Background(), Config{
-		Programs: staticPrograms{
-			defaultID: "program@1",
-			sources:   []ProgramSource{{ID: "program@1", Wasm: []byte("not wasm")}},
-		},
+	runtime, err := NewRuntime(context.Background(), Config{
 		Dispatchers: &runtimeDispatchers{},
 		Log:         store.log,
 		Leases:      store,
 		TaskSecret:  []byte("stable-secret"),
 	})
-	if err == nil {
+	if err != nil {
+		t.Fatalf("new runtime: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = runtime.Close(ctx)
+	})
+	if err := runtime.AddProgram(context.Background(), testProgram("program@1", []byte("not wasm"))); err == nil {
 		t.Fatal("expected program compile error")
+	}
+	if len(runtime.Programs()) != 0 {
+		t.Fatalf("a program that failed to compile was registered: %v", runtime.Programs())
 	}
 }
 
@@ -613,10 +710,6 @@ func runField(t *testing.T, r *Runtime, id string) (parentProcessID string, atte
 func TestRuntimeCascadeResumeReusesChildRun(t *testing.T) {
 	store := newRuntimeStore()
 	runtime, err := NewRuntime(context.Background(), Config{
-		Programs: staticPrograms{
-			defaultID: "program@1",
-			sources:   []ProgramSource{{ID: "program@1", Wasm: buildProgram(t)}},
-		},
 		Dispatchers: cascadeDispatchers{},
 		Log:         store.log,
 		Leases:      store,
@@ -626,6 +719,7 @@ func TestRuntimeCascadeResumeReusesChildRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
 	}
+	addTestProgram(t, runtime, "program@1", buildProgram(t))
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -749,10 +843,6 @@ func (approvalToolDispatcher) Dispatch(_ context.Context, _ ProcessContext, sysc
 func TestRuntimeApprovalCycle(t *testing.T) {
 	store := newRuntimeStore()
 	runtime, err := NewRuntime(context.Background(), Config{
-		Programs: staticPrograms{
-			defaultID: "program@1",
-			sources:   []ProgramSource{{ID: "program@1", Wasm: buildProgram(t)}},
-		},
 		Dispatchers: approvalDispatchers{},
 		Log:         store.log,
 		Leases:      store,
@@ -762,6 +852,7 @@ func TestRuntimeApprovalCycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
 	}
+	addTestProgram(t, runtime, "program@1", buildProgram(t))
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -860,10 +951,6 @@ func (failingChildDispatcher) Dispatch(_ context.Context, _ ProcessContext, sysc
 func TestRuntimeHardSpawnFailsParentOnChildFailure(t *testing.T) {
 	store := newRuntimeStore()
 	runtime, err := NewRuntime(context.Background(), Config{
-		Programs: staticPrograms{
-			defaultID: "program@1",
-			sources:   []ProgramSource{{ID: "program@1", Wasm: buildProgram(t)}},
-		},
 		Dispatchers: failingChildDispatchers{},
 		Log:         store.log,
 		Leases:      store,
@@ -873,6 +960,7 @@ func TestRuntimeHardSpawnFailsParentOnChildFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
 	}
+	addTestProgram(t, runtime, "program@1", buildProgram(t))
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -1080,10 +1168,6 @@ func (d *cascadeResumeDispatcherImpl) Dispatch(_ context.Context, _ ProcessConte
 func TestRuntimeCascadeResumeUsesResumeModeForFailedChild(t *testing.T) {
 	store := newRuntimeStore()
 	runtime, err := NewRuntime(context.Background(), Config{
-		Programs: staticPrograms{
-			defaultID: "program@1",
-			sources:   []ProgramSource{{ID: "program@1", Wasm: buildProgram(t)}},
-		},
 		Dispatchers: &cascadeResumeDispatchers{},
 		Log:         store.log,
 		Leases:      store,
@@ -1093,6 +1177,7 @@ func TestRuntimeCascadeResumeUsesResumeModeForFailedChild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
 	}
+	addTestProgram(t, runtime, "program@1", buildProgram(t))
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -1149,10 +1234,6 @@ func TestRuntimeCascadeResumeUsesResumeModeForFailedChild(t *testing.T) {
 func TestRuntimeHardRetryForksFromBeginning(t *testing.T) {
 	store := newRuntimeStore()
 	runtime, err := NewRuntime(context.Background(), Config{
-		Programs: staticPrograms{
-			defaultID: "program@1",
-			sources:   []ProgramSource{{ID: "program@1", Wasm: buildProgram(t)}},
-		},
 		Dispatchers: &failThenSucceedDispatchers{},
 		Log:         store.log,
 		Leases:      store,
@@ -1162,6 +1243,7 @@ func TestRuntimeHardRetryForksFromBeginning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
 	}
+	addTestProgram(t, runtime, "program@1", buildProgram(t))
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -1412,10 +1494,6 @@ func newCompensationRuntime(t *testing.T, disp *compensationDispatcher) *Runtime
 	t.Helper()
 	store := newRuntimeStore()
 	runtime, err := NewRuntime(context.Background(), Config{
-		Programs: staticPrograms{
-			defaultID: "program@1",
-			sources:   []ProgramSource{{ID: "program@1", Wasm: buildProgram(t)}},
-		},
 		Dispatchers: compensationDispatchers{d: disp},
 		Log:         store.log,
 		Leases:      store,
@@ -1425,6 +1503,7 @@ func newCompensationRuntime(t *testing.T, disp *compensationDispatcher) *Runtime
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
 	}
+	addTestProgram(t, runtime, "program@1", buildProgram(t))
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

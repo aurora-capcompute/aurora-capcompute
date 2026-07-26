@@ -119,17 +119,17 @@ func TestManifestRejectsReservedSyscallNamespace(t *testing.T) {
 	}
 
 	// The two runtime-served members remain grantable.
-	if _, err := ValidateManifest(Manifest{Version: ManifestVersion, Syscalls: []Syscall{
+	if _, err := ValidateManifest(Manifest{Version: ManifestVersion, Program: "parent", Syscalls: []Syscall{
 		{Syscall: SpawnSyscall, Programs: []Manifest{{Program: "child"}}},
 	}}, provider); err != nil {
 		t.Fatalf("sys.spawn grant rejected: %v", err)
 	}
-	if _, err := ValidateManifest(Manifest{Version: ManifestVersion, Syscalls: []Syscall{
+	if _, err := ValidateManifest(Manifest{Version: ManifestVersion, Program: "parent", Syscalls: []Syscall{
 		{Syscall: TimerSyscall},
 	}}, provider); err != nil {
 		t.Fatalf("sys.timer grant rejected: %v", err)
 	}
-	if _, err := ValidateManifest(Manifest{Version: ManifestVersion, Syscalls: []Syscall{
+	if _, err := ValidateManifest(Manifest{Version: ManifestVersion, Program: "parent", Syscalls: []Syscall{
 		{Syscall: DeclassifySyscall},
 	}}, provider); err != nil {
 		t.Fatalf("sys.declassify grant rejected: %v", err)

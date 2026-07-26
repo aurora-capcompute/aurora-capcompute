@@ -138,10 +138,6 @@ func TestSpawnSeedsChildWithParentTaint(t *testing.T) {
 	newRT := func() *Runtime {
 		t.Helper()
 		runtime, err := NewRuntime(context.Background(), Config{
-			Programs: staticPrograms{
-				defaultID: "program@1",
-				sources:   []ProgramSource{{ID: "program@1", Wasm: buildProgram(t)}},
-			},
 			Dispatchers: spawnTaintDispatchers{},
 			Log:         store.log,
 			Leases:      store,
@@ -151,6 +147,7 @@ func TestSpawnSeedsChildWithParentTaint(t *testing.T) {
 		if err != nil {
 			t.Fatalf("new runtime: %v", err)
 		}
+		addTestProgram(t, runtime, "program@1", buildProgram(t))
 		return runtime
 	}
 	closeRT := func(runtime *Runtime) {

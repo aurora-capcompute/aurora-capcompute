@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -47,6 +48,16 @@ const (
 	defaultProcessMemoryPages   = 4096
 	defaultResumeQuantumTimeout = 2 * time.Minute
 )
+
+// evictionDrainTimeout bounds how long RemoveProgram waits for the processes it
+// stopped to reach a terminal state before it releases the program image
+// anyway. A driver that ignores its cancellation must not hold a withdrawal
+// hostage.
+const evictionDrainTimeout = 5 * time.Second
+
+// evictionPollInterval is how often the drain re-reads the state of the
+// processes it is waiting on.
+const evictionPollInterval = 10 * time.Millisecond
 
 // resolveGuestLimits maps the Config knobs to the processor's per-process limits:
 // zero requests the safe default, a positive value is used verbatim, and a
@@ -149,16 +160,12 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 	if len(config.TaskSecret) == 0 {
 		return nil, fmt.Errorf("%w: task secret is required", ErrInvalid)
 	}
-	programs, err := loadPrograms(ctx, config.Programs)
-	if err != nil {
-		return nil, err
-	}
 	baseCtx, cancel := context.WithCancel(context.Background())
+	var err error
 	runtime := &Runtime{
 		baseCtx:         baseCtx,
 		cancel:          cancel,
-		images:          make(map[string]*capcompute.Program),
-		programs:        programs,
+		programs:        newPrograms(),
 		taints:          monitor.NewTaints[string](),
 		log:             config.Log,
 		leases:          config.Leases,
@@ -252,20 +259,6 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		return nil, err
 	}
 
-	for _, artifact := range programs.List() {
-		source, err := programs.Source(artifact.ID)
-		if err != nil {
-			return nil, err
-		}
-		image, err := runtime.compileProgram(ctx, artifact.ID, source.Wasm)
-		if err != nil {
-			for _, opened := range runtime.images {
-				_ = opened.Close(context.Background())
-			}
-			return nil, err
-		}
-		runtime.images[artifact.ID] = image
-	}
 	return runtime, nil
 }
 
@@ -392,7 +385,7 @@ func (r *Runtime) headerFor(cred ProcessContext) journaled.Header {
 
 // compileProgram compiles a program's wasm into a compiled program. It is pure with respect
 // to runtime state, so it can be called outside the runtime mutex while
-// preparing a SetPrograms swap. The wasm engine gets the bytes' own sha256 for
+// preparing an AddProgram swap. The wasm engine gets the bytes' own sha256 for
 // integrity (not the program identity, which also covers the interface).
 func (r *Runtime) compileProgram(ctx context.Context, id string, wasm []byte) (*capcompute.Program, error) {
 	image, err := capcompute.NewProgram(ctx, capcompute.Config{
@@ -408,93 +401,139 @@ func (r *Runtime) compileProgram(ctx context.Context, id string, wasm []byte) (*
 	return image, nil
 }
 
-// SetPrograms declaratively reconciles the registered programs to the given set:
-// programs absent from the set are removed, new or changed programs are
-// (re)compiled, and unchanged programs are left running. A program counts as
-// changed when either its wasm bytes or its interface manifest differ (identity
-// covers both). It is safe to call at any time; the control plane uses it to
-// hot-load programs from Program CRDs without a restart. Compilation happens
-// outside the runtime mutex so dispatch is only briefly paused for the swap. If
-// any program fails to compile, no change is applied. Processes are immutably
-// bound to the (name, identity) they were created from: replacing or removing an
-// artifact — or editing its interface — strands its processes: retries are
-// refused and any execution attempt fails, while they remain auditable and can
-// be killed to settle their effects. The new artifact runs in new processes.
-func (r *Runtime) SetPrograms(ctx context.Context, sources []ProgramSource) error {
-	current := r.programs.digests()
-	desired := make(map[string]struct{}, len(sources))
-
-	// Load (describe + schema compile) and compile additions/replacements
-	// outside the lock; fail atomically.
-	type compiled struct {
-		record programRecord
-		image  *capcompute.Program
+// AddProgram registers one program and compiles its wasm. The id is the app's to
+// choose and it must be free: a program is never replaced in place, because
+// processes are immutably bound to the (name, identity) they were created from.
+// Re-adding the byte-identical program under the same id is a no-op, so a control
+// plane can re-assert its desired set on a ticker without disturbing anything; the
+// same id with a different identity is refused (ErrConflict) and the caller removes
+// the old program first, which settles the processes bound to it. Compilation
+// happens outside the runtime mutex, so dispatch is only briefly paused for the
+// swap.
+func (r *Runtime) AddProgram(ctx context.Context, data ProgramData) error {
+	// Preparing the program is the cheap half — interface normalization and
+	// schema compilation — and it pins the digest, so an unchanged program is
+	// settled without compiling any wasm.
+	program, err := loadProgram(data)
+	if err != nil {
+		return err
 	}
-	var fresh []compiled
-	shutdownFresh := func() {
-		for _, c := range fresh {
-			_ = c.image.Close(context.Background())
-		}
+	if existing, err := r.programs.Resolve(program.ID); err == nil && existing.Digest == program.Digest {
+		return nil
 	}
-	for _, src := range sources {
-		id := strings.TrimSpace(src.ID)
-		if id == "" || len(src.Wasm) == 0 {
-			return fmt.Errorf("%w: program id and wasm bytes are required", ErrInvalid)
-		}
-		if _, dup := desired[id]; dup {
-			return fmt.Errorf("%w: duplicate program %q", ErrInvalid, id)
-		}
-		desired[id] = struct{}{}
-		if cur, ok := current[id]; ok && cur == programIdentity(src.Wasm, src.Interface) {
-			continue // unchanged: same bytes and same interface
-		}
-		record, err := loadProgram(id, src.Wasm, src.Interface)
-		if err != nil {
-			shutdownFresh()
-			return err
-		}
-		image, err := r.compileProgram(ctx, id, record.source.Wasm)
-		if err != nil {
-			shutdownFresh()
-			return err
-		}
-		fresh = append(fresh, compiled{record: record, image: image})
+	if program.image, err = r.compileProgram(ctx, program.ID, data.SourceCode); err != nil {
+		return err
 	}
-
-	// Swap under the runtime mutex (which guards r.images), collecting the
-	// images that are being replaced or removed so they can be shut down
-	// after the lock is released.
+	added, err := r.programs.add(program)
+	if err != nil || !added {
+		_ = program.image.Close(context.Background())
+		return err
+	}
+	// A Close that raced this registration has already drained the registry, so
+	// check after publishing and undo: otherwise the image this call compiled
+	// would stay open with nothing left to close it.
 	r.mu.Lock()
-	if r.closed {
-		r.mu.Unlock()
-		shutdownFresh()
+	closed := r.closed
+	r.mu.Unlock()
+	if closed {
+		r.programs.remove(program.ID)
+		_ = program.image.Close(context.Background())
 		return fmt.Errorf("%w: runtime is closed", ErrConflict)
 	}
-	var retired []*capcompute.Program
-	for _, c := range fresh {
-		id := c.record.artifact.ID
-		if old := r.images[id]; old != nil {
-			retired = append(retired, old)
-		}
-		r.images[id] = c.image
-		r.programs.put(c.record)
+	return nil
+}
+
+// RemoveProgram unregisters a program and settles the processes bound to it: each
+// is stopped and ejected, so nothing keeps running against code the app has
+// withdrawn. They stay auditable, and they stay bound to the identity they were
+// created from — re-adding the same bytes and the same contract lets them retry,
+// while a changed program leaves them stranded (the immutability law, enforced on
+// every execution attempt).
+//
+// A process that cannot be stopped — one parked mid-rollback, which has to settle
+// its effects first — is left alone and logged. It can still never execute under a
+// changed program.
+func (r *Runtime) RemoveProgram(ctx context.Context, id string) error {
+	id = strings.TrimSpace(id)
+	removed, ok := r.programs.remove(id)
+	if !ok {
+		return fmt.Errorf("%w: program %q is not registered", ErrNotFound, id)
 	}
-	for id := range current {
-		if _, keep := desired[id]; keep {
-			continue
+	r.mu.Lock()
+	var bound []string
+	for processID, proc := range r.processes {
+		if proc.manifest.Program == id && !isTerminal(proc.status) {
+			bound = append(bound, processID)
 		}
-		if old := r.images[id]; old != nil {
-			retired = append(retired, old)
-		}
-		delete(r.images, id)
-		r.programs.remove(id)
 	}
 	r.mu.Unlock()
 
-	for _, old := range retired {
-		_ = old.Close(context.Background())
+	sort.Strings(bound)
+	for _, processID := range bound {
+		if _, err := r.Stop(processID); err != nil {
+			slog.Warn("eject process on program removal", "program", id, "process", processID, "error", err)
+		}
+	}
+	// A stop is asynchronous: it asks, the process goroutine settles. Wait for
+	// that before releasing the image, so an evicted process records the stop it
+	// was given rather than whatever the processor reports when its compiled
+	// module is closed mid-quantum. Both are terminal — closing an image under a
+	// live module is recovered by the processor, not a crash — but a process is an
+	// audit target and its final state must not turn on which of the two won.
+	r.drainProcesses(ctx, id, bound)
+	if removed.image != nil {
+		_ = removed.image.Close(context.Background())
 	}
 	return nil
+}
+
+// drainProcesses waits, bounded, for stopped processes to reach a terminal
+// state. The bound is what keeps a driver that ignores its cancellation from
+// holding a program withdrawal hostage: whatever is still unwinding when the
+// caller's context is done — or when the standing bound expires, whichever comes
+// first — is logged and left to settle on its own. It polls rather than
+// subscribing because the processes span sessions and the wait is short.
+func (r *Runtime) drainProcesses(ctx context.Context, programID string, processIDs []string) {
+	if len(processIDs) == 0 {
+		return
+	}
+	// Wall-clock, not r.now: this waits on real goroutines, and an injected test
+	// clock that never advances would wait forever.
+	expired := time.After(evictionDrainTimeout)
+	ticker := time.NewTicker(evictionPollInterval)
+	defer ticker.Stop()
+	pending := processIDs
+	for {
+		if pending = r.unsettled(pending); len(pending) == 0 {
+			return
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			slog.Warn("program withdrawal stopped waiting on unwinding processes",
+				"program", programID, "processes", pending, "error", ctx.Err())
+			return
+		case <-expired:
+			slog.Warn("program withdrawn with processes still unwinding",
+				"program", programID, "processes", pending)
+			return
+		}
+	}
+}
+
+// unsettled filters process ids down to those that have not reached a terminal
+// state (an id the runtime no longer holds counts as settled). It returns a new
+// slice rather than filtering in place, so a caller's list survives the call.
+func (r *Runtime) unsettled(processIDs []string) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	pending := make([]string, 0, len(processIDs))
+	for _, processID := range processIDs {
+		if proc := r.processes[processID]; proc != nil && !isTerminal(proc.status) {
+			pending = append(pending, processID)
+		}
+	}
+	return pending
 }
 
 // CreateSession opens a session under the tenant. An explicit name is the
@@ -593,9 +632,6 @@ func (r *Runtime) GetSession(sessionID string) (SessionSnapshot, error) {
 func (r *Runtime) CreateProcess(sessionID string, input string, manifest Manifest) (ProcessSnapshot, error) {
 	if input == "" {
 		return ProcessSnapshot{}, fmt.Errorf("%w: input is required", ErrInvalid)
-	}
-	if strings.TrimSpace(manifest.Program) == "" {
-		manifest.Program = r.programs.DefaultID()
 	}
 	manifest, err := ValidateManifest(manifest, r.dispatchers)
 	if err != nil {
@@ -1160,8 +1196,11 @@ func (r *Runtime) Close(ctx context.Context) error {
 	}
 
 	closeErrors := []error{}
-	for _, image := range r.images {
-		closeErrors = append(closeErrors, image.Close(context.Background()))
+	for _, program := range r.programs.drain() {
+		if program.image == nil {
+			continue
+		}
+		closeErrors = append(closeErrors, program.image.Close(context.Background()))
 	}
 	return errors.Join(closeErrors...)
 }

@@ -112,6 +112,7 @@ func TestValidateManifestRefusesDuplicateSyscalls(t *testing.T) {
 func TestValidateManifestValidatesTimerGrant(t *testing.T) {
 	if _, err := ValidateManifest(Manifest{
 		Version:  ManifestVersion,
+		Program:  "program@1",
 		Syscalls: []Syscall{{Syscall: TimerSyscall, Config: json.RawMessage(`{"max_duration_ms":60000}`)}},
 	}, &testDispatchers{}); err != nil {
 		t.Fatalf("timer grant rejected: %v", err)

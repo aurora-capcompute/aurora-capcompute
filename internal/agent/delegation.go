@@ -85,7 +85,7 @@ func (r *spawnRouter) Dispatch(ctx context.Context, cred ProcessContext, syscall
 }
 
 // spawnInputToString collapses the typed spawn `input` value into the canonical
-// process-input string — the inverse of the string-first rule (validateText in
+// process-input string — the inverse of the string-first rule (Schema.Validate in
 // program.go): a JSON string input carries its plain text; any other JSON value
 // carries its compact text, which the child re-parses under the same rule.
 func spawnInputToString(input json.RawMessage) (string, error) {
@@ -144,9 +144,10 @@ func (r *spawnRouter) capability() sys.Capability {
 			desc.WriteString(";")
 		}
 		desc.WriteString("\n- " + spec.Program)
-		iface, known := r.runtime.programs.Interface(spec.Program)
-		if known && iface.Description != "" {
-			desc.WriteString(": " + iface.Description)
+		program, err := r.runtime.programs.Resolve(spec.Program)
+		known := err == nil
+		if known && program.Description != "" {
+			desc.WriteString(": " + program.Description)
 		}
 		if grants := visibleGrantNames(spec); len(grants) > 0 {
 			desc.WriteString(" [can use: " + strings.Join(grants, ", ") + "]")
@@ -158,9 +159,9 @@ func (r *spawnRouter) capability() sys.Capability {
 		// then fails cleanly with "program is not registered").
 		inputSchema := json.RawMessage(`{}`)
 		if known {
-			desc.WriteString(" input=" + compactSchema(iface.Input) + " output=" + compactSchema(iface.Output))
-			if len(iface.Input) > 0 {
-				inputSchema = iface.Input
+			desc.WriteString(" input=" + compactSchema(program.Input.Document) + " output=" + compactSchema(program.Output.Document))
+			if len(program.Input.Document) > 0 {
+				inputSchema = program.Input.Document
 			}
 		}
 		branches = append(branches, spawnBranchSchema(spec.Program, inputSchema))

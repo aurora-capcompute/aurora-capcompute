@@ -13,24 +13,24 @@ import (
 // structure is derivable from duplicate positions with different revision
 // numbers.
 type SessionGraphProcess struct {
-	ProcessID       string         `json:"process_id"`
-	Input           string         `json:"input"`
-	ParentProcessID string         `json:"parent_process_id,omitempty"`
-	Status          ProcessStatus  `json:"status"`
-	Answer          string         `json:"answer,omitempty"`
-	Error           string         `json:"error,omitempty"`
-	Attempt         int            `json:"attempt"`
-	CurrentRevision uint64         `json:"current_revision"`
-	ChildProcessIDs []string       `json:"child_process_ids,omitempty"`
-	Entries         []JournalEntry `json:"entries"`
+	ProcessID       string
+	Input           string
+	ParentProcessID string
+	Status          ProcessStatus
+	Answer          string
+	Error           string
+	Attempt         int
+	CurrentRevision uint64
+	ChildProcessIDs []string
+	Entries         []JournalEntry
 }
 
 // SessionGraph projects a whole session for exploration: its processes in order, each
 // with its complete flat entry history across all revisions.
 type SessionGraph struct {
-	SessionID string                `json:"session_id"`
-	Title     string                `json:"title"`
-	Processes []SessionGraphProcess `json:"processes"`
+	SessionID string
+	Title     string
+	Processes []SessionGraphProcess
 }
 
 // SessionGraph builds the execution graph of a session by reading each process's
@@ -125,16 +125,16 @@ func (r *Runtime) SessionGraph(sessionID string) (SessionGraph, error) {
 // ProcessGraphNode is a node in the projected call graph: a process together with
 // the delegated child processes it spawned, in spawn order.
 type ProcessGraphNode struct {
-	ProcessID       string             `json:"process_id"`
-	Name            string             `json:"name,omitempty"`
-	SessionID       string             `json:"session_id"`
-	ParentProcessID string             `json:"parent_process_id,omitempty"`
-	Status          ProcessStatus      `json:"status"`
-	Attempt         int                `json:"attempt"`
-	Revision        uint64             `json:"revision"`
-	Answer          string             `json:"answer,omitempty"`
-	Error           string             `json:"error,omitempty"`
-	Children        []ProcessGraphNode `json:"children,omitempty"`
+	ProcessID       string
+	Name            string
+	SessionID       string
+	ParentProcessID string
+	Status          ProcessStatus
+	Attempt         int
+	Revision        uint64
+	Answer          string
+	Error           string
+	Children        []ProcessGraphNode
 }
 
 // CallGraph projects a process and its delegated child processes (recursively) into a
