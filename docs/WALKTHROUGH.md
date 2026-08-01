@@ -280,20 +280,45 @@ fresh revision.
 
 ## Scheduling and residency
 
-`internal/sched` decides *when* a process gets the CPU; the app decides *what*
-runs (activation — typically journal replay); the processor decides *how*
-(`Resume`). It is fair-share with strict priority bands, round-robin across
-owners inside a band, and per-owner quotas applied as **backpressure, never
-rejection**.
+`internal/sched` decides *when* a process gets the CPU. It says nothing about
+*what* runs or *how*, and reaches those through two interfaces that are its
+whole seam:
 
-Residency is virtual-actor style: a process is activated on demand, kept warm
-while it may wake again, and the least recently used idle process is deactivated
-when residency exceeds its bound. Deactivation is cheap and safe because *the
-journal, not the instance, is the durable process*.
+```go
+type Activator[ID comparable, T any] interface {
+    Activate(ctx context.Context, pid ID) (T, error)
+}
 
-Root processes are scheduler quanta. Delegated children are not — they run
-inside the parent's quantum, so a parent waiting on a child cannot consume a
-second concurrency slot and deadlock.
+type Machine[T any] interface {
+    Resume(ctx context.Context, instance T) (Result, error)
+    Release(instance T)
+}
+```
+
+`Activator` points **up** at the application — activation is journal-replay
+wiring, and only this repo can do it. `Machine` points **down** at the execution
+hardware, which capcompute is. The queue never looks inside an instance between
+the two, so it imports capcompute not at all; `internal/agent/execution.go`
+holds the runtime's implementation of both halves.
+
+Activation happens when a quantum *starts*, not when it was submitted, and that
+ordering is load-bearing: a process whose program is withdrawn while its
+submission sits in the queue must fail activation and never run.
+
+It is deliberately **not** fair-share: no priorities, no quotas, no owners.
+Submissions are first-come-first-served, bounded by `MaxConcurrent`, which caps
+live instances rather than apportioning them.
+
+There is likewise **no residency**. Every quantum activates a fresh instance and
+releases it when the quantum ends, whatever the outcome. Keeping one warm would
+put guest globals and allocator state outside the journal — across a boundary
+syscalls are supposed to be the only path through. The cost is one instantiation
+per quantum; the gain is that a cold start is the only start.
+
+Root processes are queued quanta. Delegated children are not: `Run` executes
+them off the queue, inside the parent's quantum, so a parent waiting on a child
+cannot consume a second concurrency slot and deadlock. A child inherits its
+parent's *remaining* budget — one deadline bounds a whole spawn tree.
 
 ---
 

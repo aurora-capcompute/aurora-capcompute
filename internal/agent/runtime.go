@@ -258,15 +258,12 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 	if maxConcurrent <= 0 {
 		maxConcurrent = defaultMaxConcurrentProcesses
 	}
-	runtime.scheduler, err = sched.New(sched.Config[string, ProcessContext]{
-		Activate: runtime.activateProcess,
-		Resume:   runtime.resumeProcess,
-		Release: func(process *capcompute.Process[ProcessContext]) {
-			// An instance never outlives its quantum: the journal is the durable
-			// process, so nothing is lost by closing it and nothing of the guest
-			// crosses into the next quantum.
-			_ = process.Close(context.Background())
-		},
+	runtime.scheduler, err = sched.New(sched.Config[processKey, *capcompute.Process[ProcessContext]]{
+		Activator: processActivator{runtime: runtime},
+		Machine:   processMachine{},
+		// Quanta hang off the runtime's own lifetime rather than a root the queue
+		// invents, so shutdown has one tree to cancel and not two.
+		Parent:        baseCtx,
 		MaxConcurrent: maxConcurrent,
 	})
 	if err != nil {

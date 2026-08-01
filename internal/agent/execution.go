@@ -5,9 +5,13 @@ package agent
 // each state change to the durable log and live watchers.
 //
 // Root processes are submitted to the run queue (first-come-first-served,
-// bounded by MaxConcurrentProcesses); a delegated child process
-// executes directly inside its parent's quantum — the processor's own sync-spawn
-// posture — so delegation can never deadlock the scheduler's concurrency cap.
+// bounded by MaxConcurrentProcesses); a delegated child process runs off the
+// queue, inside its parent's quantum — the processor's own sync-spawn posture —
+// so delegation can never deadlock the concurrency cap.
+//
+// This file also holds the runtime's two halves of the run queue's seam:
+// processActivator, which rebuilds a guest from its journal, and processMachine,
+// which speaks for the capcompute processor.
 
 import (
 	"context"
@@ -24,21 +28,23 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
 )
 
-// activateProcess reconstructs the guest for one process revision: it
-// assembles the revision's dispatcher chain (monitor stack, replay tape over
-// the journal, task layer, delegation routes, drivers), instantiates the
-// guest from the program's compiled image, and saves it to the process table so the
-// syscall host path can find its dispatcher. Activation is exactly
-// journal-replay wiring — the journal, not the instance, is the durable
-// process.
-func (r *Runtime) activateProcess(ctx context.Context, pid string) (*capcompute.Process[ProcessContext], error) {
+// processActivator is the application half of the run queue's seam: it
+// reconstructs the guest for one process revision. It assembles the revision's
+// dispatcher chain (monitor stack, replay tape over the journal, task layer,
+// delegation routes, drivers) and instantiates the guest from the program's
+// compiled image, so the syscall host path can find its dispatcher. Activation
+// is exactly journal-replay wiring — the journal, not the instance, is the
+// durable process — which is why the queue cannot do it and the runtime must.
+type processActivator struct{ runtime *Runtime }
+
+func (a processActivator) Activate(ctx context.Context, key processKey) (*capcompute.Process[ProcessContext], error) {
+	r := a.runtime
 	r.mu.Lock()
-	var proc *processState
-	for _, candidate := range r.processes {
-		if processPID(candidate.id, candidate.revision) == pid {
-			proc = candidate
-			break
-		}
+	proc := r.processes[key.processID]
+	if proc != nil && proc.revision != key.revision {
+		// The process has forked past the revision this quantum was submitted
+		// for; the submission is stale and must not run.
+		proc = nil
 	}
 	var cred ProcessContext
 	var programID string
@@ -48,7 +54,7 @@ func (r *Runtime) activateProcess(ctx context.Context, pid string) (*capcompute.
 	}
 	r.mu.Unlock()
 	if proc == nil {
-		return nil, fmt.Errorf("%w: no process for pid %s", errs.NotFound, pid)
+		return nil, fmt.Errorf("%w: no process for pid %s", errs.NotFound, key)
 	}
 	if err := r.programBinding(proc); err != nil {
 		return nil, err
@@ -77,23 +83,41 @@ func (r *Runtime) activateProcess(ctx context.Context, pid string) (*capcompute.
 	return process, nil
 }
 
-// resumeProcess is the scheduler's Resume seam: one quantum on the processor
-// owning the process's program.
-func (r *Runtime) resumeProcess(ctx context.Context, process *capcompute.Process[ProcessContext]) (<-chan capcompute.ResumeResult, error) {
-	r.mu.Lock()
-	var programID string
-	if proc := r.processes[process.Cred.ProcessID]; proc != nil {
-		programID = proc.manifest.Program
-	}
-	r.mu.Unlock()
-	if artifact, err := r.programs.Resolve(programID); err != nil || artifact.Image() == nil {
-		return nil, fmt.Errorf("program %q is unavailable", programID)
-	}
+// processMachine is the hardware half of the seam: it gives an activated guest
+// one quantum on the capcompute processor and closes the instance afterwards.
+// It holds no runtime state, because it needs none — capcompute *is* the
+// machine, and this type only speaks for it in the queue's vocabulary.
+type processMachine struct{}
+
+func (processMachine) Resume(ctx context.Context, process *capcompute.Process[ProcessContext]) (sched.Result, error) {
 	handle, err := capcompute.Resume(ctx, process)
 	if err != nil {
-		return nil, err
+		return sched.Result{}, err
 	}
-	return handle.Results(), nil
+	return quantumResult(<-handle.Results()), nil
+}
+
+// Release closes the instance. An instance never outlives its quantum: the
+// journal is the durable process, so nothing is lost by closing it and nothing
+// of the guest crosses into the next quantum.
+func (processMachine) Release(process *capcompute.Process[ProcessContext]) {
+	_ = process.Close(context.Background())
+}
+
+// quantumResult restates a processor outcome as a queue outcome. Output and
+// exit code are deliberately dropped: an answer is read from the journal, never
+// from the guest's return value.
+func quantumResult(result capcompute.ResumeResult) sched.Result {
+	status := sched.Failed
+	switch result.Status {
+	case capcompute.ResumeCompleted:
+		status = sched.Completed
+	case capcompute.ResumeYielded:
+		status = sched.Yielded
+	case capcompute.ResumeStopped:
+		status = sched.Stopped
+	}
+	return sched.Result{Status: status, Err: result.Err}
 }
 
 // execute drives one process attempt to a terminal-or-parked state. ctx is the
@@ -132,32 +156,33 @@ func (r *Runtime) execute(ctx context.Context, processID string) {
 	defer r.leases.Release(
 		context.Background(), r.tenantID, "process", leaseResource, r.instanceID,
 	)
-	pid := processPID(proc.id, proc.revision)
+	key := proc.key()
 	isChild := proc.parentProcessID != ""
 	deadline := proc.deadline
 	r.mu.Unlock()
 
-	var results <-chan capcompute.ResumeResult
+	var results <-chan sched.Result
 	var stop func()
-	var err error
 	if isChild {
-		// A delegated child executes inside its parent's quantum: activate and
-		// resume directly rather than competing for a scheduler slot the
-		// parent is already holding.
-		results, stop, err = r.driveDirect(ctx, pid, proc.deadline)
+		// A delegated child executes inside its parent's quantum: run it off the
+		// queue rather than competing for a slot the parent is already holding.
+		// ctx is that parent quantum, so the child inherits its remaining budget.
+		var cancel context.CancelFunc
+		results, cancel = r.scheduler.Run(ctx, key, deadline)
+		stop = cancel
 	} else {
-		results, err = r.scheduler.Submit(context.Background(), pid, deadline)
-		if err == nil {
-			stop = func() { r.scheduler.Stop(pid) }
+		submitted, err := r.scheduler.Submit(key, deadline)
+		if err != nil {
+			// Only admission can fail here; activation failures arrive as a
+			// result, on both paths alike.
+			if r.failureStatus(err) == durable.ProcessFailed {
+				r.failProcess(processID, err)
+			} else {
+				r.finish(processID, durable.ProcessInterrupted, "", err)
+			}
+			return
 		}
-	}
-	if err != nil {
-		if r.failureStatus(err) == durable.ProcessFailed {
-			r.failProcess(processID, err)
-		} else {
-			r.finish(processID, durable.ProcessInterrupted, "", err)
-		}
-		return
+		results, stop = submitted, func() { r.scheduler.Stop(key) }
 	}
 
 	r.mu.Lock()
@@ -184,7 +209,7 @@ func (r *Runtime) execute(ctx context.Context, processID string) {
 	}
 	r.mu.Unlock()
 	switch result.Status {
-	case capcompute.ResumeCompleted:
+	case sched.Completed:
 		if r.guestAborted(processID) {
 			// The guest ended with sys.abort: roll the section back and apply
 			// its retry policy instead of reading an answer.
@@ -197,14 +222,14 @@ func (r *Runtime) execute(ctx context.Context, processID string) {
 			return
 		}
 		r.finish(processID, durable.ProcessCompleted, answer, nil)
-	case capcompute.ResumeYielded:
+	case sched.Yielded:
 		tasks, taskErr := r.tasks.List(context.Background(), r.tenantID, processID)
 		if taskErr == nil && hasPendingTask(tasks) {
 			r.finish(processID, durable.ProcessWaitingTask, "", nil)
 		} else {
 			r.finish(processID, durable.ProcessYielded, "", taskErr)
 		}
-	case capcompute.ResumeStopped:
+	case sched.Stopped:
 		r.mu.Lock()
 		closing := r.closed
 		r.mu.Unlock()
@@ -229,52 +254,9 @@ func (r *Runtime) execute(ctx context.Context, processID string) {
 	}
 }
 
-// driveDirect activates and resumes a process outside the scheduler — the path
-// for delegated children, which execute inside their parent's quantum. The
-// child's context derives from the parent's, so it inherits the parent's
-// *remaining* budget rather than a fresh copy of the same duration: a spawn tree
-// is one parent split into pieces, and one deadline bounds all of it. A re-drive
-// with no parent quantum in flight (a rollback retry) falls back to the
-// process's own deadline, so a quantum is never unbounded.
-func (r *Runtime) driveDirect(parent context.Context, pid string, deadline time.Duration) (<-chan capcompute.ResumeResult, func(), error) {
-	if parent == nil {
-		parent = context.Background()
-	}
-	var (
-		ctx    context.Context
-		cancel context.CancelFunc
-	)
-	if _, inherited := parent.Deadline(); !inherited && deadline > 0 {
-		ctx, cancel = context.WithTimeout(parent, deadline)
-	} else {
-		ctx, cancel = context.WithCancel(parent)
-	}
-	process, err := r.activateProcess(ctx, pid)
-	if err != nil {
-		cancel()
-		return nil, nil, err
-	}
-	results, err := r.resumeProcess(ctx, process)
-	if err != nil {
-		cancel()
-		_ = process.Close(context.Background())
-		return nil, nil, err
-	}
-	out := make(chan capcompute.ResumeResult, 1)
-	go func() {
-		defer cancel()
-		result := <-results
-		// A direct-driven instance is per-quantum: reactivation is by replay.
-		_ = process.Close(context.Background())
-		out <- result
-	}()
-	return out, cancel, nil
-}
-
-// failureStatus maps a pre-quantum error to the process status it should
-// finish with: a scheduling conflict is an interruption (the process can be
-// re-driven); everything else — an incompatible journal, a missing program —
-// is a failure.
+// failureStatus maps an admission error to the process status it should finish
+// with: a scheduling conflict is an interruption (the process can be re-driven);
+// anything else is a failure.
 func (r *Runtime) failureStatus(err error) durable.ProcessStatus {
 	if errors.Is(err, sched.ErrAlreadyScheduled) || errors.Is(err, sched.ErrClosed) {
 		return durable.ProcessInterrupted

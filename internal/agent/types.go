@@ -10,6 +10,7 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/internal/sched"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/aurora-capcompute/monitor"
+	"github.com/aurora-capcompute/capcompute"
 	"github.com/aurora-capcompute/capcompute/sys"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
@@ -112,7 +113,7 @@ type Runtime struct {
 	baseCtx         context.Context
 	cancel          context.CancelFunc
 	programs        *program.Registry
-	scheduler       *sched.Scheduler[string, ProcessContext]
+	scheduler       *sched.Scheduler[processKey, *capcompute.Process[ProcessContext]]
 	taints          *monitor.Taints[string]
 	log             eventlog.Log
 	leases          Leases
@@ -271,6 +272,22 @@ func (r ProcessContext) taskScope() task.Scope {
 // processPID derives the processor process identity for one process revision.
 func processPID(processID string, revision uint64) string {
 	return fmt.Sprintf("%s@%d", processID, revision)
+}
+
+// processKey names one process revision, and is what the run queue is keyed by.
+// A quantum is submitted for a revision rather than a process: one that has
+// forked past the revision its queued quantum names must not run it. Keeping
+// the two fields apart (rather than the formatted pid) is what lets activation
+// find the process by map lookup instead of scanning for a matching string.
+type processKey struct {
+	processID string
+	revision  uint64
+}
+
+func (k processKey) String() string { return processPID(k.processID, k.revision) }
+
+func (p *processState) key() processKey {
+	return processKey{processID: p.id, revision: p.revision}
 }
 
 type agentInput struct {
