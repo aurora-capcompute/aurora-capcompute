@@ -246,7 +246,7 @@ func (r *spawnRouter) spawn(ctx context.Context, parent ProcessContext, spec man
 			}
 			return spawnAnswer(answer, labels...)
 		}
-		if _, err := r.runtime.Retry(childID, cascadeMode); err != nil {
+		if _, err := r.runtime.retryUnder(ctx, childID, cascadeMode); err != nil {
 			return sys.Fail(fmt.Sprintf("cascade retry child: %v", err)), nil
 		}
 		answer, labels, parked, err := r.runtime.waitForCompletion(ctx, childID, sessionID)
@@ -262,7 +262,7 @@ func (r *spawnRouter) spawn(ctx context.Context, parent ProcessContext, spec man
 	// History and capability sharing are the child program's own settings now.
 	childManifest := buildChildManifest(spec, spec.SharesCapabilities())
 	slog.Info("spawning child process in parent session", "parent", parent.ProcessID, "child", spec.Program)
-	proc, err := r.runtime.createChildProcess(parent.ProcessID, parent.SessionID, input, childManifest, spec.SharesHistory())
+	proc, err := r.runtime.createChildProcess(ctx, parent.ProcessID, parent.SessionID, input, childManifest, spec.SharesHistory())
 	if err != nil {
 		return sys.Fail(fmt.Sprintf("create child process: %v", err)), nil
 	}
@@ -335,7 +335,7 @@ func (r *Runtime) nextCascadeChild(parentProcessID string) (childID, sessionID s
 	parent.cascadeCursor++
 	child := r.processes[childID]
 	if child == nil {
-		slog.Warn("cascade child not resident; spawning fresh",
+		slog.Warn("cascade child is not a known process; spawning fresh",
 			"parent", parentProcessID,
 			"child", childID,
 			"cursor", parent.cascadeCursor-1,
@@ -358,7 +358,7 @@ func (r *Runtime) nextCascadeChild(parentProcessID string) (childID, sessionID s
 	return childID, child.sessionID, mode, false, true
 }
 
-func (r *Runtime) createChildProcess(parentProcessID string, sessionID string, input string, manifest manifest.Manifest, shareHistory bool) (ProcessSnapshot, error) {
+func (r *Runtime) createChildProcess(ctx context.Context, parentProcessID string, sessionID string, input string, manifest manifest.Manifest, shareHistory bool) (ProcessSnapshot, error) {
 	if input == "" {
 		return ProcessSnapshot{}, fmt.Errorf("%w: input is required", errs.Invalid)
 	}
@@ -459,7 +459,7 @@ func (r *Runtime) createChildProcess(parentProcessID string, sessionID string, i
 	r.mu.Unlock()
 
 	r.publish(sessionID, Event{Type: "process.updated", Data: snapshot})
-	go r.execute(processID)
+	go r.execute(ctx, processID)
 	return snapshot, nil
 }
 

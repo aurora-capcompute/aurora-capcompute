@@ -238,7 +238,7 @@ func runRollbackFlow(t *testing.T, crashAt int, failMidSection bool) matrixOutco
 			Version:  manifest.Version,
 			Program:  "program@1",
 			Syscalls: cognitionGrants("billing.charge", "billing.refund"),
-		}); err == nil {
+		}, 0); err == nil {
 			processID = proc.ID
 		}
 	}

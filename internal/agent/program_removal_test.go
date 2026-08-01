@@ -105,7 +105,7 @@ func midQuantumRuntime(t *testing.T, stoppable bool) (*Runtime, *blockingDispatc
 		Version:  manifest.Version,
 		Program:  "program@1",
 		Syscalls: cognitionGrants(),
-	})
+	}, 0)
 	if err != nil {
 		t.Fatalf("create process: %v", err)
 	}

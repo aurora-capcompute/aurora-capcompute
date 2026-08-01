@@ -1,6 +1,9 @@
 package aurora
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 type Runtime interface {
 	CreateSession(name string, tags map[string]string) (SessionSnapshot, error)
@@ -10,7 +13,7 @@ type Runtime interface {
 	AddProgram(ctx context.Context, program ProgramData) error
 	RemoveProgram(ctx context.Context, id string) error
 	GetSession(sessionID string) (SessionSnapshot, error)
-	CreateProcess(sessionID string, input string, manifest Manifest) (ProcessSnapshot, error)
+	CreateProcess(sessionID string, input string, manifest Manifest, deadline time.Duration) (ProcessSnapshot, error)
 	GetProcess(processID string) (ProcessSnapshot, error)
 	Journal(processID string) ([]JournalEntry, error)
 	JournalRevisions(processID string) (map[uint64][]JournalEntry, error)

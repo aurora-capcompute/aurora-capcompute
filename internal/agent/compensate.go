@@ -433,7 +433,7 @@ func (r *Runtime) redriveAfterFailure(processID string) bool {
 		return false
 	}
 	proc.lastFailureLength = length
-	if _, err := r.relaunchLocked(proc); err != nil {
+	if _, err := r.relaunchLocked(context.Background(), proc); err != nil {
 		slog.Warn("re-drive after failure", "process_id", processID, "error", err)
 		return false
 	}
@@ -710,7 +710,7 @@ func (r *Runtime) retrySection(processID string, forkOffset int, mode RetryMode)
 		return
 	}
 	r.forkJournalLocked(proc, forkOffset, mode)
-	if _, err := r.relaunchLocked(proc); err != nil {
+	if _, err := r.relaunchLocked(context.Background(), proc); err != nil {
 		slog.Warn("abort retry relaunch", "process_id", processID, "error", err)
 	}
 }

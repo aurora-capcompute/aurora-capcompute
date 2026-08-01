@@ -43,14 +43,13 @@ import (
 
 const (
 	defaultMaxConcurrentProcesses = 16
-	defaultMaxResidentProcesses   = 64
 	// defaultProcessMemoryPages caps a guest's linear memory at 256 MiB by
 	// default, so no single guest can walk the runtime toward the 4 GiB wasm
-	// ceiling. defaultResumeQuantumTimeout stops a guest that spins without
-	// yielding after two minutes of wall-clock. Both are host-safety floors the
+	// ceiling. defaultMaxQuantumDuration stops a guest that spins without
+	// yielding after two minutes of wall-clock. Both are host-safety bounds the
 	// distribution can raise, lower, or disable via Config.
-	defaultProcessMemoryPages   = 4096
-	defaultResumeQuantumTimeout = 2 * time.Minute
+	defaultProcessMemoryPages = 4096
+	defaultMaxQuantumDuration = 2 * time.Minute
 )
 
 // evictionDrainTimeout bounds how long RemoveProgram waits for the processes it
@@ -63,13 +62,13 @@ const evictionDrainTimeout = 5 * time.Second
 // processes it is waiting on.
 const evictionPollInterval = 10 * time.Millisecond
 
-// resolveGuestLimits maps the Config knobs to the processor's per-process limits:
+// resolveGuestLimits maps the Config knobs to the host's per-process bounds:
 // zero requests the safe default, a positive value is used verbatim, and a
-// negative value disables the limit (0 to the processor = unbounded). Keeping this
-// pure makes the "bounded by default, never accidentally unbounded" policy
-// directly testable without compiling a guest.
-func resolveGuestLimits(memoryPages int, timeout time.Duration) (uint32, time.Duration) {
-	var pages uint32
+// negative value disables the bound (0 = unbounded). Keeping this pure makes the
+// "bounded by default, never accidentally unbounded" policy directly testable
+// without compiling a guest. The returned duration is the quantum ceiling: the
+// default when a caller names no deadline, and the most any caller may ask for.
+func resolveGuestLimits(memoryPages int, maxQuantum time.Duration) (pages uint32, ceiling time.Duration) {
 	switch {
 	case memoryPages < 0:
 		pages = 0 // explicitly unbounded
@@ -78,16 +77,30 @@ func resolveGuestLimits(memoryPages int, timeout time.Duration) (uint32, time.Du
 	default:
 		pages = uint32(memoryPages)
 	}
-	var quantum time.Duration
 	switch {
-	case timeout < 0:
-		quantum = 0 // explicitly unbounded
-	case timeout == 0:
-		quantum = defaultResumeQuantumTimeout
+	case maxQuantum < 0:
+		ceiling = 0 // explicitly unbounded
+	case maxQuantum == 0:
+		ceiling = defaultMaxQuantumDuration
 	default:
-		quantum = timeout
+		ceiling = maxQuantum
 	}
-	return pages, quantum
+	return pages, ceiling
+}
+
+// clampDeadline resolves a caller's requested quantum bound against the host's.
+// The host ceiling is a bound, never a grant: a caller may ask for less than the
+// host allows and never for more, and asking for nothing takes the host's own
+// value. A host that disabled the bound (ceiling 0) honours the request
+// verbatim, since there is nothing to clamp to.
+func (r *Runtime) clampDeadline(requested time.Duration) time.Duration {
+	if requested <= 0 {
+		return r.quantumCeiling
+	}
+	if r.quantumCeiling > 0 && requested > r.quantumCeiling {
+		return r.quantumCeiling
+	}
+	return requested
 }
 
 // reconcileGrants fails closed when the dispatcher provider advertises a
@@ -187,7 +200,7 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		maxAbortRetries: config.MaxAbortRetries,
 		dispatchers:     config.Dispatchers,
 	}
-	runtime.memoryPages, runtime.resumeTimeout = resolveGuestLimits(config.ProcessMemoryPages, config.ResumeQuantumTimeout)
+	runtime.memoryPages, runtime.quantumCeiling = resolveGuestLimits(config.ProcessMemoryPages, config.MaxQuantumDuration)
 	if runtime.tenantID == "" {
 		runtime.tenantID = DefaultTenantID
 	}
@@ -245,19 +258,16 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 	if maxConcurrent <= 0 {
 		maxConcurrent = defaultMaxConcurrentProcesses
 	}
-	maxResident := config.MaxResidentProcesses
-	if maxResident <= 0 {
-		maxResident = defaultMaxResidentProcesses
-	}
 	runtime.scheduler, err = sched.New(sched.Config[string, ProcessContext]{
 		Activate: runtime.activateProcess,
 		Resume:   runtime.resumeProcess,
-		Deactivate: func(pid string, process *capcompute.Process[ProcessContext]) {
+		Release: func(process *capcompute.Process[ProcessContext]) {
+			// An instance never outlives its quantum: the journal is the durable
+			// process, so nothing is lost by closing it and nothing of the guest
+			// crosses into the next quantum.
 			_ = process.Close(context.Background())
 		},
-		QuotaOf:       config.QuotaOf,
 		MaxConcurrent: maxConcurrent,
-		MaxResident:   maxResident,
 	})
 	if err != nil {
 		return nil, err
@@ -628,7 +638,12 @@ func (r *Runtime) GetSession(sessionID string) (SessionSnapshot, error) {
 	return r.sessionSnapshotLocked(session), nil
 }
 
-func (r *Runtime) CreateProcess(sessionID string, input string, spec manifest.Manifest) (ProcessSnapshot, error) {
+// CreateProcess starts a process on a session. deadline bounds each of its
+// quanta — the guest's own uninterrupted compute between syscalls, and anything
+// it delegates inside that quantum. Zero takes the host default; anything above
+// the host ceiling is clamped down to it, so a caller can only ever ask for less
+// than the host allows.
+func (r *Runtime) CreateProcess(sessionID string, input string, spec manifest.Manifest, deadline time.Duration) (ProcessSnapshot, error) {
 	if input == "" {
 		return ProcessSnapshot{}, fmt.Errorf("%w: input is required", errs.Invalid)
 	}
@@ -684,6 +699,7 @@ func (r *Runtime) CreateProcess(sessionID string, input string, spec manifest.Ma
 		manifest:      spec,
 		revision:      1,
 		programDigest: artifact.Digest,
+		deadline:      r.clampDeadline(deadline),
 		// A root manifest with history:false opts out of session-history sharing —
 		// each run sees only its own input and inherits no cross-run taint. Reuses
 		// the hideHistory delivery gate (and its persistence).
@@ -712,7 +728,7 @@ func (r *Runtime) CreateProcess(sessionID string, input string, spec manifest.Ma
 	r.mu.Unlock()
 
 	r.publish(sessionID, Event{Type: "process.updated", Data: snapshot})
-	go r.execute(processID)
+	go r.execute(context.Background(), processID)
 	return snapshot, nil
 }
 
@@ -884,7 +900,17 @@ func (r *Runtime) Stop(processID string) (ProcessSnapshot, error) {
 	return snapshot, nil
 }
 
+// Retry re-drives a process on a fresh quantum of its own.
 func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, error) {
+	return r.retryUnder(context.Background(), processID, mode)
+}
+
+// retryUnder is Retry with the quantum context of a parent that is delegating to
+// this process: the cascade path re-drives a child from inside the parent's
+// quantum, and the child must inherit its remaining budget rather than start a
+// fresh one. A host-initiated retry passes context.Background() and the process
+// falls back to its own deadline.
+func (r *Runtime) retryUnder(ctx context.Context, processID string, mode RetryMode) (ProcessSnapshot, error) {
 	if mode != RetryResume && mode != RetryRestart {
 		return ProcessSnapshot{}, fmt.Errorf("%w: retry mode must be resume or restart", errs.Invalid)
 	}
@@ -1005,7 +1031,7 @@ func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, erro
 		// re-driven from the recorded prefix.
 		proc.resumeCascade()
 	}
-	return r.relaunchLocked(proc)
+	return r.relaunchLocked(context.Background(), proc)
 }
 
 // spawnSettleLocked launches a rollback settlement off-lock: it marks the
@@ -1040,7 +1066,7 @@ func (r *Runtime) spawnSettleLocked(proc *processState, status durable.ProcessSt
 // relaunchLocked resets a process for a fresh quantum and starts it: queued,
 // attempt bumped, terminal fields cleared, its session made active, and the
 // transition appended and published. Called with r.mu held; unlocks it.
-func (r *Runtime) relaunchLocked(proc *processState) (ProcessSnapshot, error) {
+func (r *Runtime) relaunchLocked(ctx context.Context, proc *processState) (ProcessSnapshot, error) {
 	// Refuse to enroll a new quantum once shutdown has begun: Close sets closed
 	// under r.mu then waits on r.wg, so a Retry/ResolveTask/child-finish racing
 	// Close must not wg.Add after the counter may already be draining (a reuse of
@@ -1071,7 +1097,7 @@ func (r *Runtime) relaunchLocked(proc *processState) (ProcessSnapshot, error) {
 	r.mu.Unlock()
 
 	r.publish(sessionID, Event{Type: "process.updated", Data: snapshot})
-	go r.execute(processID)
+	go r.execute(ctx, processID)
 	return snapshot, nil
 }
 

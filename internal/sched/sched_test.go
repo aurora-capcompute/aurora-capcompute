@@ -26,10 +26,10 @@ type quantum struct {
 // harness fakes the app side of the seam: activation is recorded, resumes
 // register on a channel and block until the test resolves them.
 type harness struct {
-	mu            sync.Mutex
-	activations   map[string]int
-	deactivations []string
-	running       chan quantum
+	mu          sync.Mutex
+	activations map[string]int
+	releases    []string // pids released, in order
+	running     chan quantum
 }
 
 func newHarness() *harness {
@@ -61,9 +61,9 @@ func (h *harness) config() sched.Config[string, schedPID] {
 			h.running <- started
 			return results, nil
 		},
-		Deactivate: func(pid string, _ *capcompute.Process[schedPID]) {
+		Release: func(process *capcompute.Process[schedPID]) {
 			h.mu.Lock()
-			h.deactivations = append(h.deactivations, pid)
+			h.releases = append(h.releases, process.Cred.PID())
 			h.mu.Unlock()
 		},
 	}
@@ -86,10 +86,10 @@ func (h *harness) activationsOf(pid string) int {
 	return h.activations[pid]
 }
 
-func (h *harness) deactivated() []string {
+func (h *harness) released() []string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return append([]string(nil), h.deactivations...)
+	return append([]string(nil), h.releases...)
 }
 
 func completed() capcompute.ResumeResult {
@@ -99,7 +99,6 @@ func completed() capcompute.ResumeResult {
 func yielded() capcompute.ResumeResult {
 	return capcompute.ResumeResult{Status: capcompute.ResumeYielded}
 }
-
 func await(t *testing.T, results <-chan capcompute.ResumeResult) capcompute.ResumeResult {
 	t.Helper()
 	select {
@@ -111,6 +110,7 @@ func await(t *testing.T, results <-chan capcompute.ResumeResult) capcompute.Resu
 	}
 }
 
+// One quantum end to end: activate, resume, deliver, release.
 func TestQuantumLifecycle(t *testing.T) {
 	h := newHarness()
 	scheduler, err := sched.New(h.config())
@@ -119,27 +119,27 @@ func TestQuantumLifecycle(t *testing.T) {
 	}
 	defer scheduler.Close()
 
-	results, err := scheduler.Submit(context.Background(), "p1", "acme", sched.Normal)
+	results, err := scheduler.Submit(context.Background(), "p1", 0)
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
-	h.next(t).done <- completed()
-	if result := await(t, results); result.Status != capcompute.ResumeCompleted {
-		t.Fatalf("result = %+v", result)
+	started := h.next(t)
+	started.done <- completed()
+	if got := await(t, results).Status; got != capcompute.ResumeCompleted {
+		t.Fatalf("status = %s, want completed", got)
 	}
 	if h.activationsOf("p1") != 1 {
 		t.Fatalf("activations = %d, want 1", h.activationsOf("p1"))
 	}
-	// A terminated run deactivates immediately — the journal is the process.
-	if got := h.deactivated(); len(got) != 1 || got[0] != "p1" {
-		t.Fatalf("deactivations = %v, want [p1]", got)
-	}
-	if scheduler.Resident() != 0 {
-		t.Fatalf("resident = %d, want 0", scheduler.Resident())
+	if released := h.released(); len(released) != 1 || released[0] != "p1" {
+		t.Fatalf("released = %v, want [p1]", released)
 	}
 }
 
-func TestFairShareAcrossOwners(t *testing.T) {
+// There is no residency: a process that yields is not kept warm, so its next
+// quantum activates a fresh instance. This is the law that makes guest state
+// unable to cross a quantum boundary — the journal is the only thing that does.
+func TestEveryQuantumGetsAFreshInstance(t *testing.T) {
 	h := newHarness()
 	scheduler, err := sched.New(h.config())
 	if err != nil {
@@ -147,32 +147,27 @@ func TestFairShareAcrossOwners(t *testing.T) {
 	}
 	defer scheduler.Close()
 
-	// Hold the single slot so the queue builds up in submission order:
-	// three for acme, one each for beta and gamma.
-	blockerResults, _ := scheduler.Submit(context.Background(), "blocker", "acme", sched.Normal)
-	blocker := h.next(t)
-	for _, submission := range []struct{ pid, owner string }{
-		{"a1", "acme"}, {"a2", "acme"}, {"a3", "acme"}, {"b1", "beta"}, {"c1", "gamma"},
-	} {
-		if _, err := scheduler.Submit(context.Background(), submission.pid, submission.owner, sched.Normal); err != nil {
-			t.Fatalf("submit %s: %v", submission.pid, err)
+	for attempt := 1; attempt <= 2; attempt++ {
+		results, err := scheduler.Submit(context.Background(), "p1", 0)
+		if err != nil {
+			t.Fatalf("submit %d: %v", attempt, err)
 		}
-	}
-	blocker.done <- completed()
-	await(t, blockerResults)
-
-	// Round-robin across owners, FIFO within: not a1,a2,a3 first.
-	want := []string{"a1", "b1", "c1", "a2", "a3"}
-	for _, expected := range want {
 		started := h.next(t)
-		if started.pid != expected {
-			t.Fatalf("run order got %s, want %s (fair share violated)", started.pid, expected)
+		started.done <- yielded()
+		await(t, results)
+		if got := h.activationsOf("p1"); got != attempt {
+			t.Fatalf("after quantum %d: activations = %d, want %d (a yield must not keep an instance warm)", attempt, got, attempt)
 		}
-		started.done <- completed()
+		if got := len(h.released()); got != attempt {
+			t.Fatalf("after quantum %d: releases = %d, want %d (an instance must not outlive its quantum)", attempt, got, attempt)
+		}
 	}
 }
 
-func TestPriorityBandsAreStrict(t *testing.T) {
+// The deadline bounds the quantum once it starts, and surfaces as a stopped
+// result carrying context.DeadlineExceeded — which the runtime above reads to
+// tell "ran out of time" (resumable) from "was told to stop" (an abort).
+func TestDeadlineBoundsTheQuantum(t *testing.T) {
 	h := newHarness()
 	scheduler, err := sched.New(h.config())
 	if err != nil {
@@ -180,112 +175,76 @@ func TestPriorityBandsAreStrict(t *testing.T) {
 	}
 	defer scheduler.Close()
 
-	blockerResults, _ := scheduler.Submit(context.Background(), "blocker", "acme", sched.Normal)
+	results, err := scheduler.Submit(context.Background(), "p1", 50*time.Millisecond)
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	h.next(t) // never finished: the deadline must end it
+	result := await(t, results)
+	if result.Status != capcompute.ResumeStopped {
+		t.Fatalf("status = %s, want stopped", result.Status)
+	}
+	if !errors.Is(result.Err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want context.DeadlineExceeded", result.Err)
+	}
+	if released := h.released(); len(released) != 1 {
+		t.Fatalf("released = %v, want the instance released after a deadline abort", released)
+	}
+}
+
+// Queue time is not charged against a quantum's deadline: the clock starts when
+// the guest does. A submission that waits behind a blocker still gets its full
+// budget.
+func TestDeadlineExcludesQueueTime(t *testing.T) {
+	h := newHarness()
+	scheduler, err := sched.New(h.config())
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	defer scheduler.Close()
+
+	blockerResults, _ := scheduler.Submit(context.Background(), "blocker", 0)
 	blocker := h.next(t)
-	scheduler.Submit(context.Background(), "low", "acme", sched.Low)
-	scheduler.Submit(context.Background(), "normal", "acme", sched.Normal)
-	scheduler.Submit(context.Background(), "high", "acme", sched.High)
+	queuedResults, _ := scheduler.Submit(context.Background(), "queued", time.Minute)
+
+	// Hold the slot well past a short budget, then let the queued work run.
+	time.Sleep(100 * time.Millisecond)
 	blocker.done <- completed()
 	await(t, blockerResults)
 
-	for _, expected := range []string{"high", "normal", "low"} {
-		started := h.next(t)
-		if started.pid != expected {
-			t.Fatalf("run order got %s, want %s (priority violated)", started.pid, expected)
-		}
-		started.done <- completed()
+	started := h.next(t)
+	if deadline, ok := started.ctx.Deadline(); !ok || time.Until(deadline) < 30*time.Second {
+		t.Fatalf("queued quantum began with %v remaining, want its full budget", time.Until(deadline))
 	}
+	started.done <- completed()
+	await(t, queuedResults)
 }
 
-func TestOwnerQuotaIsBackpressure(t *testing.T) {
+// Submissions run in submission order — first come, first served, with no
+// priority or owner fairness to reorder them.
+func TestQueueIsFIFO(t *testing.T) {
 	h := newHarness()
-	config := h.config()
-	config.MaxConcurrent = 2
-	config.QuotaOf = func(owner string) sched.Quota {
-		if owner == "acme" {
-			return sched.Quota{MaxConcurrent: 1}
-		}
-		return sched.Quota{}
-	}
-	scheduler, err := sched.New(config)
+	scheduler, err := sched.New(h.config()) // MaxConcurrent defaults to 1
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
 	defer scheduler.Close()
 
-	scheduler.Submit(context.Background(), "a1", "acme", sched.Normal)
-	first := h.next(t)
-	if first.pid != "a1" {
-		t.Fatalf("first quantum = %s", first.pid)
-	}
-
-	// acme is at quota: a2 must wait even though a slot is free; beta rides it.
-	a2Results, _ := scheduler.Submit(context.Background(), "a2", "acme", sched.Normal)
-	scheduler.Submit(context.Background(), "b1", "beta", sched.Normal)
-	second := h.next(t)
-	if second.pid != "b1" {
-		t.Fatalf("free slot went to %s, want b1 (quota not enforced)", second.pid)
-	}
-	select {
-	case started := <-h.running:
-		t.Fatalf("quantum %s started past acme's quota", started.pid)
-	case <-time.After(50 * time.Millisecond):
-	}
-
-	// a1 finishing releases acme's quota; a2 runs.
-	first.done <- completed()
-	third := h.next(t)
-	if third.pid != "a2" {
-		t.Fatalf("after release got %s, want a2", third.pid)
-	}
-	second.done <- completed()
-	third.done <- completed()
-	await(t, a2Results)
-}
-
-func TestVirtualActorEvictionAndReactivation(t *testing.T) {
-	h := newHarness()
-	config := h.config()
-	config.MaxResident = 1
-	scheduler, err := sched.New(config)
-	if err != nil {
-		t.Fatalf("new: %v", err)
-	}
-	defer scheduler.Close()
-
-	run := func(pid string, result capcompute.ResumeResult) {
-		t.Helper()
-		results, err := scheduler.Submit(context.Background(), pid, "acme", sched.Normal)
+	var pending []<-chan capcompute.ResumeResult
+	for _, pid := range []string{"first", "second", "third"} {
+		results, err := scheduler.Submit(context.Background(), pid, 0)
 		if err != nil {
 			t.Fatalf("submit %s: %v", pid, err)
 		}
-		h.next(t).done <- result
-		await(t, results)
+		pending = append(pending, results)
 	}
-
-	// p1 yields: it stays warm, waiting to wake again.
-	run("p1", yielded())
-	if scheduler.Resident() != 1 {
-		t.Fatalf("resident = %d, want 1", scheduler.Resident())
-	}
-
-	// p2 yields too: residency overflows and idle p1 is evicted, LRU-first.
-	run("p2", yielded())
-	if got := h.deactivated(); len(got) != 1 || got[0] != "p1" {
-		t.Fatalf("deactivations = %v, want [p1]", got)
-	}
-	if scheduler.Resident() != 1 {
-		t.Fatalf("resident = %d, want 1", scheduler.Resident())
-	}
-
-	// Waking p1 re-activates it from its journal; warm p2 is reused as-is.
-	run("p1", completed())
-	if h.activationsOf("p1") != 2 {
-		t.Fatalf("p1 activations = %d, want 2 (reactivation)", h.activationsOf("p1"))
-	}
-	run("p2", completed())
-	if h.activationsOf("p2") != 1 {
-		t.Fatalf("p2 activations = %d, want 1 (stayed warm)", h.activationsOf("p2"))
+	for i, want := range []string{"first", "second", "third"} {
+		started := h.next(t)
+		if started.pid != want {
+			t.Fatalf("quantum %d ran %q, want %q", i, started.pid, want)
+		}
+		started.done <- completed()
+		await(t, pending[i])
 	}
 }
 
@@ -297,15 +256,15 @@ func TestDuplicateSubmitRefused(t *testing.T) {
 	}
 	defer scheduler.Close()
 
-	results, _ := scheduler.Submit(context.Background(), "p1", "acme", sched.Normal)
-	if _, err := scheduler.Submit(context.Background(), "p1", "acme", sched.Normal); !errors.Is(err, sched.ErrAlreadyScheduled) {
+	results, _ := scheduler.Submit(context.Background(), "p1", 0)
+	if _, err := scheduler.Submit(context.Background(), "p1", 0); !errors.Is(err, sched.ErrAlreadyScheduled) {
 		t.Fatalf("duplicate submit err = %v, want ErrAlreadyScheduled", err)
 	}
 	h.next(t).done <- completed()
 	await(t, results)
 
 	// After the quantum finishes the PID is submittable again.
-	if _, err := scheduler.Submit(context.Background(), "p1", "acme", sched.Normal); err != nil {
+	if _, err := scheduler.Submit(context.Background(), "p1", 0); err != nil {
 		t.Fatalf("resubmit: %v", err)
 	}
 	h.next(t).done <- completed()
@@ -318,9 +277,9 @@ func TestCloseStopsQueuedWork(t *testing.T) {
 		t.Fatalf("new: %v", err)
 	}
 
-	blockerResults, _ := scheduler.Submit(context.Background(), "blocker", "acme", sched.Normal)
+	blockerResults, _ := scheduler.Submit(context.Background(), "blocker", 0)
 	blocker := h.next(t)
-	queuedResults, _ := scheduler.Submit(context.Background(), "queued", "acme", sched.Normal)
+	queuedResults, _ := scheduler.Submit(context.Background(), "queued", 0)
 
 	closed := make(chan struct{})
 	go func() {
@@ -334,12 +293,13 @@ func TestCloseStopsQueuedWork(t *testing.T) {
 	await(t, blockerResults)
 	<-closed
 
-	if _, err := scheduler.Submit(context.Background(), "p2", "acme", sched.Normal); !errors.Is(err, sched.ErrClosed) {
+	if _, err := scheduler.Submit(context.Background(), "p2", 0); !errors.Is(err, sched.ErrClosed) {
 		t.Fatalf("submit after close err = %v, want ErrClosed", err)
 	}
-	// The blocker yielded warm; Close deactivated it on the way out.
-	if got := h.deactivated(); len(got) != 1 || got[0] != "blocker" {
-		t.Fatalf("deactivations = %v, want [blocker]", got)
+	// The blocker's own quantum ended, which released its instance; Close waited
+	// for that before returning, so nothing is left running behind it.
+	if got := h.released(); len(got) != 1 || got[0] != "blocker" {
+		t.Fatalf("released = %v, want [blocker]", got)
 	}
 }
 
@@ -351,9 +311,9 @@ func TestStopDequeuesQueuedWork(t *testing.T) {
 	}
 	defer scheduler.Close()
 
-	blockerResults, _ := scheduler.Submit(context.Background(), "blocker", "acme", sched.Normal)
+	blockerResults, _ := scheduler.Submit(context.Background(), "blocker", 0)
 	blocker := h.next(t)
-	queuedResults, _ := scheduler.Submit(context.Background(), "queued", "acme", sched.Normal)
+	queuedResults, _ := scheduler.Submit(context.Background(), "queued", 0)
 
 	if !scheduler.Stop("queued") {
 		t.Fatal("Stop(queued) = false")
@@ -371,7 +331,7 @@ func TestStopDequeuesQueuedWork(t *testing.T) {
 		t.Fatal("dequeued work was activated")
 	}
 	// The stopped PID is submittable again.
-	if _, err := scheduler.Submit(context.Background(), "queued", "acme", sched.Normal); err != nil {
+	if _, err := scheduler.Submit(context.Background(), "queued", 0); err != nil {
 		t.Fatalf("resubmit after stop: %v", err)
 	}
 	h.next(t).done <- completed()
@@ -385,7 +345,7 @@ func TestStopCancelsRunningQuantum(t *testing.T) {
 	}
 	defer scheduler.Close()
 
-	results, _ := scheduler.Submit(context.Background(), "p1", "acme", sched.Normal)
+	results, _ := scheduler.Submit(context.Background(), "p1", 0)
 	h.next(t) // running, never finished by the test
 	if !scheduler.Stop("p1") {
 		t.Fatal("Stop(p1) = false")
@@ -408,9 +368,9 @@ func TestQuantumContextOutlivesItsTrigger(t *testing.T) {
 	defer scheduler.Close()
 
 	submitCtx, cancelSubmit := context.WithCancel(context.Background())
-	blockerResults, _ := scheduler.Submit(submitCtx, "blocker", "acme", sched.Normal)
+	blockerResults, _ := scheduler.Submit(submitCtx, "blocker", 0)
 	blocker := h.next(t)
-	queuedResults, _ := scheduler.Submit(submitCtx, "queued", "acme", sched.Normal)
+	queuedResults, _ := scheduler.Submit(submitCtx, "queued", 0)
 	cancelSubmit() // the submitter goes away; its work must not
 
 	blocker.done <- completed()

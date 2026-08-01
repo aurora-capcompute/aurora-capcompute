@@ -20,6 +20,8 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 )
 
+const DefaultTenantID = "local"
+
 type RetryMode string
 
 const (
@@ -68,19 +70,12 @@ type Config struct {
 	// runtime (0 = a default of 16). Delegated child processes execute inside their
 	// parent's quantum and are not counted.
 	MaxConcurrentProcesses int
-	// MaxResidentProcesses bounds warm (yielded but activated) guest instances;
-	// least-recently-used instances are deactivated past it and reactivate by
-	// journal replay (0 = a default of 64).
-	MaxResidentProcesses int
 	// MaxAbortRetries bounds how many rollbacks a process gets before a
 	// sys.abort retry is refused and the process finishes as compensated
 	// (0 = a default of 10) — the guard against a guest that aborts forever.
 	// The budget counts rollback cycles (revisions minted), not quanta: crash
 	// re-drives and approval parks never spend it.
 	MaxAbortRetries int
-	// QuotaOf reports a tenant's scheduling quota. Nil means unlimited.
-	QuotaOf func(tenant string) sched.Quota
-
 	// NonIdempotentSyscalls names capabilities whose re-execution is unsafe (a
 	// second POST charges twice; a second delete errors). On crash-resume the
 	// runtime meets an open intent — an effect journaled but with no recorded
@@ -97,13 +92,15 @@ type Config struct {
 	// host memory. Set a negative value to disable the cap (unbounded — a guest
 	// may then grow to the wasm 4 GiB ceiling; not recommended in production).
 	ProcessMemoryPages int
-	// ResumeQuantumTimeout bounds one guest quantum's wall-clock time (0 = a
-	// default of 2 minutes). A guest still running at the deadline is stopped,
-	// so an infinite loop cannot hold a scheduler slot forever. Syscalls that
-	// wait on the outside world yield (they do not spin), so this bounds only a
-	// guest's own uninterrupted compute between yields; a stopped quantum
-	// re-drives deterministically by replay. Set a negative value to disable it.
-	ResumeQuantumTimeout time.Duration
+	// MaxQuantumDuration is the host bound on one guest quantum's wall-clock
+	// time: both the default when a caller names none, and the ceiling a caller
+	// may not exceed (0 = a default of 2 minutes). A guest still running at the
+	// deadline is stopped, so an infinite loop cannot hold a slot forever.
+	// Syscalls that wait on the outside world yield (they do not spin), so this
+	// bounds only a guest's own uninterrupted compute between yields; a process
+	// stopped by the deadline is interrupted, not failed, and re-drives
+	// deterministically by replay. Set a negative value to disable it.
+	MaxQuantumDuration time.Duration
 }
 
 type Runtime struct {
@@ -134,7 +131,7 @@ type Runtime struct {
 	leaseTTL        time.Duration
 	maxAbortRetries int
 	memoryPages     uint32
-	resumeTimeout   time.Duration
+	quantumCeiling  time.Duration
 	dispatchers     DispatcherProvider
 	factory         internalhost.Factory[string, ProcessContext]
 	wg              sync.WaitGroup
@@ -183,6 +180,11 @@ type processState struct {
 	// quantum is in flight.
 	stop          func()
 	stopRequested bool
+	// deadline bounds each of this process's quanta, chosen at CreateProcess and
+	// clamped to the host ceiling. It is runtime policy, not process history:
+	// deliberately not journaled, so a process restored after a host restart
+	// falls back to the host default — which the ceiling bounds either way.
+	deadline      time.Duration
 	manifest      manifest.Manifest
 	revision      uint64
 	programDigest string
@@ -244,7 +246,7 @@ type processState struct {
 // are distinct processes, so a forked retry (a rollback's re-run, a restart)
 // can never resume a stale instance. A plain resume deliberately keeps its
 // revision — it continues the same attempt — and activates fresh by replay,
-// since the scheduler retains only yielded processes as warm residents.
+// since every quantum starts on a fresh instance.
 type ProcessContext struct {
 	TenantID  string
 	SessionID string

@@ -1,7 +1,6 @@
 package aurora
 
 import (
-	"github.com/aurora-capcompute/aurora-capcompute/internal/sched"
 	"github.com/aurora-capcompute/capcompute/sys"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent"
@@ -75,13 +74,9 @@ type LogScope = eventlog.Scope
 type Leases = agent.Leases
 type ProcessContext = agent.ProcessContext
 
-// Quota bounds one tenant's concurrent process quanta (see Config.QuotaOf).
-type Quota = sched.Quota
-
 // Task types
 
 type TaskScope = task.Scope
-type TaskRecord = task.Record
 type TaskState = sys.Decision
 type Resolution = sys.Authorization
 

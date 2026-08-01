@@ -4,8 +4,8 @@ package agent
 // finishing path, and the event appends plus subscriber publishing that surface
 // each state change to the durable log and live watchers.
 //
-// Root processes are submitted to the processor's fair-share scheduler (per-tenant
-// round-robin, quotas, virtual-actor residency); a delegated child process
+// Root processes are submitted to the run queue (first-come-first-served,
+// bounded by MaxConcurrentProcesses); a delegated child process
 // executes directly inside its parent's quantum — the processor's own sync-spawn
 // posture — so delegation can never deadlock the scheduler's concurrency cap.
 
@@ -65,10 +65,9 @@ func (r *Runtime) activateProcess(ctx context.Context, pid string) (*capcompute.
 		return nil, err
 	}
 	process, err := capcompute.NewProcess(ctx, artifact.Image(), capcompute.ProcessSpec[ProcessContext]{
-		Entrypoint:    "run",
-		Cred:          cred,
-		Dispatcher:    chain,
-		ResumeTimeout: r.resumeTimeout,
+		Entrypoint: "run",
+		Cred:       cred,
+		Dispatcher: chain,
 		// The guest fetches its input via the sys.input syscall (served by
 		// the lifecycle dispatcher), so no entrypoint input is supplied here.
 	})
@@ -97,8 +96,12 @@ func (r *Runtime) resumeProcess(ctx context.Context, process *capcompute.Process
 	return handle.Results(), nil
 }
 
-// execute drives one process attempt to a terminal-or-parked state.
-func (r *Runtime) execute(processID string) {
+// execute drives one process attempt to a terminal-or-parked state. ctx is the
+// quantum context of the parent that is delegating to this process; it is used
+// only on the delegated-child path, where the child must run inside its parent's
+// remaining budget. A root ignores it — the scheduler supplies the quantum
+// context — so root callers pass context.Background().
+func (r *Runtime) execute(ctx context.Context, processID string) {
 	defer r.wg.Done()
 
 	r.mu.Lock()
@@ -131,7 +134,7 @@ func (r *Runtime) execute(processID string) {
 	)
 	pid := processPID(proc.id, proc.revision)
 	isChild := proc.parentProcessID != ""
-	tenantID := r.tenantID
+	deadline := proc.deadline
 	r.mu.Unlock()
 
 	var results <-chan capcompute.ResumeResult
@@ -141,9 +144,9 @@ func (r *Runtime) execute(processID string) {
 		// A delegated child executes inside its parent's quantum: activate and
 		// resume directly rather than competing for a scheduler slot the
 		// parent is already holding.
-		results, stop, err = r.driveDirect(pid)
+		results, stop, err = r.driveDirect(ctx, pid, proc.deadline)
 	} else {
-		results, err = r.scheduler.Submit(context.Background(), pid, tenantID, sched.Normal)
+		results, err = r.scheduler.Submit(context.Background(), pid, deadline)
 		if err == nil {
 			stop = func() { r.scheduler.Stop(pid) }
 		}
@@ -205,11 +208,20 @@ func (r *Runtime) execute(processID string) {
 		r.mu.Lock()
 		closing := r.closed
 		r.mu.Unlock()
-		if closing {
+		switch {
+		case closing:
 			// A closing host interrupts, never aborts: the restart resumes the
 			// open section mid-flight — a host restart must not touch effects.
 			r.finish(processID, durable.ProcessInterrupted, "", result.Err)
-		} else {
+		case errors.Is(result.Err, context.DeadlineExceeded):
+			// The quantum ran out of wall-clock. That is a bound on execution,
+			// not a verdict on the work: the guest may have been waiting on a
+			// third party that hung. So the process is interrupted — its journal
+			// stands, its effects are not compensated, and a retry resumes from
+			// the last open savepoint. An operator Stop, by contrast, is a
+			// deliberate abort and does roll back.
+			r.finish(processID, durable.ProcessInterrupted, "", result.Err)
+		default:
 			r.stopProcess(processID, result.Err)
 		}
 	default:
@@ -217,10 +229,26 @@ func (r *Runtime) execute(processID string) {
 	}
 }
 
-// driveDirect activates and resumes a process outside the scheduler — the
-// path for delegated children, which execute inside their parent's quantum.
-func (r *Runtime) driveDirect(pid string) (<-chan capcompute.ResumeResult, func(), error) {
-	ctx, cancel := context.WithCancel(context.Background())
+// driveDirect activates and resumes a process outside the scheduler — the path
+// for delegated children, which execute inside their parent's quantum. The
+// child's context derives from the parent's, so it inherits the parent's
+// *remaining* budget rather than a fresh copy of the same duration: a spawn tree
+// is one parent split into pieces, and one deadline bounds all of it. A re-drive
+// with no parent quantum in flight (a rollback retry) falls back to the
+// process's own deadline, so a quantum is never unbounded.
+func (r *Runtime) driveDirect(parent context.Context, pid string, deadline time.Duration) (<-chan capcompute.ResumeResult, func(), error) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	var (
+		ctx    context.Context
+		cancel context.CancelFunc
+	)
+	if _, inherited := parent.Deadline(); !inherited && deadline > 0 {
+		ctx, cancel = context.WithTimeout(parent, deadline)
+	} else {
+		ctx, cancel = context.WithCancel(parent)
+	}
 	process, err := r.activateProcess(ctx, pid)
 	if err != nil {
 		cancel()

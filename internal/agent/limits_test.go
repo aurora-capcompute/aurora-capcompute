@@ -23,7 +23,7 @@ func TestResolveGuestLimitsIsBoundedByDefault(t *testing.T) {
 			pagesIn:     0,
 			timeoutIn:   0,
 			wantPages:   defaultProcessMemoryPages,
-			wantTimeout: defaultResumeQuantumTimeout,
+			wantTimeout: defaultMaxQuantumDuration,
 		},
 		{
 			name:        "explicit positive values are used verbatim",

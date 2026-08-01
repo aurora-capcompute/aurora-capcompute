@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
-	"github.com/aurora-capcompute/capcompute/sys"
 )
 
 // The scripted guest: two compensatable effects around reads and one
@@ -45,33 +44,6 @@ func requireApplied(t *testing.T, world *World, want map[string]int) {
 	}
 }
 
-// completedTransfers counts transfer.out effects whose completion reached the
-// journal's execution section — the set saga unwinding is answerable for.
-func completedTransfers(t *testing.T, journal *Journal) int {
-	t.Helper()
-	count := 0
-	for i := 0; i < journal.Length()-1; i++ {
-		record, err := journal.Load(i)
-		if err != nil {
-			t.Fatalf("load %d: %v", i, err)
-		}
-		if record.Kind != journaled.KindIntent || record.Syscall == nil || record.Syscall.Name != "transfer.out" {
-			continue
-		}
-		next, err := journal.Load(i + 1)
-		if err != nil {
-			t.Fatalf("load %d: %v", i+1, err)
-		}
-		if next.Kind == journaled.KindCompletion && next.Result != nil && next.Result.Status() == sys.StatusResult {
-			count++
-		}
-	}
-	return count
-}
-
-// TestCrashMatrixConverges kills the process at every journal append and
-// requires that a restart converges: same effects exactly once, an intact
-// chain, and a byte-complete journal.
 func TestCrashMatrixConverges(t *testing.T) {
 	total := totalAppends(t)
 	if total != 2*len(program) {

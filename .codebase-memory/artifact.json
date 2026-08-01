@@ -1,11 +1,11 @@
 {
-    "schema_version": 1,
-    "commit": "a482bbeb3040a8886037bf0573571f73c8d95be8",
-    "indexed_at": "2026-06-22T12:35:40Z",
+    "schema_version": 2,
+    "commit": "0bbacc27e7ee935af84b827d59a1af94a145f326",
+    "indexed_at": "2026-08-01T00:07:22Z",
     "project": "home-rob-workspace-cap_aurora-aurora-capcompute",
-    "nodes": 387,
-    "edges": 1268,
-    "original_size": 3211264,
-    "compressed_size": 321808,
+    "nodes": 1048,
+    "edges": 5969,
+    "original_size": 7995392,
+    "compressed_size": 1272296,
     "compression_level": 3
 }

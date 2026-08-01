@@ -147,7 +147,7 @@ func TestCompensationCannotLaunderTaintPastRollbackSink(t *testing.T) {
 		Version:  manifest.Version,
 		Program:  "program@1",
 		Syscalls: cognitionGrants("vault.read", "web.post"),
-	})
+	}, 0)
 	if err != nil {
 		t.Fatalf("create process: %v", err)
 	}

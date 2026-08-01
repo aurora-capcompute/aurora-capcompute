@@ -174,7 +174,7 @@ func TestSpawnSeedsChildWithParentTaint(t *testing.T) {
 			{Syscall: "core.openaiApi", Hidden: true},
 			{Syscall: "onyx.search"},
 		},
-	})
+	}, 0)
 	if err != nil {
 		closeRT(runtime)
 		t.Fatalf("create run: %v", err)

@@ -198,7 +198,7 @@ func TestRuntimePassesManifestToDispatcherProvider(t *testing.T) {
 			{Syscall: "core.custom", Config: json.RawMessage(`{"value":2}`)},
 			{Syscall: "core.openaiApi", Hidden: true},
 		},
-	})
+	}, 0)
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
@@ -256,7 +256,7 @@ func TestRuntimeProgramLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session (no programs): %v", err)
 	}
-	if _, err := runtime.CreateProcess(emptyTh.ID, "task", manifest.Manifest{Version: manifest.Version}); err == nil {
+	if _, err := runtime.CreateProcess(emptyTh.ID, "task", manifest.Manifest{Version: manifest.Version}, 0); err == nil {
 		t.Fatal("creating a run with no registered program should fail")
 	}
 
@@ -275,7 +275,7 @@ func TestRuntimeProgramLifecycle(t *testing.T) {
 		Version:  manifest.Version,
 		Program:  "program@1",
 		Syscalls: cognitionGrants(),
-	})
+	}, 0)
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
@@ -343,7 +343,7 @@ func TestRemoveProgramEjectsLiveProcesses(t *testing.T) {
 		Version:  manifest.Version,
 		Program:  "program@1",
 		Syscalls: cognitionGrants("tool.y"),
-	})
+	}, 0)
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
@@ -409,7 +409,7 @@ func TestProcessImmutablyBoundToProgramBytes(t *testing.T) {
 		Version:  manifest.Version,
 		Program:  "program@1",
 		Syscalls: cognitionGrants("billing.charge", "billing.refund", "shipping.book", "inventory.sync"),
-	})
+	}, 0)
 	if err != nil {
 		t.Fatalf("create process: %v", err)
 	}
@@ -742,7 +742,7 @@ func TestRuntimeCascadeResumeReusesChildRun(t *testing.T) {
 			{Syscall: manifest.SpawnSyscall, Programs: []manifest.Manifest{{Program: "program@1", Syscalls: cognitionGrants()}}},
 			{Syscall: "core.openaiApi", Hidden: true},
 		},
-	})
+	}, 0)
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
@@ -872,7 +872,7 @@ func TestRuntimeApprovalCycle(t *testing.T) {
 		Version:  manifest.Version,
 		Program:  "program@1",
 		Syscalls: cognitionGrants("tool.y"),
-	})
+	}, 0)
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
@@ -983,7 +983,7 @@ func TestRuntimeHardSpawnFailsParentOnChildFailure(t *testing.T) {
 			{Syscall: manifest.SpawnSyscall, Programs: []manifest.Manifest{{Program: "program@1", Syscalls: cognitionGrants()}}},
 			{Syscall: "core.openaiApi", Hidden: true},
 		},
-	})
+	}, 0)
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
@@ -1204,7 +1204,7 @@ func TestRuntimeCascadeResumeUsesResumeModeForFailedChild(t *testing.T) {
 			{Syscall: "core.openaiApi", Hidden: true},
 			{Syscall: "tool.x"},
 		},
-	})
+	}, 0)
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
@@ -1263,7 +1263,7 @@ func TestRuntimeHardRetryForksFromBeginning(t *testing.T) {
 		Version:  manifest.Version,
 		Program:  "program@1",
 		Syscalls: cognitionGrants("tool.x"),
-	})
+	}, 0)
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
@@ -1527,7 +1527,7 @@ func startCompensationProcess(t *testing.T, runtime *Runtime) ProcessSnapshot {
 		Version:  manifest.Version,
 		Program:  "program@1",
 		Syscalls: cognitionGrants("billing.charge", "billing.refund", "shipping.book", "inventory.sync"),
-	})
+	}, 0)
 	if err != nil {
 		t.Fatalf("create process: %v", err)
 	}
