@@ -183,7 +183,7 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		baseCtx:         baseCtx,
 		cancel:          cancel,
 		programs:        program.NewRegistry(),
-		taints:          monitor.NewTaints[string](),
+		taints:          monitor.NewTaints[processKey](),
 		log:             config.Log,
 		leases:          config.Leases,
 		tenantID:        strings.TrimSpace(config.TenantID),
@@ -234,24 +234,24 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		return nil, fmt.Errorf("restore runtime: %w", err)
 	}
 
-	runtime.factory = internalhost.Factory[string, ProcessContext]{
-		Drivers:     runtime.processDrivers,
-		Wrap:        runtime.wrapProtocol,
-		NewJournal:  runtime.journalFor,
-		Header:      runtime.headerFor,
+	runtime.factory, err = internalhost.New(internalhost.Config[processKey, ProcessContext]{
+		Environment: runtime,
 		Taints:      runtime.taints,
-		OpenIntents: openIntentPolicy(config.NonIdempotentSyscalls),
-		Now:         runtime.now,
 		Tasks:       runtime.tasks,
 		TaskSecret:  runtime.taskSecret,
 		TaskTTL:     runtime.taskTTL,
-		TaskScope:   ProcessContext.taskScope,
+		Wrap:        runtime.wrapProtocol,
+		OpenIntents: openIntentPolicy(config.NonIdempotentSyscalls),
+		Now:         runtime.now,
 		OnTaskCreated: func(record task.Record) {
 			runtime.publish(record.Scope.SessionID, Event{
 				Type: "task.created",
 				Data: runtime.taskSnapshot(record),
 			})
 		},
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	maxConcurrent := config.MaxConcurrentProcesses
@@ -273,9 +273,9 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 	return runtime, nil
 }
 
-// processDrivers builds the driver chain below the task layer for one process: the
+// Drivers builds the driver chain below the task layer for one process: the
 // application's capability dispatcher wrapped with progress reporting.
-func (r *Runtime) processDrivers(resolveCtx context.Context, cred ProcessContext) (sys.Dispatcher[ProcessContext], error) {
+func (r *Runtime) Drivers(resolveCtx context.Context, cred ProcessContext) (sys.Dispatcher[ProcessContext], error) {
 	r.mu.Lock()
 	proc := r.processes[cred.ProcessID]
 	var spec manifest.Manifest
@@ -358,8 +358,8 @@ func (r *Runtime) programBinding(proc *processState) error {
 	return nil
 }
 
-// journalFor returns the process's live journal view.
-func (r *Runtime) journalFor(_ context.Context, cred ProcessContext) (journaled.Journal, error) {
+// ProcessJournal returns the process's live journal view.
+func (r *Runtime) ProcessJournal(_ context.Context, cred ProcessContext) (journaled.Journal, error) {
 	r.mu.Lock()
 	proc := r.processes[cred.ProcessID]
 	r.mu.Unlock()
@@ -373,11 +373,19 @@ func (r *Runtime) journalFor(_ context.Context, cred ProcessContext) (journaled.
 	return proc.journal, nil
 }
 
-// headerFor is the journal writer identity for one process revision: the
+// TaskScope is the credential in the task store's scope shape.
+//
+// Drivers, ProcessJournal, Header and TaskScope together are the runtime's
+// half of host.Environment — everything one process's dispatcher chain needs
+// that only the runtime can know. They are exported for that seam, not for
+// callers: aurora.Runtime is a closed interface and does not list them.
+func (r *Runtime) TaskScope(cred ProcessContext) task.Scope { return cred.taskScope() }
+
+// Header is the journal writer identity for one process revision: the
 // syscall ABI, the program digest as the program, and the process id. The
 // tape refuses to replay a journal whose recorded header differs — the
 // versioned-replay law.
-func (r *Runtime) headerFor(cred ProcessContext) journaled.Header {
+func (r *Runtime) Header(cred ProcessContext) journaled.Header {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	program := ""
@@ -635,6 +643,14 @@ func (r *Runtime) GetSession(sessionID string) (SessionSnapshot, error) {
 	return r.sessionSnapshotLocked(session), nil
 }
 
+// enrollLocked adds one goroutine to the runtime's wait group. It must be
+// called under the same unbroken hold of r.mu as the caller's r.closed check:
+// Close sets closed under r.mu and then waits on the group, so an Add landing
+// after the counter began draining would panic on a reused WaitGroup. Holding
+// the lock across both is what makes that ordering impossible, and this is the
+// one place that rule is written down.
+func (r *Runtime) enrollLocked() { r.wg.Add(1) }
+
 // CreateProcess starts a process on a session. deadline bounds each of its
 // quanta — the guest's own uninterrupted compute between syscalls, and anything
 // it delegates inside that quantum. Zero takes the host default; anything above
@@ -718,10 +734,7 @@ func (r *Runtime) CreateProcess(sessionID string, input string, spec manifest.Ma
 		return ProcessSnapshot{}, err
 	}
 	snapshot := r.processSnapshotLocked(proc)
-	// Enroll in the wait group before releasing r.mu: Close sets r.closed under
-	// r.mu and then waits, so an Add that landed after the closed-check but after
-	// the unlock could race a returning Wait and panic. Under the lock it cannot.
-	r.wg.Add(1)
+	r.enrollLocked()
 	r.mu.Unlock()
 
 	r.publish(sessionID, Event{Type: "process.updated", Data: snapshot})
@@ -1050,7 +1063,7 @@ func (r *Runtime) spawnSettleLocked(proc *processState, status durable.ProcessSt
 	_ = r.appendProcess(proc)
 	snapshot := r.processSnapshotLocked(proc)
 	sessionID := proc.sessionID
-	r.wg.Add(1) // enroll before releasing r.mu (see CreateProcess) so Close cannot race Wait
+	r.enrollLocked()
 	r.mu.Unlock()
 	r.publish(sessionID, Event{Type: "process.updated", Data: snapshot})
 	go func() {
@@ -1090,7 +1103,7 @@ func (r *Runtime) relaunchLocked(ctx context.Context, proc *processState) (Proce
 	}
 	snapshot := r.processSnapshotLocked(proc)
 	sessionID, processID := proc.sessionID, proc.id
-	r.wg.Add(1) // enroll before releasing r.mu (see CreateProcess) so Close cannot race Wait
+	r.enrollLocked()
 	r.mu.Unlock()
 
 	r.publish(sessionID, Event{Type: "process.updated", Data: snapshot})
@@ -1110,7 +1123,7 @@ func (r *Runtime) forkJournalLocked(proc *processState, forkOffset int, mode Ret
 	// so release its taint. Otherwise the shared taint map accumulates one dead
 	// entry per abort-retry/restart fork for the runtime's lifetime; the new
 	// revision rebuilds its own taint by replaying the shared prefix's labels.
-	r.taints.ForgetProcess(processPID(proc.id, proc.revision))
+	r.taints.ForgetProcess(proc.key())
 	proc.revision++
 	proc.forkOffset = forkOffset
 	proc.lastFailureLength = 0

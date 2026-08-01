@@ -234,7 +234,7 @@ Now the other axis. Between syscalls, what is true?
 opaque payloads, one ordered stream per session. Everything durable the runtime
 knows is a fold over those streams:
 
-- session and process state (`store.go`, `snapshots.go`)
+- session and process state (`restore.go`, `snapshots.go`)
 - tasks (`tasks.go`)
 - the capability journal views (`journalview.go`, `callgraph.go`)
 
@@ -243,10 +243,10 @@ when a projection changes shape. `restore.go` rebuilds in-memory state on
 startup by replaying every stream from the beginning. Live watchers get the same
 events through `Subscribe`.
 
-Read the runtime this way and its file layout stops being arbitrary: `events.go`
-defines what can be appended, `restore.go` folds it back, and the `*Locked`
-helpers in `snapshots.go` project it into the immutable snapshots the public API
-hands out.
+Read the runtime this way and its file layout stops being arbitrary:
+`durable/events.go` defines what can be appended, `restore.go` folds it back,
+and the `*Locked` helpers in `snapshots.go` project it into the immutable
+snapshots the public API hands out.
 
 ---
 

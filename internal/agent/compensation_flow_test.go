@@ -199,12 +199,12 @@ func TestRollbackTaintRebuiltFromJournalAfterCrash(t *testing.T) {
 
 	// A freshly-restarted runtime: nothing has re-observed the completion, so the
 	// in-memory snapshot is empty — the crash condition.
-	restarted := &Runtime{taints: monitor.NewTaints[string]()}
-	if snap := restarted.taints.Snapshot("proc1"); len(snap) != 0 {
+	restarted := &Runtime{taints: monitor.NewTaints[processKey]()}
+	if snap := restarted.taints.Snapshot(processKey{processID: "proc1", revision: 1}); len(snap) != 0 {
 		t.Fatalf("precondition: taint map should be empty after restart, got %v", snap)
 	}
 
-	if taint := restarted.rollbackTaint("proc1", j); !containsLabel(taint, "secret") {
+	if taint := restarted.rollbackTaint(processKey{processID: "proc1", revision: 1}, j); !containsLabel(taint, "secret") {
 		t.Fatalf("rollbackTaint = %v, want `secret` rebuilt from the journal (else a resumed compensation launders)", taint)
 	}
 }

@@ -140,7 +140,7 @@ func (s *rollbackState) widenToRevision(j *logJournal) {
 // completion under this PID), so the union is idempotent. Without it a resumed
 // compensation dispatches untainted and can launder a forbidden source past the
 // driver sink guards.
-func (r *Runtime) rollbackTaint(pid string, journal *logJournal) []string {
+func (r *Runtime) rollbackTaint(pid processKey, journal *logJournal) []string {
 	seen := map[string]bool{}
 	var taint []string
 	add := func(labels []string) {
@@ -530,7 +530,7 @@ func (r *Runtime) settleRollback(processID string) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	drivers, err := r.processDrivers(ctx, cred)
+	drivers, err := r.Drivers(ctx, cred)
 	if err != nil {
 		fail(err)
 		return

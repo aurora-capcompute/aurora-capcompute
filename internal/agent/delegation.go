@@ -394,7 +394,7 @@ func (r *Runtime) createChildProcess(ctx context.Context, parentProcessID string
 	// child whose manifest grants the guarded sink.
 	var inputLabels []string
 	if parent := r.processes[parentProcessID]; parent != nil {
-		inputLabels = r.taints.Snapshot(processPID(parent.id, parent.revision))
+		inputLabels = r.taints.Snapshot(parent.key())
 	}
 	proc := &processState{
 		id:              processID,
@@ -455,7 +455,7 @@ func (r *Runtime) createChildProcess(ctx context.Context, parentProcessID string
 		}
 	}
 	snapshot := r.processSnapshotLocked(proc)
-	r.wg.Add(1) // enroll before releasing r.mu (see CreateProcess) so Close cannot race Wait
+	r.enrollLocked()
 	r.mu.Unlock()
 
 	r.publish(sessionID, Event{Type: "process.updated", Data: snapshot})

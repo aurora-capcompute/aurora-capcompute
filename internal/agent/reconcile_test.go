@@ -75,7 +75,7 @@ func TestReconcileGrants(t *testing.T) {
 }
 
 // The guard is actually wired into process activation: a provider that
-// advertises a capability the manifest did not grant fails processDrivers
+// advertises a capability the manifest did not grant fails Drivers
 // (fail-closed), so the leaked capability never becomes callable.
 func TestProcessDriversRejectsOverAdvertisingProvider(t *testing.T) {
 	r := &Runtime{
@@ -86,9 +86,9 @@ func TestProcessDriversRejectsOverAdvertisingProvider(t *testing.T) {
 			}}},
 		},
 	}
-	_, err := r.processDrivers(context.Background(), ProcessContext{ProcessID: "p1"})
+	_, err := r.Drivers(context.Background(), ProcessContext{ProcessID: "p1"})
 	if err == nil || !strings.Contains(err.Error(), "core.leak") {
-		t.Fatalf("processDrivers err = %v, want a fail-closed rejection naming core.leak", err)
+		t.Fatalf("Drivers err = %v, want a fail-closed rejection naming core.leak", err)
 	}
 }
 
@@ -101,7 +101,7 @@ func TestProcessDriversAdmitsFaithfulProvider(t *testing.T) {
 			}}},
 		},
 	}
-	if _, err := r.processDrivers(context.Background(), ProcessContext{ProcessID: "p1"}); err != nil {
+	if _, err := r.Drivers(context.Background(), ProcessContext{ProcessID: "p1"}); err != nil {
 		t.Fatalf("faithful provider rejected at activation: %v", err)
 	}
 }

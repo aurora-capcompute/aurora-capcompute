@@ -323,11 +323,11 @@ func (r *Runtime) finishLocked(proc *processState, status durable.ProcessStatus,
 		// Snapshot the run's taint before releasing it, so the answer this process
 		// contributes to session history carries the run's provenance into any
 		// later run that reads it (closing the run-to-run laundering loophole).
-		proc.labels = r.taints.Snapshot(processPID(proc.id, proc.revision))
+		proc.labels = r.taints.Snapshot(proc.key())
 		// The process's taint state is scoped to its revision identity; release
 		// it when no further quantum can observe it. A parked process keeps its
 		// taint (resume must re-enforce flow policy over the same history).
-		r.taints.ForgetProcess(processPID(proc.id, proc.revision))
+		r.taints.ForgetProcess(proc.key())
 	}
 	session := r.sessions[proc.sessionID]
 	if session != nil {

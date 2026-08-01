@@ -114,7 +114,7 @@ type Runtime struct {
 	cancel          context.CancelFunc
 	programs        *program.Registry
 	scheduler       *sched.Scheduler[processKey, *capcompute.Process[ProcessContext]]
-	taints          *monitor.Taints[string]
+	taints          *monitor.Taints[processKey]
 	log             eventlog.Log
 	leases          Leases
 	tasks           *eventTaskStore
@@ -134,7 +134,7 @@ type Runtime struct {
 	memoryPages     uint32
 	quantumCeiling  time.Duration
 	dispatchers     DispatcherProvider
-	factory         internalhost.Factory[string, ProcessContext]
+	factory         *internalhost.Factory[processKey, ProcessContext]
 	wg              sync.WaitGroup
 	closed          bool
 }
@@ -255,8 +255,8 @@ type ProcessContext struct {
 	Revision  uint64
 }
 
-func (r ProcessContext) PID() string {
-	return processPID(r.ProcessID, r.Revision)
+func (r ProcessContext) PID() processKey {
+	return processKey{processID: r.ProcessID, revision: r.Revision}
 }
 
 // taskScope is the same credential in the task store's scope shape.
@@ -269,22 +269,20 @@ func (r ProcessContext) taskScope() task.Scope {
 	}
 }
 
-// processPID derives the processor process identity for one process revision.
-func processPID(processID string, revision uint64) string {
-	return fmt.Sprintf("%s@%d", processID, revision)
-}
-
-// processKey names one process revision, and is what the run queue is keyed by.
-// A quantum is submitted for a revision rather than a process: one that has
-// forked past the revision its queued quantum names must not run it. Keeping
-// the two fields apart (rather than the formatted pid) is what lets activation
-// find the process by map lookup instead of scanning for a matching string.
+// processKey is the identity of one process revision — the processor's PID, the
+// run queue's key, and the taint state's key, all the same value. Two revisions
+// of one process are distinct identities: that is what stops a queued quantum
+// from running against a revision the process has since forked past, and what
+// scopes a run's taint to the attempt that accumulated it.
+//
+// It is a pair rather than a formatted string so that holding one costs no
+// parsing to use: activation finds its process by map lookup on processID.
 type processKey struct {
 	processID string
 	revision  uint64
 }
 
-func (k processKey) String() string { return processPID(k.processID, k.revision) }
+func (k processKey) String() string { return fmt.Sprintf("%s@%d", k.processID, k.revision) }
 
 func (p *processState) key() processKey {
 	return processKey{processID: p.id, revision: p.revision}

@@ -59,18 +59,37 @@ func (stubStore) Resolve(context.Context, string, string, []byte, task.Resolutio
 }
 func (stubStore) MarkExecuted(context.Context, string, string, time.Time) error { return nil }
 
-func integrityFactory(journal journaled.Journal, header journaled.Header) Factory[string, integrityPID] {
-	return Factory[string, integrityPID]{
-		Drivers: func(context.Context, integrityPID) (sys.Dispatcher[integrityPID], error) {
-			return noopDispatcher{}, nil
-		},
-		NewJournal: func(context.Context, integrityPID) (journaled.Journal, error) { return journal, nil },
-		Header:     func(integrityPID) journaled.Header { return header },
-		Taints:     monitor.NewTaints[string](),
-		Tasks:      stubStore{},
-		TaskScope:  func(integrityPID) task.Scope { return task.Scope{} },
-		TaskSecret: []byte("secret"),
+// integrityEnv is the application half of the seam, stubbed: the journal and
+// header under test, and nothing else doing any work.
+type integrityEnv struct {
+	journal journaled.Journal
+	header  journaled.Header
+}
+
+func (integrityEnv) Drivers(context.Context, integrityPID) (sys.Dispatcher[integrityPID], error) {
+	return noopDispatcher{}, nil
+}
+
+func (e integrityEnv) ProcessJournal(context.Context, integrityPID) (journaled.Journal, error) {
+	return e.journal, nil
+}
+
+func (e integrityEnv) Header(integrityPID) journaled.Header { return e.header }
+
+func (integrityEnv) TaskScope(integrityPID) task.Scope { return task.Scope{} }
+
+func integrityFactory(t *testing.T, journal journaled.Journal, header journaled.Header) *Factory[string, integrityPID] {
+	t.Helper()
+	factory, err := New(Config[string, integrityPID]{
+		Environment: integrityEnv{journal: journal, header: header},
+		Taints:      monitor.NewTaints[string](),
+		Tasks:       stubStore{},
+		TaskSecret:  []byte("secret"),
+	})
+	if err != nil {
+		t.Fatalf("new factory: %v", err)
 	}
+	return factory
 }
 
 // A journal whose hash chain does not verify must be refused before replay: the
@@ -88,7 +107,7 @@ func TestNewDispatcherRefusesTamperedJournal(t *testing.T) {
 		Position: 0, Kind: journaled.KindIntent, Syscall: &sc, PrevHash: "not-the-header-digest",
 	})
 
-	factory := integrityFactory(tampered, header)
+	factory := integrityFactory(t, tampered, header)
 	_, err := factory.NewDispatcher(context.Background(), integrityPID{id: "run"})
 	if err == nil || !strings.Contains(err.Error(), "integrity") {
 		t.Fatalf("err = %v, want a journal integrity rejection", err)
@@ -101,8 +120,56 @@ func TestNewDispatcherAdmitsIntactJournal(t *testing.T) {
 	header := journaled.Header{ABI: sys.ABIVersion, Program: "prog", Process: "run"}
 	intact := &memJournal{}
 	_ = intact.SetHeader(header) // an empty journal is a trivially intact chain
-	factory := integrityFactory(intact, header)
+	factory := integrityFactory(t, intact, header)
 	if _, err := factory.NewDispatcher(context.Background(), integrityPID{id: "run"}); err != nil {
 		t.Fatalf("intact journal rejected: %v", err)
+	}
+}
+
+// The wiring is checked once, when the factory is built — not on every process
+// activation. A missing collaborator must fail the assembly at startup rather
+// than surface as a broken process later.
+func TestNewRequiresItsCollaborators(t *testing.T) {
+	complete := Config[string, integrityPID]{
+		Environment: integrityEnv{},
+		Taints:      monitor.NewTaints[string](),
+		Tasks:       stubStore{},
+		TaskSecret:  []byte("secret"),
+	}
+	for name, drop := range map[string]func(*Config[string, integrityPID]){
+		"environment": func(c *Config[string, integrityPID]) { c.Environment = nil },
+		"taints":      func(c *Config[string, integrityPID]) { c.Taints = nil },
+		"tasks":       func(c *Config[string, integrityPID]) { c.Tasks = nil },
+		"task secret": func(c *Config[string, integrityPID]) { c.TaskSecret = nil },
+	} {
+		config := complete
+		drop(&config)
+		if _, err := New(config); err == nil {
+			t.Errorf("New succeeded without %s, want an error", name)
+		}
+	}
+	if _, err := New(complete); err != nil {
+		t.Fatalf("complete config: %v", err)
+	}
+}
+
+// The factory copies the secret it was given, so a caller reusing or clearing
+// that slice afterwards cannot change the tokens tasks are stamped with.
+func TestNewCopiesTheTaskSecret(t *testing.T) {
+	secret := []byte("secret")
+	factory, err := New(Config[string, integrityPID]{
+		Environment: integrityEnv{},
+		Taints:      monitor.NewTaints[string](),
+		Tasks:       stubStore{},
+		TaskSecret:  secret,
+	})
+	if err != nil {
+		t.Fatalf("new factory: %v", err)
+	}
+	for i := range secret {
+		secret[i] = 0
+	}
+	if string(factory.config.TaskSecret) != "secret" {
+		t.Fatalf("task secret = %q, want the factory to hold its own copy", factory.config.TaskSecret)
 	}
 }

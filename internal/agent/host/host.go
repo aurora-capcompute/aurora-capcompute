@@ -6,8 +6,8 @@
 // never by hand. The per-process piece is the tape: a journaled.Tape over the
 // process's journal, stamped with the process's header (ABI, program digest, PID).
 //
-// It owns only the wiring of that stack; the task store, journal, grant
-// source, taint state, and driver chain are injected.
+// It owns only the wiring of that stack; the task store, taint state, and
+// everything a process needs from the layer above are injected.
 package host
 
 import (
@@ -27,23 +27,43 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 )
 
-// Factory builds one process's complete dispatcher chain.
-//
-// Drivers supplies everything below the task layer (progress reporting and
-// the application's capability drivers). Wrap stacks the runtime's protocol
-// layers above the task layer, below the savepoint markers — delegation
-// routing (which must see a syscall before the task layer so a delegated
-// child's park never becomes a human task) and the agent lifecycle (whose
-// input payload advertises the whole capability surface beneath it). The
-// resulting chain, innermost first:
-//
-//	Drivers ← task ← Wrap ← savepoints ← [Stack: Labeler/Declassifier ← replay ← FlowMonitor ← Validator]
-type Factory[ID comparable, K capcompute.PID[ID]] struct {
-	Drivers    func(context.Context, K) (sys.Dispatcher[K], error)
-	Wrap       func(K, sys.Dispatcher[K]) (sys.Dispatcher[K], error)
-	NewJournal func(context.Context, K) (journaled.Journal, error)
-	Header     func(K) journaled.Header
-	Taints     *monitor.Taints[ID]
+// Environment is everything one process needs that only the layer above can
+// know. All four answer the same question — given this process's credential,
+// what is its X — so they are one collaborator rather than four hooks.
+type Environment[K any] interface {
+	// Drivers supplies everything below the task layer: progress reporting and
+	// the application's own capability drivers.
+	Drivers(ctx context.Context, cred K) (sys.Dispatcher[K], error)
+	// ProcessJournal is the process's live journal, which the tape reads and
+	// writes through.
+	ProcessJournal(ctx context.Context, cred K) (journaled.Journal, error)
+	// Header is the journal writer identity for this process revision: the
+	// syscall ABI, the program it is bound to, and the process.
+	Header(cred K) journaled.Header
+	// TaskScope is the credential in the task store's scope shape.
+	TaskScope(cred K) task.Scope
+}
+
+// Config wires a Factory. Environment, Taints, Tasks and TaskSecret are
+// required; everything else has a default or is a hook.
+type Config[ID comparable, K capcompute.PID[ID]] struct {
+	// Environment is the application half of this seam.
+	Environment Environment[K]
+	// Taints is the shared cross-process taint state — one for all processes,
+	// since flow policy is about what has crossed between them.
+	Taints *monitor.Taints[ID]
+	// Tasks is the durable approval store, and TaskSecret stamps the tokens
+	// that authorise resolving one.
+	Tasks      task.Store
+	TaskSecret []byte
+	TaskTTL    time.Duration
+
+	// Wrap stacks the runtime's protocol layers above the task layer and below
+	// the savepoint markers — delegation routing (which must see a syscall
+	// before the task layer, so a delegated child's park never becomes a human
+	// task) and the agent lifecycle (whose input payload advertises the whole
+	// capability surface beneath it). Nil adds no layer.
+	Wrap func(K, sys.Dispatcher[K]) (sys.Dispatcher[K], error)
 	// OpenIntents overrides the replay open-intent policy — what to do with an
 	// effect journaled without a recorded completion, met on crash-resume. Nil
 	// retries every open intent under its original idempotency key.
@@ -52,27 +72,52 @@ type Factory[ID comparable, K capcompute.PID[ID]] struct {
 	// nil defaults to the real clock and crypto/rand.
 	Now  func() time.Time
 	Rand io.Reader
-
-	Tasks         task.Store
-	TaskScope     func(K) task.Scope
-	TaskSecret    []byte
-	TaskTTL       time.Duration
+	// OnTaskCreated observes each durable task as it is created.
 	OnTaskCreated func(task.Record)
 }
 
-func (f Factory[ID, K]) NewDispatcher(ctx context.Context, cred K) (sys.Dispatcher[K], error) {
-	if f.Drivers == nil || f.NewJournal == nil || f.Header == nil || f.Taints == nil ||
-		f.Tasks == nil || f.TaskScope == nil || len(f.TaskSecret) == 0 {
-		return nil, errors.New("dispatcher factory is not configured")
+// Factory builds one process's complete dispatcher chain. The resulting chain,
+// innermost first:
+//
+//	Drivers ← task ← Wrap ← savepoints ← [Stack: Labeler/Declassifier ← replay ← FlowMonitor ← Validator]
+type Factory[ID comparable, K capcompute.PID[ID]] struct {
+	config Config[ID, K]
+}
+
+// New checks the wiring once, here, so NewDispatcher — which runs on every
+// process activation — can trust it and get on with the work.
+func New[ID comparable, K capcompute.PID[ID]](config Config[ID, K]) (*Factory[ID, K], error) {
+	switch {
+	case config.Environment == nil:
+		return nil, errors.New("host: Environment is required")
+	case config.Taints == nil:
+		return nil, errors.New("host: Taints is required (share one across processes)")
+	case config.Tasks == nil:
+		return nil, errors.New("host: Tasks is required")
+	case len(config.TaskSecret) == 0:
+		return nil, errors.New("host: TaskSecret is required")
 	}
-	drivers, err := f.Drivers(ctx, cred)
+	if config.Now == nil {
+		config.Now = time.Now
+	}
+	if config.Rand == nil {
+		config.Rand = rand.Reader
+	}
+	// The factory owns its copy, so a caller mutating the slice afterwards
+	// cannot change the tokens this process's tasks are stamped with.
+	config.TaskSecret = append([]byte(nil), config.TaskSecret...)
+	return &Factory[ID, K]{config: config}, nil
+}
+
+func (f *Factory[ID, K]) NewDispatcher(ctx context.Context, cred K) (sys.Dispatcher[K], error) {
+	drivers, err := f.config.Environment.Drivers(ctx, cred)
 	if err != nil {
 		return nil, err
 	}
 	if drivers == nil {
 		return nil, errors.New("dispatcher provider returned nil dispatcher")
 	}
-	journal, err := f.NewJournal(ctx, cred)
+	journal, err := f.config.Environment.ProcessJournal(ctx, cred)
 	if err != nil {
 		return nil, err
 	}
@@ -85,36 +130,28 @@ func (f Factory[ID, K]) NewDispatcher(ctx context.Context, cred K) (sys.Dispatch
 	if err := journaled.Verify(journal); err != nil {
 		return nil, fmt.Errorf("journal integrity check failed: %w", err)
 	}
-	tape, err := journaled.NewTape(journal, f.Header(cred))
+	tape, err := journaled.NewTape(journal, f.config.Environment.Header(cred))
 	if err != nil {
 		return nil, err
 	}
 	var below sys.Dispatcher[K] = &task.Dispatcher[K]{
 		Next:          drivers,
-		Store:         f.Tasks,
+		Store:         f.config.Tasks,
 		Journal:       journal,
-		Scope:         f.TaskScope,
-		TokenSecret:   append([]byte(nil), f.TaskSecret...),
-		TaskTTL:       f.TaskTTL,
-		OnTaskCreated: f.OnTaskCreated,
+		Scope:         f.config.Environment.TaskScope,
+		TokenSecret:   f.config.TaskSecret,
+		TaskTTL:       f.config.TaskTTL,
+		OnTaskCreated: f.config.OnTaskCreated,
 	}
-	if f.Wrap != nil {
-		below, err = f.Wrap(cred, below)
+	if f.config.Wrap != nil {
+		below, err = f.config.Wrap(cred, below)
 		if err != nil {
 			return nil, err
 		}
 	}
 	// The world sources sit below replay (so their values are journaled and
 	// replay verbatim) and above the task and routing layers.
-	now := f.Now
-	if now == nil {
-		now = time.Now
-	}
-	entropy := f.Rand
-	if entropy == nil {
-		entropy = rand.Reader
-	}
-	withWorld := &worldDispatcher[K]{next: below, now: now, rand: entropy}
+	withWorld := &worldDispatcher[K]{next: below, now: f.config.Now, rand: f.config.Rand}
 	// Savepoint markers sit below replay (so they are journaled) and above the
 	// task and routing layers (so they never become durable tasks or dispatch
 	// a child).
@@ -126,8 +163,8 @@ func (f Factory[ID, K]) NewDispatcher(ctx context.Context, cred K) (sys.Dispatch
 	// by the Validator before it reaches a driver.
 	stack := monitor.Stack[ID, K]{
 		Grants:      func(K) []sys.Capability { return withSavepoints.Capabilities() },
-		Taints:      f.Taints,
-		OpenIntents: f.OpenIntents,
+		Taints:      f.config.Taints,
+		OpenIntents: f.config.OpenIntents,
 	}
 	return stack.ForProcess(tape, withSavepoints)
 }
