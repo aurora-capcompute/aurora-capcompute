@@ -161,32 +161,29 @@ func (r *Runtime) execute(ctx context.Context, processID string) {
 	deadline := proc.deadline
 	r.mu.Unlock()
 
-	var results <-chan sched.Result
-	var stop func()
-	if isChild {
-		// A delegated child executes inside its parent's quantum: run it off the
-		// queue rather than competing for a slot the parent is already holding.
-		// ctx is that parent quantum, so the child inherits its remaining budget.
-		var cancel context.CancelFunc
-		results, cancel = r.scheduler.Run(ctx, key, deadline)
-		stop = cancel
-	} else {
-		submitted, err := r.scheduler.Submit(key, deadline)
-		if err != nil {
-			// Only admission can fail here; activation failures arrive as a
-			// result, on both paths alike.
-			if r.failureStatus(err) == durable.ProcessFailed {
-				r.failProcess(processID, err)
-			} else {
-				r.finish(processID, durable.ProcessInterrupted, "", err)
-			}
-			return
+	results, stop, err := r.startQuantum(ctx, key, deadline, isChild)
+	if err != nil {
+		// Only admission can fail here; an activation that fails arrives as a
+		// result, on both paths alike.
+		if r.failureStatus(err) == durable.ProcessFailed {
+			r.failProcess(processID, err)
+		} else {
+			r.finish(processID, durable.ProcessInterrupted, "", err)
 		}
-		results, stop = submitted, func() { r.scheduler.Stop(key) }
+		return
 	}
 
 	r.mu.Lock()
 	proc = r.processes[processID]
+	if proc == nil {
+		// The process was removed while its quantum was starting (a withdrawn
+		// program drains its processes). Abort the quantum rather than record a
+		// running state for a process that is gone; the result is buffered, so
+		// leaving it unread strands nothing.
+		r.mu.Unlock()
+		stop()
+		return
+	}
 	now := r.now().UTC()
 	proc.stop = stop
 	proc.status = durable.ProcessRunning
@@ -252,6 +249,25 @@ func (r *Runtime) execute(ctx context.Context, processID string) {
 	default:
 		r.failProcess(processID, result.Err)
 	}
+}
+
+// startQuantum puts a process on the CPU and returns the channel its outcome
+// will arrive on, with the means to abort it. A root queues for a slot; a
+// delegated child runs off the queue inside its parent's quantum — ctx — rather
+// than competing for a slot the parent is already holding, which is what keeps
+// delegation from deadlocking against the concurrency cap. Only a root can fail
+// here, and only on admission: an activation that fails is a result, not an
+// error, on both paths alike.
+func (r *Runtime) startQuantum(ctx context.Context, key processKey, deadline time.Duration, isChild bool) (<-chan sched.Result, func(), error) {
+	if isChild {
+		results, cancel := r.scheduler.Run(ctx, key, deadline)
+		return results, cancel, nil
+	}
+	results, err := r.scheduler.Submit(key, deadline)
+	if err != nil {
+		return nil, nil, err
+	}
+	return results, func() { r.scheduler.Stop(key) }, nil
 }
 
 // failureStatus maps an admission error to the process status it should finish
