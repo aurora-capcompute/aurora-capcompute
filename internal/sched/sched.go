@@ -17,7 +17,6 @@
 package sched
 
 import (
-	"container/list"
 	"context"
 	"errors"
 	"fmt"
@@ -36,8 +35,7 @@ var (
 // Config wires a Scheduler. All three callbacks are required.
 type Config[ID comparable, K capcompute.PID[ID]] struct {
 	// Activate builds the process for a PID — for a durable process,
-	// CreateProcess plus journal replay wiring. Called once per quantum: there
-	// is no warm instance to reuse.
+	// CreateProcess plus journal replay wiring.
 	Activate func(ctx context.Context, pid ID) (*capcompute.Process[K], error)
 	// Resume gives the process its quantum and returns its result stream —
 	// usually a thin wrapper over the processor's Resume.
@@ -53,7 +51,7 @@ type Config[ID comparable, K capcompute.PID[ID]] struct {
 	MaxConcurrent int
 }
 
-type entry[ID comparable, K capcompute.PID[ID]] struct {
+type entry[ID comparable] struct {
 	pid    ID
 	result chan capcompute.ResumeResult
 	// deadline bounds the quantum's wall-clock time once it starts. Queue time
@@ -74,8 +72,12 @@ type Scheduler[ID comparable, K capcompute.PID[ID]] struct {
 
 	mu      sync.Mutex
 	closed  bool
-	entries map[ID]*entry[ID, K]
-	queue   *list.List // of *entry, front = next to run
+	entries map[ID]*entry[ID]
+	// queue holds the pending submissions in arrival order, front first. A slice
+	// rather than container/list because that list is untyped — every read of it
+	// would be a type assertion for nothing — and the queue is short: it drains
+	// as fast as MaxConcurrent allows, so the shift on removal does not matter.
+	queue   []*entry[ID]
 	running int
 	quanta  sync.WaitGroup
 }
@@ -92,8 +94,7 @@ func New[ID comparable, K capcompute.PID[ID]](config Config[ID, K]) (*Scheduler[
 		config:   config,
 		root:     root,
 		stopRoot: stopRoot,
-		entries:  make(map[ID]*entry[ID, K]),
-		queue:    list.New(),
+		entries:  make(map[ID]*entry[ID]),
 	}, nil
 }
 
@@ -116,13 +117,13 @@ func (s *Scheduler[ID, K]) Submit(ctx context.Context, pid ID, deadline time.Dur
 		return nil, ErrAlreadyScheduled
 	}
 
-	submitted := &entry[ID, K]{
+	submitted := &entry[ID]{
 		pid:      pid,
 		result:   make(chan capcompute.ResumeResult, 1),
 		deadline: deadline,
 	}
 	s.entries[pid] = submitted
-	s.queue.PushBack(submitted)
+	s.queue = append(s.queue, submitted)
 	s.schedule()
 	return submitted.result, nil
 }
@@ -132,12 +133,11 @@ func (s *Scheduler[ID, K]) Submit(ctx context.Context, pid ID, deadline time.Dur
 func (s *Scheduler[ID, K]) Close() {
 	s.mu.Lock()
 	s.closed = true
-	for element := s.queue.Front(); element != nil; element = element.Next() {
-		queued := element.Value.(*entry[ID, K])
+	for _, queued := range s.queue {
 		queued.result <- capcompute.ResumeResult{Status: capcompute.ResumeStopped, Err: ErrClosed}
 		delete(s.entries, queued.pid)
 	}
-	s.queue.Init()
+	s.queue = nil
 	s.mu.Unlock()
 	s.quanta.Wait()
 	s.stopRoot()
@@ -167,14 +167,26 @@ func (s *Scheduler[ID, K]) Stop(pid ID) bool {
 	return true
 }
 
-// dequeue removes a queued entry. Caller holds the lock.
-func (s *Scheduler[ID, K]) dequeue(queued *entry[ID, K]) {
-	for element := s.queue.Front(); element != nil; element = element.Next() {
-		if element.Value.(*entry[ID, K]) == queued {
-			s.queue.Remove(element)
+// dequeue removes one queued entry, wherever it sits. Caller holds the lock.
+func (s *Scheduler[ID, K]) dequeue(queued *entry[ID]) {
+	for i, waiting := range s.queue {
+		if waiting == queued {
+			s.take(i)
 			return
 		}
 	}
+}
+
+// take removes the entry at index i and returns it — the one way anything
+// leaves the queue, whether it is being run or abandoned. Caller holds the lock.
+func (s *Scheduler[ID, K]) take(i int) *entry[ID] {
+	taken := s.queue[i]
+	copy(s.queue[i:], s.queue[i+1:])
+	// Clear the slot the shift vacated, so a dropped entry is not kept alive by
+	// the queue's backing array.
+	s.queue[len(s.queue)-1] = nil
+	s.queue = s.queue[:len(s.queue)-1]
+	return taken
 }
 
 // schedule starts quanta while capacity remains, in submission order. Every
@@ -182,12 +194,10 @@ func (s *Scheduler[ID, K]) dequeue(queued *entry[ID, K]) {
 // context. Caller holds the lock.
 func (s *Scheduler[ID, K]) schedule() {
 	for s.running < s.config.MaxConcurrent {
-		element := s.queue.Front()
-		if element == nil {
+		if len(s.queue) == 0 {
 			return
 		}
-		s.queue.Remove(element)
-		next := element.Value.(*entry[ID, K])
+		next := s.take(0)
 		s.running++
 		quantumCtx, cancel := s.quantumContext(next.deadline)
 		next.cancel = cancel
@@ -211,7 +221,7 @@ func (s *Scheduler[ID, K]) quantumContext(deadline time.Duration) (context.Conte
 // runQuantum owns one process quantum end to end: activate, resume, deliver the
 // result, and release the instance — always, whatever the outcome. An instance
 // never outlives its quantum.
-func (s *Scheduler[ID, K]) runQuantum(ctx context.Context, running *entry[ID, K]) {
+func (s *Scheduler[ID, K]) runQuantum(ctx context.Context, running *entry[ID]) {
 	defer s.quanta.Done()
 	defer running.cancel()
 
@@ -242,7 +252,7 @@ func (s *Scheduler[ID, K]) runOn(ctx context.Context, process *capcompute.Proces
 
 // finish releases the quantum's slot, lets the next one start, and delivers the
 // result.
-func (s *Scheduler[ID, K]) finish(ran *entry[ID, K], result capcompute.ResumeResult) {
+func (s *Scheduler[ID, K]) finish(ran *entry[ID], result capcompute.ResumeResult) {
 	s.mu.Lock()
 	s.running--
 	delete(s.entries, ran.pid)
