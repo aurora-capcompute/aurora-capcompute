@@ -211,16 +211,6 @@ func (a *registryImpl[T, P]) Spawn(ctx context.Context, id T, processEntry P, mk
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if art, ok := a.programs[id]; ok {
-		return process.Spawn[P](ctx, processEntry, art.Image, mkDispatcher)
-	}
-
-	return nil, fmt.Errorf("%w: program %q does not exist", errs.NotFound, id)
-}
-
-func (a *registryImpl[T, P]) Resume(ctx context.Context, id T, processEntry P, mkDispatcher func(context.Context, P) (sys.Dispatcher[P], error)) (process.Handle, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if art, ok := a.programs[id]; ok {
 		if art.ArtifactDigest != processEntry.ArtifactDigest() || art.SourceCodeDigest != processEntry.SourceCodeDigest() {
 			return nil, fmt.Errorf("digest for program %s don't match", id.String())
 		}
