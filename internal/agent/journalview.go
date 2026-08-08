@@ -17,7 +17,7 @@ import (
 )
 
 // Capability-journal events. Each journal record (an intent, a completion, or
-// a compensation pair member — the processor's envelope+payload shape, hash chain
+// the processor's envelope+payload shape, hash chain
 // included) is a syscall.recorded event carrying the record verbatim plus the
 // revision that produced it. The fork structure (which revision shared which
 // prefix) is fully derivable from the flat set of (position, revision) pairs —
@@ -174,10 +174,6 @@ func copyRecord(rec journaled.Record) journaled.Record {
 	if rec.Result != nil {
 		copied := rec.Result.Copy()
 		out.Result = &copied
-	}
-	if rec.Compensates != nil {
-		compensates := *rec.Compensates
-		out.Compensates = &compensates
 	}
 	return out
 }
@@ -403,9 +399,6 @@ func (j *logJournal) entries() ([]JournalEntry, error) {
 			Revision: rev,
 			Syscall:  *rec.Syscall,
 			Outcome:  JournalOutcome{Status: sys.StatusYield, Message: "in flight"},
-		}
-		if rec.Kind == journaled.KindCompensationIntent {
-			entry.Compensates = rec.Compensates
 		}
 		if i+1 < length {
 			completion, err := j.Load(i + 1)

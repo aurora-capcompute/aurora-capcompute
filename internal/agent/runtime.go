@@ -25,11 +25,11 @@ import (
 	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct/process"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/sched"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/aurora-capcompute/monitor"
 	"github.com/aurora-capcompute/aurora-capcompute/replay"
-	"github.com/aurora-capcompute/capcompute"
 	"github.com/aurora-capcompute/capcompute/sys"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
@@ -48,6 +48,9 @@ const (
 	// distribution can raise, lower, or disable via Config.
 	defaultProcessMemoryPages = 4096
 	defaultMaxQuantumDuration = 2 * time.Minute
+	// defaultMaxAbortRetries bounds how many times a process may abort and re-run
+	// the section it abandoned before the retry is refused.
+	defaultMaxAbortRetries = 10
 )
 
 // evictionDrainTimeout bounds how long RemoveProgram waits for the processes it
@@ -111,7 +114,7 @@ func (r *Runtime) clampDeadline(requested time.Duration) time.Duration {
 // enforced source of truth rather than a trusted input.
 //
 // Only the provider's own leaf capabilities are checked: the runtime layers its
-// protocol capabilities (sys.input/output/log/compensate/abort/now/random and
+// protocol capabilities (sys.input/output/log/abort/now/random and
 // the manifest-gated sys.spawn/sys.timer) on top afterwards, so they never
 // appear in `advertised` and need no exception here. Under-advertising (a leaf
 // grant the provider chose not to serve) is not a leak — the guest simply cannot
@@ -177,10 +180,12 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 	}
 	baseCtx, cancel := context.WithCancel(context.Background())
 	var err error
+	memoryPages, quantumCeiling := resolveGuestLimits(config.ProcessMemoryPages, config.MaxQuantumDuration)
 	runtime := &Runtime{
 		baseCtx:         baseCtx,
 		cancel:          cancel,
-		programs:        direct.NewRegistry(),
+		images:          direct.NewRegistry[ProgramID, ProcessContext](memoryPages),
+		programs:        newPrograms(),
 		taints:          monitor.NewTaints[processKey](),
 		log:             config.Log,
 		leases:          config.Leases,
@@ -198,7 +203,7 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		maxAbortRetries: config.MaxAbortRetries,
 		dispatchers:     config.Dispatchers,
 	}
-	runtime.memoryPages, runtime.quantumCeiling = resolveGuestLimits(config.ProcessMemoryPages, config.MaxQuantumDuration)
+	runtime.memoryPages, runtime.quantumCeiling = memoryPages, quantumCeiling
 	if runtime.tenantID == "" {
 		runtime.tenantID = DefaultTenantID
 	}
@@ -256,7 +261,7 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 	if maxConcurrent <= 0 {
 		maxConcurrent = defaultMaxConcurrentProcesses
 	}
-	runtime.scheduler, err = sched.New(sched.Config[processKey, *capcompute.Process[ProcessContext]]{
+	runtime.scheduler, err = sched.New(sched.Config[processKey, process.Handle]{
 		Activator: processActivator{runtime: runtime},
 		Machine:   processMachine{},
 		// Quanta hang off the runtime's own lifetime rather than a root the queue
@@ -341,28 +346,21 @@ func (r *Runtime) wrapProtocol(cred ProcessContext, next sys.Dispatcher[ProcessC
 		history,
 		spec,
 		attempt,
-		func(answer json.RawMessage) error {
-			a, err := r.programs.Resolve(spec.Program)
-			if err != nil {
-				return err
-			}
-			if err = a.Output.validateJSON(answer); err != nil {
-				return err
-			}
-			return nil
+		func(answer string) error {
+			return r.images.ValidateOutput(ProgramID(spec.Program), answer)
 		},
 	), nil
 }
 
 func (r *Runtime) programBinding(proc *processState) error {
-	artifact, err := r.programs.Resolve(proc.manifest.Program)
+	program, err := r.programs.resolve(proc.manifest.Program)
 	if err != nil {
 		return fmt.Errorf("program %q is not loaded", proc.manifest.Program)
 	}
-	if artifact.Digest != proc.programDigest {
+	if program.Digest != proc.digest {
 		return fmt.Errorf(
 			"program %q changed (loaded %s, process bound to %s): a process is immutable — its code and interface are fixed; spawn a new process from the new program, or kill this one to settle its effects",
-			proc.manifest.Program, artifact.Digest, proc.programDigest)
+			proc.manifest.Program, program.Digest.ArtifactDigest, proc.digest.ArtifactDigest)
 	}
 	return nil
 }
@@ -399,41 +397,33 @@ func (r *Runtime) Header(cred ProcessContext) journaled.Header {
 	defer r.mu.Unlock()
 	program := ""
 	if proc := r.processes[cred.ProcessID]; proc != nil {
-		program = proc.programDigest
+		program = proc.digest.ArtifactDigest
 	}
 	return journaled.Header{ABI: sys.ABIVersion, Program: program, Process: cred.ProcessID}
 }
 
-// AddProgram registers one program and compiles its wasm. The id is the app's to
-// choose and it must be free: a program is never replaced in place, because
-// processes are immutably bound to the (name, identity) they were created from.
-// Re-adding the byte-identical program under the same id is a no-op, so a control
-// plane can re-assert its desired set on a ticker without disturbing anything; the
-// same id with a different identity is refused (errs.Conflict) and the caller removes
-// the old program first, which settles the processes bound to it. Compilation
-// happens outside the runtime mutex, so dispatch is only briefly paused for the
-// swap.
-func (r *Runtime) AddProgram(ctx context.Context, data direct.Data) error {
-	// Preparing the program is the cheap half — interface normalization and
-	// schema compilation — and it pins the digest, so an unchanged program is
-	// settled without compiling any wasm.
-	artifact, err := direct.Load(data)
+// AddProgram registers one program and compiles its wasm. Registering is always
+// a replace: a taken id is withdrawn first — settling the processes bound to it
+// — and the incoming program takes its place. A program is never swapped under a
+// live process, because processes are immutably bound to the (name, identity)
+// they were created from; the withdrawal is what settles them.
+func (r *Runtime) AddProgram(ctx context.Context, data ProgramData) error {
+	if r.images.Exists(data.ID) {
+		if err := r.RemoveProgram(ctx, string(data.ID)); err != nil {
+			return err
+		}
+	}
+	digest, err := r.images.Add(ctx, data)
 	if err != nil {
 		return err
 	}
-	if existing, err := r.programs.Resolve(artifact.ID); err == nil && existing.Digest == artifact.Digest {
-		return nil
-	}
-	image, err := r.compileProgram(ctx, artifact.ID, data.SourceCode)
-	if err != nil {
-		return err
-	}
-	artifact.Image = image
-	added, err := r.programs.Add(artifact)
-	if err != nil || !added {
-		_ = image.Close(context.Background())
-		return err
-	}
+	r.programs.put(Program{
+		ID:          data.ID,
+		Digest:      digest,
+		Description: strings.TrimSpace(data.Description),
+		Input:       data.Input,
+		Output:      data.Output,
+	})
 	// A Close that raced this registration has already drained the registry, so
 	// check after publishing and undo: otherwise the image this call compiled
 	// would stay open with nothing left to close it.
@@ -441,8 +431,8 @@ func (r *Runtime) AddProgram(ctx context.Context, data direct.Data) error {
 	closed := r.closed
 	r.mu.Unlock()
 	if closed {
-		r.programs.Remove(artifact.ID)
-		_ = image.Close(context.Background())
+		r.programs.remove(string(data.ID))
+		r.images.Remove(data.ID)
 		return fmt.Errorf("%w: runtime is closed", errs.Conflict)
 	}
 	return nil
@@ -460,7 +450,7 @@ func (r *Runtime) AddProgram(ctx context.Context, data direct.Data) error {
 // changed program.
 func (r *Runtime) RemoveProgram(ctx context.Context, id string) error {
 	id = strings.TrimSpace(id)
-	removed, ok := r.programs.Remove(id)
+	removed, ok := r.programs.remove(id)
 	if !ok {
 		return fmt.Errorf("%w: program %q is not registered", errs.NotFound, id)
 	}
@@ -486,9 +476,7 @@ func (r *Runtime) RemoveProgram(ctx context.Context, id string) error {
 	// live module is recovered by the processor, not a crash — but a process is an
 	// audit target and its final state must not turn on which of the two won.
 	r.drainProcesses(ctx, id, bound)
-	if image := removed.Image; image != nil {
-		_ = image.Close(context.Background())
-	}
+	r.images.Remove(removed.ID)
 	return nil
 }
 
@@ -620,8 +608,8 @@ func (r *Runtime) ListSessions() []SessionSummary {
 	return out
 }
 
-func (r *Runtime) Programs() []direct.artifact {
-	return r.programs.List()
+func (r *Runtime) Programs() []Program {
+	return r.programs.list()
 }
 
 func (r *Runtime) GetSession(sessionID string) (SessionSnapshot, error) {
@@ -664,11 +652,11 @@ func (r *Runtime) CreateProcess(sessionID string, input string, spec manifest.Ma
 			spec.Syscalls[i].Hidden = true
 		}
 	}
-	artifact, err := r.programs.Resolve(spec.Program)
+	program, err := r.programs.resolve(spec.Program)
 	if err != nil {
 		return ProcessSnapshot{}, err
 	}
-	if err := r.programs.ValidateInput(spec.Program, input); err != nil {
+	if err := r.images.ValidateInput(program.ID, input); err != nil {
 		return ProcessSnapshot{}, err
 	}
 	processID, err := r.idSource("proc_")
@@ -692,18 +680,18 @@ func (r *Runtime) CreateProcess(sessionID string, input string, spec manifest.Ma
 		return ProcessSnapshot{}, fmt.Errorf("%w: session already has active process %s", errs.Conflict, session.activeProcessID)
 	}
 	proc := &processState{
-		id:            processID,
-		sessionID:     sessionID,
-		input:         input,
-		history:       append([]HistoryMessage(nil), session.history...),
-		status:        durable.ProcessQueued,
-		attempt:       1,
-		createdAt:     now,
-		updatedAt:     now,
-		manifest:      spec,
-		revision:      1,
-		programDigest: artifact.Digest,
-		deadline:      r.clampDeadline(deadline),
+		id:        processID,
+		sessionID: sessionID,
+		input:     input,
+		history:   append([]HistoryMessage(nil), session.history...),
+		status:    durable.ProcessQueued,
+		attempt:   1,
+		createdAt: now,
+		updatedAt: now,
+		manifest:  spec,
+		revision:  1,
+		digest:    program.Digest,
+		deadline:  r.clampDeadline(deadline),
 		// A root manifest with history:false opts out of session-history sharing —
 		// each run sees only its own input and inherits no cross-run taint. Reuses
 		// the hideHistory delivery gate (and its persistence).
@@ -867,28 +855,10 @@ func (r *Runtime) Stop(processID string) (ProcessSnapshot, error) {
 			proc.stop()
 		}
 	case durable.ProcessYielded, durable.ProcessWaitingTask:
-		_, started, unsettled := proc.unsettledRollback()
-		_, open := proc.journal.outermostOpenBegin()
-		switch {
-		case unsettled:
-			// A rollback is parked on its pending task; walking away would
-			// leave external state undefined. Deny the task instead — that
-			// fails the rollback with the report — or resolve it to finish.
-			r.mu.Unlock()
-			return ProcessSnapshot{}, fmt.Errorf(
-				"%w: process %s is mid-rollback; resolve or deny its pending task instead", errs.Conflict, processID)
-		case !started && open:
-			// Parked inside an open section: roll it back before stopping — a
-			// stop is an abandonment without a retry. The settle dispatches
-			// drivers, so it runs off-lock; Stopping guards concurrent retries.
-			return r.spawnSettleLocked(proc, durable.ProcessStopping, func() {
-				r.stopProcess(processID, context.Canceled)
-			}), nil
-		default:
-			// No open section — or a settled rollback, which already ran (the
-			// park is its retry timer, now moot): stop plainly.
-			r.finishLocked(proc, durable.ProcessStopped, "", context.Canceled)
-		}
+		// A parked process stops where it stands. Its journal is the record of
+		// what ran — nothing is undone — so an open savepoint section is left
+		// open, and a later retry resumes or restarts from it.
+		r.finishLocked(proc, durable.ProcessStopped, "", context.Canceled)
 	case durable.ProcessStopping, durable.ProcessStopped:
 	default:
 		r.mu.Unlock()
@@ -959,28 +929,7 @@ func (r *Runtime) retryUnder(ctx context.Context, processID string, mode RetryMo
 		return ProcessSnapshot{}, fmt.Errorf("%w: session already has active process %s", errs.Conflict, session.activeProcessID)
 	}
 
-	state, started, unsettled := proc.unsettledRollback()
-	if unsettled {
-		// A rollback is in flight — an abandonment not yet concluded, or a
-		// guest abort whose settlement a crash or a failed compensation cut
-		// short. Resume the rollback — never the guest: replaying past a
-		// rolled-back tail is refused by the tape, and restarting would walk
-		// away from live effects. Running marks the settlement in flight and
-		// refuses concurrent retries.
-		if mode == RetryRestart {
-			r.mu.Unlock()
-			return ProcessSnapshot{}, fmt.Errorf("%w: process %s has an unfinished rollback; resume it first", errs.Conflict, processID)
-		}
-		if proc.abandoning != abandonFailure {
-			proc.err = ""
-		}
-		return r.spawnSettleLocked(proc, durable.ProcessRunning, func() {
-			r.settleRollback(processID)
-		}), nil
-	}
-
-	// Every branch below relaunches the guest; the settlement above stays
-	// available regardless of the binding. A process is an audit target: it
+	// Every branch below relaunches the guest. A process is an audit target: it
 	// never resumes or restarts under different program bytes.
 	if err := r.programBinding(proc); err != nil {
 		r.mu.Unlock()
@@ -988,29 +937,11 @@ func (r *Runtime) retryUnder(ctx context.Context, processID string, mode RetryMo
 	}
 
 	if mode == RetryRestart {
-		// Hard restart: fork from the beginning, giving the program a
-		// completely fresh revision with no shared prefix. Restarting is
-		// abandoning the current revision, so everything it registered and
-		// never committed rolls back first (revision law 2) — the settle runs
-		// off-lock and re-runs the process from scratch when it completes.
-		// A completed process committed its whole-process zone by finishing:
-		// nothing is uncommitted, so it restarts directly.
-		if proc.status != durable.ProcessCompleted {
-			proc.err = ""
-			return r.spawnSettleLocked(proc, durable.ProcessRunning, func() {
-				r.restartProcess(processID)
-			}), nil
-		}
+		// Hard restart: fork from the beginning, giving the program a completely
+		// fresh revision with no shared prefix. The abandoned attempt stays in
+		// the log as an audited, closed revision; nothing it did is undone.
+		proc.err = ""
 		r.forkJournalLocked(proc, 0, RetryRestart)
-	} else if started || proc.abandoning != "" {
-		// A settled rollback — the retry timer fired, or a human retried a
-		// failed/stopped process whose scope was rolled back: the abandoned
-		// attempt stays in the log; the scope re-runs fresh from its start,
-		// over compensated state. The standing abandonment stamp licenses the
-		// fork even when the scope had nothing registered and the rollback
-		// left no journal trace: the revision hit its wall and can never run
-		// again, so a retry must re-mint it, not replay it.
-		r.forkJournalLocked(proc, state.ScopeStart, RetryResume)
 	} else if proc.status == durable.ProcessYielded || proc.status == durable.ProcessWaitingTask {
 		// Resume from a park: no fork. The journal's open intent at the tail is
 		// re-driven by replay under its original idempotency key; a resolved
@@ -1022,46 +953,23 @@ func (r *Runtime) retryUnder(ctx context.Context, processID string, mode RetryMo
 		} else {
 			proc.cascade = false
 		}
+	} else if forkOffset, open := proc.journal.outermostOpenBegin(); open {
+		// Failed/stopped inside a savepoint section: fork at the section's
+		// sys.begin so the whole declared unit re-executes live. That is what
+		// the brackets are for — without the fork, a deterministic failure
+		// replays its broken completion to the same wall forever.
+		proc.err = ""
+		r.forkJournalLocked(proc, forkOffset, RetryResume)
 	} else {
-		// Failed/stopped/interrupted resume: same revision, no fork. A resume
-		// continues the attempt — replay serves everything recorded (an open
-		// intent at the tail re-drives under its original key) and the guest
-		// proceeds mid-flight, so an interruption never touches effects and
-		// never opens a new key space. Only a rollback mints a new revision.
-		// Reuse the whole child subtree: every delegation call is served or
-		// re-driven from the recorded prefix.
+		// Nothing bracketed: same revision, no fork. A resume continues the
+		// attempt — replay serves everything recorded (an open intent at the
+		// tail re-drives under its original key) and the guest proceeds
+		// mid-flight, so an interruption never opens a new key space. Reuse the
+		// whole child subtree: every delegation call is served or re-driven from
+		// the recorded prefix.
 		proc.resumeCascade()
 	}
 	return r.relaunchLocked(context.Background(), proc)
-}
-
-// spawnSettleLocked launches a rollback settlement off-lock: it marks the
-// process's transition, makes it durable and visible, then runs settle on the
-// runtime's wait group. The status it stamps (Running for a resumed
-// settlement, Stopping for a stop's rollback) is also the concurrency guard —
-// Retry and Stop refuse both. Called with r.mu held; unlocks it.
-func (r *Runtime) spawnSettleLocked(proc *processState, status durable.ProcessStatus, settle func()) ProcessSnapshot {
-	// Don't enroll a settlement goroutine once shutdown has begun (same WaitGroup
-	// race as relaunchLocked). The open compensation intent stays on the journal,
-	// so a restart resumes the rollback — nothing is lost by deferring it.
-	if r.closed {
-		snapshot := r.processSnapshotLocked(proc)
-		r.mu.Unlock()
-		return snapshot
-	}
-	proc.status = status
-	proc.updatedAt = r.now().UTC()
-	_ = r.appendProcess(proc)
-	snapshot := r.processSnapshotLocked(proc)
-	sessionID := proc.sessionID
-	r.enrollLocked()
-	r.mu.Unlock()
-	r.publish(sessionID, Event{Type: "process.updated", Data: snapshot})
-	go func() {
-		defer r.wg.Done()
-		settle()
-	}()
-	return snapshot
 }
 
 // relaunchLocked resets a process for a fresh quantum and starts it: queued,
@@ -1118,7 +1026,6 @@ func (r *Runtime) forkJournalLocked(proc *processState, forkOffset int, mode Ret
 	proc.revision++
 	proc.forkOffset = forkOffset
 	proc.lastFailureLength = 0
-	proc.abandoning = "" // the fork is the abandonment's conclusion
 	proc.journal = newLogJournal(
 		parent.log, parent.scope, parent.proc, proc.revision,
 		parent.history, forkOffset,
@@ -1221,13 +1128,5 @@ func (r *Runtime) Close(ctx context.Context) error {
 		return ctx.Err()
 	}
 
-	closeErrors := []error{}
-	for _, artifact := range r.programs.Close() {
-		image := artifact.Image
-		if image == nil {
-			continue
-		}
-		closeErrors = append(closeErrors, image.Close(context.Background()))
-	}
-	return errors.Join(closeErrors...)
+	return errors.Join(r.images.Close(context.Background())...)
 }

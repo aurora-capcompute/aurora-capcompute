@@ -73,7 +73,7 @@ assembly is [aurora-dist](https://github.com/aurora-capcompute/aurora-dist).
 | **Replay journal** | Every syscall is hash‑chained into the log as an *intent* then a *completion*, so a crashed process re‑drives deterministically |
 | **Tamper‑evidence** | A `journal.header` pins the program's identity per revision; replaying under changed code is refused |
 | **Retries** | Resume the same revision, or restart into a fresh copy‑on‑write revision; bounded abort‑retry budget |
-| **Rollback / sagas** | Guests register undo actions (`sys.compensate`) and unwind with `sys.abort`; compensations run newest‑first, idempotent, crash‑resumable |
+| **Savepoints** | `sys.begin`/`sys.commit` bracket a critical section; `sys.abort` — or a failure that leaves the bracket open — forks the journal there and re‑runs the whole section live |
 | **Human‑in‑the‑loop** | A yielded syscall becomes a durable **task** with a secret resolution token; `ResolveTask` re‑drives the original intent |
 | **Delegation** | `sys.spawn` starts granted sub‑programs as tracked child processes, with attenuated authority |
 | **Fair scheduling** | Per‑tenant round‑robin quanta, quotas, virtual‑actor residency (reactivated by replay) |
@@ -162,16 +162,17 @@ how one syscall, one crash, and one approval each travel the chain — see
 
 - **Complete mediation** — the Validator admits only granted, schema‑checked
   syscall names; the runtime's own protocol calls (`sys.input`, `sys.output`,
-  `sys.log`, `sys.compensate`, `sys.abort`, …) are granted explicitly but hidden
+  `sys.log`, `sys.abort`, …) are granted explicitly but hidden
   from the program's menu.
 - **Journal** — each syscall is journaled as an intent before it runs and a
   completion before the guest observes it, hash‑chained per session. Retries fork
   the journal copy‑on‑write; a failed process resumes right after its outermost
   open `sys.begin` savepoint.
-- **Rollback** — a guest registers undo with `sys.compensate` and unwinds with
-  `sys.abort{reason, retry_seconds}`; compensations run newest‑first, journaled and
-  idempotency‑keyed, then the section retries after the delay or finishes as
-  `compensated`.
+- **Savepoints** — a guest brackets a critical section with `sys.begin`/
+  `sys.commit`. `sys.abort{reason}` abandons the open section: the journal forks
+  at its `sys.begin` and the whole section re‑executes live, bounded by an
+  abort‑retry budget. Nothing is undone — a section that must be re‑runnable is
+  the program's own contract.
 - **Approval** — a yielded syscall becomes a durable task with its intent left
   open; resolving it re‑drives the intent under its original idempotency key.
 - **Scheduling** — root processes are quanta of a fair‑share scheduler; delegated
@@ -205,10 +206,10 @@ aurora/                 the PUBLIC API — import only this
 internal/agent/         the runtime engine (Go's internal/ rule hides it)
   runtime.go            lifecycle + scheduler wiring
   manifest.go           the grant model + ValidateManifest
-  program.go            program registry + JSON-Schema validation
-  lifecycle.go          sys.input/output/log/compensate/abort
+  direct/               the only door to capcompute: compile, spawn, quantum
+  lifecycle.go          sys.input/output/log/abort
   delegation.go         sys.spawn (child agents)
-  compensate.go         saga rollback execution
+  abort.go              abort/failure re-drive and section refork
   restore.go            rebuild state by replaying event streams
   eventlog/             the append-only Log interface (no concrete store)
   host/                 per-process dispatcher stack over capcompute.Stack

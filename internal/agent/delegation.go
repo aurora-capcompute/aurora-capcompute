@@ -81,7 +81,7 @@ func (r *spawnRouter) Dispatch(ctx context.Context, cred ProcessContext, syscall
 	// Validate the input against the child program's declared input schema
 	// before spawning — a mismatch is a recoverable observation the parent can
 	// correct, not a born-invalid child.
-	if err := r.runtime.programs.ValidateInput(args.Program, input); err != nil {
+	if err := r.runtime.images.ValidateInput(ProgramID(args.Program), input); err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("spawn: %v", err)), nil
 	}
 	return r.spawn(ctx, cred, spec, input)
@@ -147,10 +147,10 @@ func (r *spawnRouter) capability() sys.Capability {
 			desc.WriteString(";")
 		}
 		desc.WriteString("\n- " + spec.Program)
-		artifact, err := r.runtime.programs.Resolve(spec.Program)
+		program, err := r.runtime.programs.resolve(spec.Program)
 		known := err == nil
-		if known && artifact.Description != "" {
-			desc.WriteString(": " + artifact.Description)
+		if known && program.Description != "" {
+			desc.WriteString(": " + program.Description)
 		}
 		if grants := visibleGrantNames(spec); len(grants) > 0 {
 			desc.WriteString(" [can use: " + strings.Join(grants, ", ") + "]")
@@ -162,9 +162,9 @@ func (r *spawnRouter) capability() sys.Capability {
 		// then fails cleanly with "program is not registered").
 		inputSchema := json.RawMessage(`{}`)
 		if known {
-			desc.WriteString(" input=" + compactSchema(artifact.Input.Document) + " output=" + compactSchema(artifact.Output.Document))
-			if len(artifact.Input.Document) > 0 {
-				inputSchema = artifact.Input.Document
+			desc.WriteString(" input=" + compactSchema(program.Input) + " output=" + compactSchema(program.Output))
+			if len(program.Input) > 0 {
+				inputSchema = program.Input
 			}
 		}
 		branches = append(branches, spawnBranchSchema(spec.Program, inputSchema))
@@ -362,7 +362,7 @@ func (r *Runtime) createChildProcess(ctx context.Context, parentProcessID string
 	if input == "" {
 		return ProcessSnapshot{}, fmt.Errorf("%w: input is required", errs.Invalid)
 	}
-	artifact, err := r.programs.Resolve(manifest.Program)
+	program, err := r.programs.resolve(manifest.Program)
 	if err != nil {
 		return ProcessSnapshot{}, err
 	}
@@ -408,7 +408,7 @@ func (r *Runtime) createChildProcess(ctx context.Context, parentProcessID string
 		updatedAt:       now,
 		manifest:        manifest,
 		revision:        1,
-		programDigest:   artifact.Digest,
+		digest:          program.Digest,
 		parentProcessID: parentProcessID,
 		hideHistory:     !shareHistory,
 	}
@@ -545,8 +545,6 @@ func childTerminal(snapshot ProcessSnapshot) (answer string, labels []string, do
 		return "", snapshot.Labels, true, fmt.Errorf("child process stopped")
 	case durable.ProcessInterrupted:
 		return "", snapshot.Labels, true, fmt.Errorf("child process interrupted")
-	case durable.ProcessCompensated:
-		return "", snapshot.Labels, true, fmt.Errorf("child process rolled back: %s", snapshot.Answer)
 	default:
 		return "", nil, false, nil
 	}
@@ -583,7 +581,7 @@ func (r *Runtime) resumeParentIfWaiting(parentProcessID string) {
 // isTerminal reports whether a process status is a final state (no further execution).
 func isTerminal(status durable.ProcessStatus) bool {
 	switch status {
-	case durable.ProcessCompleted, durable.ProcessFailed, durable.ProcessStopped, durable.ProcessInterrupted, durable.ProcessCompensated:
+	case durable.ProcessCompleted, durable.ProcessFailed, durable.ProcessStopped, durable.ProcessInterrupted:
 		return true
 	default:
 		return false

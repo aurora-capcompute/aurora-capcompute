@@ -3,7 +3,7 @@ package agent
 // The quantum deadline is a bound on execution, not a verdict on the work. A
 // guest that runs out of wall-clock — very often because something it called
 // hung, not because it misbehaved — must come back interrupted, with its journal
-// standing and its effects uncompensated, and must be resumable.
+// standing, and must be resumable.
 
 import (
 	"context"
@@ -62,8 +62,7 @@ func deadlineRuntime(t *testing.T, deadline time.Duration) (*Runtime, *blockingD
 
 // A quantum that runs out of time is interrupted, never stopped: stopping is a
 // deliberate abort and rolls the open section back, while a deadline says
-// nothing about whether the work was good. Getting this wrong would compensate
-// away a process's effects because a vendor's API hung.
+// nothing about whether the work was good.
 func TestDeadlineInterruptsRatherThanStops(t *testing.T) {
 	runtime, dispatchers, processID := deadlineRuntime(t, 200*time.Millisecond)
 

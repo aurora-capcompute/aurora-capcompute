@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"sort"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
@@ -106,7 +107,7 @@ func (r *Runtime) restoreSession(proj durable.Projection, journals map[string]ma
 			answer:            sr.Answer,
 			err:               sr.Error,
 			manifest:          em.Clone(),
-			programDigest:     sr.ProgramDigest,
+			digest:            direct.Digest{ArtifactDigest: sr.ProgramDigest, SourceCodeDigest: sr.SourceCodeDigest},
 			hideHistory:       sr.HideHistory,
 			labels:            append([]string(nil), sr.Labels...),
 			inputLabels:       append([]string(nil), sr.InputLabels...),
@@ -114,7 +115,7 @@ func (r *Runtime) restoreSession(proj durable.Projection, journals map[string]ma
 			childProcessIDs:   append([]string(nil), sr.ChildProcessIDs...),
 			childSpawnOffsets: append([]int(nil), sr.ChildSpawnOffsets...),
 			forkOffset:        sr.ForkOffset,
-			abandoning:        sr.Abandoning,
+			abortRetries:      sr.AbortRetries,
 		}
 		if proc.revision == 0 {
 			proc.revision = 1

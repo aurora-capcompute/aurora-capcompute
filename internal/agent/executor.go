@@ -6,24 +6,79 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct/process"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/errs"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/sched"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
-	"github.com/aurora-capcompute/capcompute"
 )
 
-func toResult(result capcompute.ResumeResult) sched.Result {
+// processActivator is the application half of the run queue's seam: it puts one
+// process revision on the CPU. It assembles the revision's dispatcher chain
+// (monitor stack, replay tape over the journal, task layer, delegation routes,
+// drivers) and hands it to the direct package, which owns everything below —
+// instantiating the guest from the program's compiled image and starting its
+// quantum. Activation is exactly journal-replay wiring — the journal, not the
+// instance, is the durable process — which is why the queue cannot do it and the
+// runtime must.
+type processActivator struct{ runtime *Runtime }
+
+func (a processActivator) Execute(ctx context.Context, key processKey) (process.Handle, error) {
+	r := a.runtime
+	r.mu.Lock()
+	proc := r.processes[key.processID]
+	if proc != nil && proc.revision != key.revision {
+		// The process has forked past the revision this quantum was submitted
+		// for; the submission is stale and must not run.
+		proc = nil
+	}
+	var cred ProcessContext
+	var program ProgramID
+	if proc != nil {
+		cred = ProcessContext{
+			TenantID:  r.tenantID,
+			SessionID: proc.sessionID,
+			ProcessID: proc.id,
+			Revision:  proc.revision,
+			Digest:    proc.digest,
+		}
+		program = ProgramID(proc.manifest.Program)
+	}
+	r.mu.Unlock()
+	if proc == nil {
+		return nil, fmt.Errorf("%w: no process for pid %s", errs.NotFound, key)
+	}
+	if err := r.programBinding(proc); err != nil {
+		return nil, err
+	}
+	return r.images.Spawn(ctx, program, cred, r.factory.NewDispatcher)
+}
+
+// processMachine is the hardware half of the seam: it waits out one quantum and
+// releases the instance afterwards. It holds no runtime state, because it needs
+// none — the direct package speaks for the processor, and this type only
+// restates its handle in the queue's vocabulary.
+type processMachine struct{}
+
+func (processMachine) Resume(_ context.Context, handle process.Handle) (sched.Result, error) {
+	return quantumResult(<-handle.Result()), nil
+}
+
+func (processMachine) Release(handle process.Handle) { handle.Release() }
+
+// quantumResult restates a process outcome as a queue outcome.
+func quantumResult(result process.Result) sched.Result {
 	status := sched.Failed
 	switch result.Status {
-	case capcompute.ResumeCompleted:
+	case process.Completed:
 		status = sched.Completed
-	case capcompute.ResumeYielded:
+	case process.Yielded:
 		status = sched.Yielded
-	case capcompute.ResumeStopped:
+	case process.Stopped:
 		status = sched.Stopped
 	}
-	return sched.Result{Status: status, Err: result.Err}
+	return sched.Result{Status: status, Err: result.Error}
 }
 
 func (r *Runtime) execute(ctx context.Context, processID string) {
@@ -108,10 +163,10 @@ func (r *Runtime) execute(ctx context.Context, processID string) {
 	r.mu.Unlock()
 	switch result.Status {
 	case sched.Completed:
-		if r.guestAborted(processID) {
-			// The guest ended with sys.abort: roll the section back and apply
-			// its retry policy instead of reading an answer.
-			r.settleRollback(processID)
+		if reason, aborted := r.guestAbort(processID); aborted {
+			// The guest ended with sys.abort: re-drive its open savepoint
+			// section instead of reading an answer.
+			r.retryAbortedSection(processID, reason)
 			return
 		}
 		answer, err := r.answerFromJournal(processID)
@@ -140,9 +195,7 @@ func (r *Runtime) execute(ctx context.Context, processID string) {
 			// The quantum ran out of wall-clock. That is a bound on execution,
 			// not a verdict on the work: the guest may have been waiting on a
 			// third party that hung. So the process is interrupted — its journal
-			// stands, its effects are not compensated, and a retry resumes from
-			// the last open savepoint. An operator Stop, by contrast, is a
-			// deliberate abort and does roll back.
+			// stands, and a retry resumes from the last open savepoint.
 			r.finish(processID, durable.ProcessInterrupted, "", result.Err)
 		default:
 			r.stopProcess(processID, result.Err)
@@ -294,8 +347,8 @@ func (r *Runtime) journalAppendPublisher(sessionID string) func(string, uint64, 
 // synchronous-failure rollback callers depend on); an async ordered-append
 // pipeline is the proper redesign if a blocking log is ever required. The
 // context is non-cancellable on purpose: a metadata append must complete on
-// shutdown to persist final state (unlike rollback compensations, which derive
-// from the cancellable baseCtx).
+// shutdown to persist final state (unlike background work, which derives from
+// the cancellable baseCtx).
 func (r *Runtime) appendProcess(proc *processState) error {
 	ev, err := durable.ProcessStateEvent(r.now().UTC(), r.storedProcessLocked(proc))
 	if err != nil {

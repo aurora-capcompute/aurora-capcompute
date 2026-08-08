@@ -7,10 +7,26 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/capcompute/sys"
+)
+
+// Agent lifecycle syscalls. The guest fetches its input and reports its answer
+// through these calls so both are recorded on the replay journal — making the
+// per-process tape the full narrative: sys.input → capability calls → sys.output.
+const (
+	callSysInput  = sys.SyscallInput
+	callSysOutput = sys.SyscallOutput
+	// callSysLog is the side-effect-free progress report, served by the
+	// progress dispatcher below the task layer.
+	callSysLog = sys.SyscallLog
+	// callSysAbort abandons the open savepoint section instead of finishing: the
+	// runtime forks the journal at the section's sys.begin and re-runs it. This
+	// call is the guest's own way to abandon its revision — the only one that
+	// belongs on the journal; the host's own abandonments (a failure, a stop, a
+	// restart) are management state on the process, never journal records.
+	callSysAbort = sys.SyscallAbort
 )
 
 type finishArgs struct {
@@ -18,8 +34,7 @@ type finishArgs struct {
 }
 
 type abortArgs struct {
-	Reason       string `json:"reason"`
-	RetrySeconds *int64 `json:"retry_seconds"`
+	Reason string `json:"reason"`
 }
 
 type lifecycleDispatcher struct {
@@ -29,7 +44,7 @@ type lifecycleDispatcher struct {
 	history        []HistoryMessage
 	manifest       manifest.Manifest
 	attempt        int
-	validateAnswer func(json.RawMessage) error
+	validateAnswer func(string) error
 }
 
 func newLifecycleDispatcher(
@@ -39,7 +54,7 @@ func newLifecycleDispatcher(
 	history []HistoryMessage,
 	manifest manifest.Manifest,
 	attempt int,
-	validateAnswer func(json.RawMessage) error,
+	validateAnswer func(string) error,
 ) *lifecycleDispatcher {
 	return &lifecycleDispatcher{
 		next:           next,
@@ -90,10 +105,9 @@ func (l *lifecycleDispatcher) Dispatch(ctx context.Context, cred ProcessContext,
 		}
 		return sys.Result(json.RawMessage(`{"ok":true}`)), nil
 	case sys.SyscallAbort:
-		// The reason and retry delay travel in syscall.Args and are journaled as
-		// the terminal call; the runtime reads them back, executes the registered
-		// compensations, and applies the retry. Acknowledge so the guest returns.
-		// Empty args are a bare "roll back now, no retry".
+		// The reason travels in syscall.Args and is journaled as the terminal
+		// call; the runtime reads it back and re-runs the abandoned section.
+		// Acknowledge so the guest returns. Empty args are a bare "give up".
 		if len(syscall.Args) > 0 {
 			var args abortArgs
 			if err := json.Unmarshal(syscall.Args, &args); err != nil {
@@ -120,7 +134,7 @@ func (l *lifecycleDispatcher) Capabilities() []sys.Capability {
 		},
 		sys.Capability{
 			Name:        sys.SyscallAbort,
-			Description: "roll the open section back (registered compensations run newest-first), then retry or stop",
+			Description: "abandon the open section and re-run it from its sys.begin",
 			Hidden:      true,
 		},
 	)
@@ -159,25 +173,6 @@ var declassifyInputSchema = json.RawMessage(`{
 // history entry — the taint the loopback carries. It seeds the reading run's
 // taint (via the sys.input result), so a prior run's provenance is not laundered
 // by re-reading its answer.
-// validateCompensationArgs holds a deferred inverse's args to the same input
-// schema its forward call would face. The rollback path that fires the inverse
-// at abort time does not re-run the Validator, so this is where a compensation
-// with args that violate the capability's schema (its authority boundary) is
-// refused — at registration, before it can be journaled and later executed.
-func validateCompensationArgs(capability sys.Capability, rawArgs json.RawMessage) error {
-	if len(capability.InputSchema) == 0 {
-		return nil
-	}
-	schema, err := direct.prepareSchema("compensation", capability.InputSchema)
-	if err != nil {
-		return fmt.Errorf("compile %s schema: %w", capability.Name, err)
-	}
-	if err := schema.validateJSON(rawArgs); err != nil {
-		return fmt.Errorf("%s args violate its input schema: %w", capability.Name, err)
-	}
-	return nil
-}
-
 func historyLabels(history []HistoryMessage) []string {
 	var labels []string
 	for i := range history {
@@ -186,8 +181,10 @@ func historyLabels(history []HistoryMessage) []string {
 	return labels
 }
 
+// answerFromJournal reads a completed process's answer from the tail of its
+// journal: the sys.output intent, and the completion that accepted it.
 func (r *Runtime) answerFromJournal(processID string) (string, error) {
-	journal, ok := r.Journal(processID)
+	journal, ok := r.liveJournal(processID)
 	if !ok {
 		return "", errors.New("agent process journal is unavailable")
 	}

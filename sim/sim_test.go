@@ -7,8 +7,7 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 )
 
-// The scripted guest: two compensatable effects around reads and one
-// non-compensatable effect.
+// The scripted guest: effects around reads.
 var program = Program{
 	{Name: "clock.now"},
 	{Name: "transfer.out", Args: `{"amount":100}`},

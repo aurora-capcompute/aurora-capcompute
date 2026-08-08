@@ -48,9 +48,9 @@ func TestChildTerminalCarriesLabels(t *testing.T) {
 	}
 
 	// The error terminals must carry the taint too — these are the states the
-	// spawn error branches propagate. durable.ProcessCompensated is the sharpest: its
-	// error text embeds the guest's rollback reason, which can carry read data.
-	for _, status := range []durable.ProcessStatus{durable.ProcessFailed, durable.ProcessStopped, durable.ProcessInterrupted, durable.ProcessCompensated} {
+	// spawn error branches propagate. durable.ProcessFailed is the sharpest: its
+	// error text embeds the guest's own abort reason, which can carry read data.
+	for _, status := range []durable.ProcessStatus{durable.ProcessFailed, durable.ProcessStopped, durable.ProcessInterrupted} {
 		_, labels, done, err := childTerminal(ProcessSnapshot{
 			Status: status, Answer: "leak", Labels: []string{"secret"},
 		})

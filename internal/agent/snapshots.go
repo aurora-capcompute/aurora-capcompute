@@ -75,7 +75,7 @@ func (r *Runtime) processSnapshotLocked(proc *processState) ProcessSnapshot {
 		StartedAt:       copyTime(proc.startedAt),
 		CompletedAt:     copyTime(proc.completedAt),
 		Manifest:        proc.manifest.Clone(),
-		ProgramDigest:   proc.programDigest,
+		ProgramDigest:   proc.digest.ArtifactDigest,
 		ParentProcessID: proc.parentProcessID,
 		ChildProcessIDs: append([]string(nil), proc.childProcessIDs...),
 	}
@@ -149,7 +149,8 @@ func (r *Runtime) storedProcessLocked(proc *processState) durable.Process {
 		Answer:            proc.answer,
 		Error:             proc.err,
 		Manifest:          proc.manifest.Clone(),
-		ProgramDigest:     proc.programDigest,
+		ProgramDigest:     proc.digest.ArtifactDigest,
+		SourceCodeDigest:  proc.digest.SourceCodeDigest,
 		HideHistory:       proc.hideHistory,
 		Labels:            append([]string(nil), proc.labels...),
 		InputLabels:       append([]string(nil), proc.inputLabels...),
@@ -158,7 +159,7 @@ func (r *Runtime) storedProcessLocked(proc *processState) durable.Process {
 		ChildProcessIDs:   append([]string(nil), proc.childProcessIDs...),
 		ChildSpawnOffsets: append([]int(nil), proc.childSpawnOffsets...),
 		ForkOffset:        proc.forkOffset,
-		Abandoning:        proc.abandoning,
+		AbortRetries:      proc.abortRetries,
 	}
 }
 

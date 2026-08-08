@@ -17,8 +17,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/aurora-capcompute/capcompute/sys"
 	"github.com/aurora-capcompute/aurora-capcompute/replay"
+	"github.com/aurora-capcompute/capcompute/sys"
 )
 
 // Kind classifies a journal record within the fixed envelope.
@@ -29,14 +29,6 @@ const (
 	KindIntent Kind = "intent"
 	// KindCompletion records the outcome of the immediately preceding intent.
 	KindCompletion Kind = "completion"
-	// KindCompensationIntent records that an inverse syscall is about to
-	// undo the completed effect at the position its Compensates field names.
-	// The first compensation record ends the journal's execution section:
-	// an unwound process is terminal.
-	KindCompensationIntent Kind = "compensation_intent"
-	// KindCompensationCompletion records the outcome of the immediately
-	// preceding compensation intent.
-	KindCompensationCompletion Kind = "compensation_completion"
 )
 
 // Header identifies what wrote a journal: the syscall ABI version, the
@@ -64,12 +56,10 @@ type Record struct {
 	// Journal implementation at append (zero when the journal has no attempt
 	// notion). It scopes the intent identity: a record in a fork's shared
 	// prefix keeps its origin revision, so a crash re-drive recomputes the
-	// original idempotency key — while a rolled-back section's retry appends
-	// fresh records under the new revision and can never adopt the compensated
+	// original idempotency key — while an abandoned section's retry appends
+	// fresh records under the new revision and can never adopt the abandoned
 	// attempt's recorded effects.
 	Revision uint64 `json:"revision,omitempty"`
-	// Compensates names the intent position a compensation record undoes.
-	Compensates *int `json:"compensates,omitempty"`
 
 	// Payload: exactly one of the two, by Kind.
 	Syscall *sys.Syscall       `json:"syscall,omitempty"`
@@ -130,17 +120,6 @@ func (e ChainBrokenError) Error() string {
 	return fmt.Sprintf("journal hash chain broken at position %d", e.Position)
 }
 
-// ProcessUnwoundError means execution replay reached the journal's
-// compensation section: this revision was rolled back and its registered
-// undos ran; it cannot be resumed.
-type ProcessUnwoundError struct {
-	Position int
-}
-
-func (e ProcessUnwoundError) Error() string {
-	return fmt.Sprintf("process was unwound: compensation section starts at position %d", e.Position)
-}
-
 // Tape is a journal-backed replay tape.
 type Tape struct {
 	journal Journal
@@ -170,17 +149,12 @@ func NewTape(journal Journal, header Header) (*Tape, error) {
 	return &Tape{journal: journal, header: header}, nil
 }
 
-// loadExecution reads the record at position and enforces the read path's one
-// law about rolled-back state: a compensation record must never replay as if
-// live (ProcessUnwoundError). Anything else must be the expected execution
-// kind, or the journal is corrupt.
+// loadExecution reads the record at position: it must be the expected kind, or
+// the journal is corrupt.
 func (t *Tape) loadExecution(position int, want Kind, reason string) (Record, error) {
 	record, err := t.journal.Load(position)
 	if err != nil {
 		return Record{}, err
-	}
-	if record.Kind == KindCompensationIntent || record.Kind == KindCompensationCompletion {
-		return Record{}, ProcessUnwoundError{Position: position}
 	}
 	if record.Kind != want {
 		return Record{}, CorruptJournalError{Position: position, Reason: reason}
@@ -317,17 +291,12 @@ func Verify(journal Journal) error {
 	if err != nil {
 		return err
 	}
-	// Structure: an execution section of intent/completion pairs (at most one
-	// trailing open intent), optionally followed by a terminal compensation
-	// section of compensation pairs (at most one trailing open compensation
-	// intent). The abandonment that triggered unwinding may leave the
-	// execution section's last intent open forever — the failing dispatch
-	// never completed — and that is legal history.
+	// Structure: intent/completion pairs, with at most one trailing open
+	// intent — an abandoned revision may leave its last intent open forever
+	// (the failing dispatch never completed), and that is legal history.
 	const (
 		wantIntent = iota
 		wantCompletion
-		wantCompensationIntent
-		wantCompensationCompletion
 	)
 	expect := wantIntent
 	for position := 0; position < journal.Length(); position++ {
@@ -337,9 +306,6 @@ func Verify(journal Journal) error {
 		}
 		if record.Position != position {
 			return CorruptJournalError{Position: position, Reason: fmt.Sprintf("record carries position %d", record.Position)}
-		}
-		if (expect == wantIntent || expect == wantCompletion) && record.Kind == KindCompensationIntent {
-			expect = wantCompensationIntent // the execution section is over
 		}
 		switch expect {
 		case wantIntent:
@@ -352,16 +318,6 @@ func Verify(journal Journal) error {
 				return CorruptJournalError{Position: position, Reason: "expected a completion record"}
 			}
 			expect = wantIntent
-		case wantCompensationIntent:
-			if record.Kind != KindCompensationIntent || record.Syscall == nil || record.Compensates == nil {
-				return CorruptJournalError{Position: position, Reason: "expected a compensation intent record"}
-			}
-			expect = wantCompensationCompletion
-		case wantCompensationCompletion:
-			if record.Kind != KindCompensationCompletion || record.Result == nil {
-				return CorruptJournalError{Position: position, Reason: "expected a compensation completion record"}
-			}
-			expect = wantCompensationIntent
 		}
 		if record.PrevHash != prev {
 			return ChainBrokenError{Position: position}
@@ -380,7 +336,7 @@ func Verify(journal Journal) error {
 // re-drive of an open intent (served from a fork's shared prefix, origin
 // revision intact) recomputes the original key, while a rolled-back section's
 // re-execution writes fresh records under the new revision and gets a fresh
-// key space — its effects are new effects, never the compensated attempt's.
+// key space — its effects are new effects, never the abandoned attempt's.
 func intentKey(header Header, record Record) (string, error) {
 	if record.Syscall == nil {
 		return "", CorruptJournalError{Position: record.Position, Reason: "intent identity requires a syscall"}
@@ -408,7 +364,7 @@ func prevHash(journal Journal, header Header, position int) (string, error) {
 // position and the chain hash of its predecessor (or of the header for the
 // first record), and returns the record as stored — the Journal may stamp its
 // attempt scope (Revision) on the way in. Every appender — execution and
-// compensation alike — goes through here, so the chain semantics cannot drift
+// goes through here, so the chain semantics cannot drift
 // between them.
 func appendChained(journal Journal, header Header, record Record) (Record, error) {
 	record.Position = journal.Length()

@@ -100,6 +100,16 @@ type schema struct {
 	compiled *jsonschema.Schema
 }
 
+func (s schema) validate(text string) error {
+	if s.compiled == nil {
+		return fmt.Errorf("%w: schema is not compiled", errs.Invalid)
+	}
+	if err := s.compiled.Validate(text); err == nil {
+		return nil
+	}
+	return s.validateJSON(json.RawMessage(text))
+}
+
 func (s schema) validateJSON(raw json.RawMessage) error {
 	if s.compiled == nil {
 		return fmt.Errorf("%w: schema is not compiled", errs.Invalid)
@@ -152,7 +162,10 @@ func compileDocument(what string, raw json.RawMessage) (*jsonschema.Schema, erro
 
 type Registry[T ProgramID, P ProcessEntry] interface {
 	Add(ctx context.Context, data Data[T]) (Digest, error)
+	Exists(id T) bool
 	Remove(id T) bool
+	ValidateInput(id T, input string) error
+	ValidateOutput(id T, answer string) error
 	Close(ctx context.Context) []error
 	Spawn(ctx context.Context, id T, processEntry P, mkDispatcher func(context.Context, P) (sys.Dispatcher[P], error)) (process.Handle, error)
 }
@@ -171,7 +184,7 @@ func (a *registryImpl[T, P]) Add(ctx context.Context, data Data[T]) (Digest, err
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if existing, taken := a.programs[data.ID]; taken {
-		return Digest{}, fmt.Errorf("%w: program %q is already registered; remove it first",
+		return Digest{}, fmt.Errorf("%w: program %q is already registered with identity %s; remove it first",
 			errs.Conflict, data.ID, existing.ArtifactDigest)
 	}
 	art, err := load(ctx, a.compiler, data)
@@ -182,15 +195,44 @@ func (a *registryImpl[T, P]) Add(ctx context.Context, data Data[T]) (Digest, err
 	return Digest{ArtifactDigest: art.ArtifactDigest, SourceCodeDigest: art.SourceCodeDigest}, nil
 }
 
+func (a *registryImpl[T, P]) Exists(id T) bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	_, ok := a.programs[id]
+	return ok
+}
+
 func (a *registryImpl[T, P]) Remove(id T) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	_, ok := a.programs[id]
+	art, ok := a.programs[id]
 	if !ok {
 		return false
 	}
 	delete(a.programs, id)
+	_ = art.Image.Close(context.Background())
 	return true
+}
+
+func (a *registryImpl[T, P]) ValidateInput(id T, input string) error {
+	return a.validate(id, "input", input, func(art artifact[T]) schema { return art.Input })
+}
+
+func (a *registryImpl[T, P]) ValidateOutput(id T, answer string) error {
+	return a.validate(id, "output", answer, func(art artifact[T]) schema { return art.Output })
+}
+
+func (a *registryImpl[T, P]) validate(id T, what, text string, pick func(artifact[T]) schema) error {
+	a.mu.RLock()
+	art, ok := a.programs[id]
+	a.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("%w: program %q does not exist", errs.NotFound, id)
+	}
+	if err := pick(art).validate(text); err != nil {
+		return fmt.Errorf("%w: %s rejected by program %q %s schema: %v", errs.Invalid, what, id, what, err)
+	}
+	return nil
 }
 
 func (a *registryImpl[T, P]) Close(ctx context.Context) []error {

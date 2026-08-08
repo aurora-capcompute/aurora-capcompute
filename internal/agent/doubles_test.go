@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"testing"
+	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/capcompute/sys"
@@ -205,4 +207,22 @@ func (p *testDispatchers) Normalize(syscall string, config json.RawMessage) (jso
 
 func (*testDispatchers) NewDispatcher(context.Context, ProcessContext, manifest.Manifest) (sys.Dispatcher[ProcessContext], error) {
 	return nil, nil
+}
+
+// waitForTerminal blocks until a process reaches any final state.
+func waitForTerminal(t *testing.T, runtime *Runtime, processID string) ProcessSnapshot {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		snap, err := runtime.GetProcess(processID)
+		if err != nil {
+			t.Fatalf("get process: %v", err)
+		}
+		if isTerminal(snap.Status) {
+			return snap
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("process did not reach a terminal status within timeout")
+	return ProcessSnapshot{}
 }

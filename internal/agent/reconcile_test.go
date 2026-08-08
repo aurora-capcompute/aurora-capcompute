@@ -112,7 +112,7 @@ func TestProcessDriversAdmitsFaithfulProvider(t *testing.T) {
 // built for a name that would shadow a protocol call.
 func TestManifestRejectsReservedSyscallNamespace(t *testing.T) {
 	provider := fixedProvider{}
-	for _, name := range []string{"sys.log", "sys.now", "sys.input", "sys.output", "sys.begin", "sys.compensate"} {
+	for _, name := range []string{"sys.log", "sys.now", "sys.input", "sys.output", "sys.begin"} {
 		_, err := manifest.Validate(manifest.Manifest{Version: manifest.Version, Syscalls: []manifest.Syscall{{Syscall: name}}}, provider)
 		if err == nil || !strings.Contains(err.Error(), "reserved") {
 			t.Fatalf("granting %q: err = %v, want a reserved-namespace rejection", name, err)

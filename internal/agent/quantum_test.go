@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aurora-capcompute/capcompute"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct/process"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/errs"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
@@ -50,16 +50,16 @@ func seamRuntime(t *testing.T) *Runtime {
 func TestQuantumResultRestatesProcessorOutcomes(t *testing.T) {
 	cause := errors.New("boom")
 	for _, test := range []struct {
-		from capcompute.ResumeStatus
+		from process.Status
 		want sched.Status
 	}{
-		{capcompute.ResumeCompleted, sched.Completed},
-		{capcompute.ResumeYielded, sched.Yielded},
-		{capcompute.ResumeStopped, sched.Stopped},
-		{capcompute.ResumeFailed, sched.Failed},
-		{capcompute.ResumeStatus("something new"), sched.Failed},
+		{process.Completed, sched.Completed},
+		{process.Yielded, sched.Yielded},
+		{process.Stopped, sched.Stopped},
+		{process.Failed, sched.Failed},
+		{process.Status("something new"), sched.Failed},
 	} {
-		got := toResult(capcompute.ResumeResult{Status: test.from, Err: cause})
+		got := quantumResult(process.Result{Status: test.from, Error: cause})
 		if got.Status != test.want {
 			t.Errorf("%s became %s, want %s", test.from, got.Status, test.want)
 		}

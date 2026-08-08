@@ -1,7 +1,6 @@
 package aurora
 
 import (
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct"
 	"github.com/aurora-capcompute/capcompute/sys"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent"
@@ -29,9 +28,9 @@ type SessionGraphProcess = agent.SessionGraphProcess
 type Event = agent.Event
 type JournalEvent = agent.JournalEvent
 type ProgressEvent = agent.ProgressEvent
-type ProgramArtifact = direct.artifact
-type ProgramData = direct.Data
-type Schema = direct.schema
+type ProgramID = agent.ProgramID
+type ProgramArtifact = agent.Program
+type ProgramData = agent.ProgramData
 
 // Status types
 
@@ -47,7 +46,6 @@ const (
 	ProcessCompleted   = durable.ProcessCompleted
 	ProcessStopped     = durable.ProcessStopped
 	ProcessFailed      = durable.ProcessFailed
-	ProcessCompensated = durable.ProcessCompensated
 )
 
 type RetryMode = agent.RetryMode

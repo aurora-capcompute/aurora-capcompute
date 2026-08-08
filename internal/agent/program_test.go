@@ -4,16 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
-
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct"
 )
 
 // testProgram is a conversational test program as an app hands it over: string
 // message in, string answer out. Callers that only care about behavior take this
 // as-is; a test probing interface handling edits a field.
-func testProgram(id string, wasm []byte) direct.Data {
-	return direct.Data{
-		ID:          id,
+func testProgram(id string, wasm []byte) ProgramData {
+	return ProgramData{
+		ID:          ProgramID(id),
 		SourceCode:  wasm,
 		Description: "a test program",
 		Input:       json.RawMessage(`{"type":"string"}`),

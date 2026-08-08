@@ -256,7 +256,7 @@ func validateSyscalls(syscalls []Syscall, normalizer Normalizer) error {
 		// The sys.* namespace belongs to the processor and the runtime. A manifest
 		// may grant only its two runtime-served members (sys.spawn, sys.timer);
 		// every other sys.* name is a reserved protocol call (sys.input/output/
-		// log/now/random/compensate/abort/declassify/begin/commit). Granting one
+		// log/now/random/abort/declassify/begin/commit). Granting one
 		// as a leaf would hand it to a driver, which could then shadow the
 		// runtime's own protocol capability — so it is refused up front, the way
 		// the reserved "syscall:" label namespace is (sys.NormalizeLabels).

@@ -262,9 +262,11 @@ func TestRuntimeProgramLifecycle(t *testing.T) {
 
 	// Hot-register the program.
 	addTestProgram(t, runtime, "program@1", wasm)
-	if got := runtime.Programs(); len(got) != 1 || got[0].ID != "program@1" {
+	got := runtime.Programs()
+	if len(got) != 1 || got[0].ID != "program@1" {
 		t.Fatalf("programs after register = %v", got)
 	}
+	registered := got[0].Digest
 
 	// A run now dispatches through the freshly registered program.
 	session, err := runtime.CreateSession("", nil)
@@ -281,19 +283,21 @@ func TestRuntimeProgramLifecycle(t *testing.T) {
 	}
 	waitForStatus(t, runtime, proc.ID, durable.ProcessCompleted)
 
-	// Re-adding the identical program is a no-op.
+	// Registering over a taken id withdraws the old program and installs the new
+	// one. Identical bytes land on the identical identity; different bytes are a
+	// different program under the same name.
 	if err := runtime.AddProgram(context.Background(), testProgram("program@1", wasm)); err != nil {
 		t.Fatalf("re-add the identical program: %v", err)
 	}
-	if len(runtime.Programs()) != 1 {
-		t.Fatalf("re-add changed registry: %v", runtime.Programs())
+	if got := runtime.Programs(); len(got) != 1 || got[0].Digest != registered {
+		t.Fatalf("re-adding identical bytes changed the identity: %v", got)
 	}
-
-	// A different program under the same id is refused: the id is taken, and the
-	// caller withdraws the old program first.
 	changed := testProgram("program@1", buildEchoProgram(t))
-	if err := runtime.AddProgram(context.Background(), changed); !errors.Is(err, errs.Conflict) {
-		t.Fatalf("add over a taken id = %v, want errs.Conflict", err)
+	if err := runtime.AddProgram(context.Background(), changed); err != nil {
+		t.Fatalf("add over a taken id: %v", err)
+	}
+	if got := runtime.Programs(); len(got) != 1 || got[0].Digest == registered {
+		t.Fatalf("add over a taken id did not replace the program: %v", got)
 	}
 	if err := runtime.RemoveProgram(context.Background(), "program@1"); err != nil {
 		t.Fatalf("remove: %v", err)
@@ -378,9 +382,9 @@ func TestRemoveProgramEjectsLiveProcesses(t *testing.T) {
 // name, the process can neither resume nor restart; the new bytes serve new
 // processes, bound by their own manifest.
 func TestProcessImmutablyBoundToProgramBytes(t *testing.T) {
-	disp := &compensationDispatcher{failMidTurn: true}
-	runtime := newCompensationRuntime(t, disp)
-	proc := startCompensationProcess(t, runtime)
+	disp := &effectsDispatcher{}
+	runtime := newEffectsRuntime(t, disp)
+	proc := startEffectsProcess(t, runtime)
 	waitForStatus(t, runtime, proc.ID, durable.ProcessFailed)
 
 	// Replace program@1: same name, different content digest. A replacement is a
@@ -424,9 +428,9 @@ func TestProcessImmutablyBoundToProgramBytes(t *testing.T) {
 // program change. A process created under the old schema is stranded: it can
 // neither resume nor restart, exactly as it would be under a bytes change.
 func TestProcessStrandedBySchemaChange(t *testing.T) {
-	disp := &compensationDispatcher{failMidTurn: true}
-	runtime := newCompensationRuntime(t, disp)
-	proc := startCompensationProcess(t, runtime)
+	disp := &effectsDispatcher{}
+	runtime := newEffectsRuntime(t, disp)
+	proc := startEffectsProcess(t, runtime)
 	waitForStatus(t, runtime, proc.ID, durable.ProcessFailed)
 
 	// Re-register program@1 with the SAME wasm but a different output schema.
@@ -454,9 +458,9 @@ func TestProcessStrandedBySchemaChange(t *testing.T) {
 // identity, so re-registering the same code and schemas with reworded prose does
 // not strand a process — it can still be retried.
 func TestProcessSurvivesDescriptionChange(t *testing.T) {
-	disp := &compensationDispatcher{failMidTurn: true}
-	runtime := newCompensationRuntime(t, disp)
-	proc := startCompensationProcess(t, runtime)
+	disp := &effectsDispatcher{}
+	runtime := newEffectsRuntime(t, disp)
+	proc := startEffectsProcess(t, runtime)
 	waitForStatus(t, runtime, proc.ID, durable.ProcessFailed)
 
 	reworded := testProgram("program@1", buildProgram(t))
@@ -1316,188 +1320,51 @@ func TestRuntimeHardRetryForksFromBeginning(t *testing.T) {
 	}
 }
 
-// compensationDispatchers drives the guest-registered rollback story: the model
-// charges and registers billing.refund with the charge's concrete result as
-// args, then aborts. The runtime must execute the registration on abort and
-// apply the abort's retry policy. On a retried attempt (the program announces
-// "attempt N" in its system prompt) the model finishes instead.
-type compensationDispatchers struct{ d *compensationDispatcher }
+// effectsDispatchers drives a guest that takes an effect and then calls a
+// capability it was never granted — failing with the turn's savepoint section
+// still open. That is the shape the program-immutability tests need: a process
+// parked in a terminal Failed state with a real journal behind it.
+type effectsDispatchers struct{ d *effectsDispatcher }
 
-func (compensationDispatchers) Normalize(_ string, settings json.RawMessage) (json.RawMessage, error) {
-	if len(settings) == 0 {
-		return json.RawMessage(`{}`), nil
-	}
-	return append(json.RawMessage(nil), settings...), nil
+func (effectsDispatchers) Normalize(_ string, settings json.RawMessage) (json.RawMessage, error) {
+	return settings, nil
 }
 
-func (p compensationDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ manifest.Manifest) (sys.Dispatcher[ProcessContext], error) {
+func (p effectsDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ manifest.Manifest) (sys.Dispatcher[ProcessContext], error) {
 	return p.d, nil
 }
 
-type compensationDispatcher struct {
-	// abortContent is the JSON content of the model's abort action.
-	abortContent string
-	// failRefundsOnce makes the first billing.refund dispatch fail semantically.
-	failRefundsOnce bool
-	// guardRefunds makes billing.refund yield until dispatched with an approved
-	// Authorization — the sign-off-gated undo.
-	guardRefunds bool
-	// failMidTurn scripts the first turn as charge + registered refund + a call
-	// to an ungranted capability, so the guest fails with the turn's section
-	// open — after the effect and its registration.
-	failMidTurn bool
-	// rechargeAfterRollback (with failMidTurn) scripts the post-rollback
-	// attempt to re-issue the byte-identical charge and then conclude — the
-	// probe for attempt-scoped idempotency keys.
-	rechargeAfterRollback bool
-	// parkMidTurn scripts the first turn as charge + registered refund +
-	// shipping.book, which yields for approval — parking the process with the
-	// turn's section open.
-	parkMidTurn bool
-	// gapInfraFailure scripts the worst register-after window: charge, then
-	// inventory.sync (whose driver dies once with an infrastructure error —
-	// killing the guest BEFORE it reaches the compensate), then the refund
-	// registration. The later turn aborts, so the registered refund must run.
-	gapInfraFailure bool
-	inventoryFailed bool
-	// dedupe makes charge/refund exactly-once on the idempotency key, the way
-	// a real effectful driver is (ROADMAP #18).
-	dedupe bool
-
-	mu         sync.Mutex
-	seen       map[string]sys.SyscallResult
-	charges    int
-	refunds    int
-	refundArgs string
+type effectsDispatcher struct {
+	mu      sync.Mutex
+	charges int
 }
 
-// effect applies one charge/refund exactly-once when dedupe is on: a re-seen
-// idempotency key replays the recorded result instead of re-executing.
-func (d *compensationDispatcher) effect(ctx context.Context, name string, run func() sys.SyscallResult) (sys.SyscallResult, error) {
-	key, _ := sys.IdempotencyKey(ctx)
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.dedupe && key != "" {
-		if recorded, ok := d.seen[name+"/"+key]; ok {
-			return recorded, nil
-		}
-	}
-	result := run()
-	if d.dedupe && key != "" && result.Status() == sys.StatusResult {
-		if d.seen == nil {
-			d.seen = make(map[string]sys.SyscallResult)
-		}
-		d.seen[name+"/"+key] = result
-	}
-	return result, nil
-}
-
-func (d *compensationDispatcher) Capabilities() []sys.Capability {
+func (d *effectsDispatcher) Capabilities() []sys.Capability {
 	return []sys.Capability{
 		llmCapability(),
 		{Name: "billing.charge", Description: "charge a card", InputSchema: json.RawMessage(`{"type":"object"}`)},
-		{Name: "billing.refund", Description: "refund a charge", InputSchema: json.RawMessage(`{"type":"object"}`)},
-		{Name: "shipping.book", Description: "book a shipment", InputSchema: json.RawMessage(`{"type":"object"}`)},
-		{Name: "inventory.sync", Description: "sync inventory", InputSchema: json.RawMessage(`{"type":"object"}`)},
 	}
 }
 
-func (d *compensationDispatcher) Dispatch(ctx context.Context, _ ProcessContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
+func (d *effectsDispatcher) Dispatch(_ context.Context, _ ProcessContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
 	switch syscall.Name {
 	case "billing.charge":
-		return d.effect(ctx, "charge", func() sys.SyscallResult {
-			d.charges++
-			return sys.Result(json.RawMessage(`{"charge_id":"c1"}`))
-		})
-	case "billing.refund":
-		return d.effect(ctx, "refund", func() sys.SyscallResult {
-			if d.guardRefunds && auth.Decision != sys.Approved {
-				return sys.Yield("Approve the refund")
-			}
-			if d.failRefundsOnce {
-				d.failRefundsOnce = false
-				return sys.FailCode(sys.ErrnoInternal, "card network down")
-			}
-			d.refunds++
-			d.refundArgs = string(syscall.Args)
-			return sys.Result(json.RawMessage(`{"refunded":true}`))
-		})
-	case "shipping.book":
-		if auth.Decision != sys.Approved {
-			return sys.Yield("Approve the shipment"), nil
-		}
-		return sys.Result(json.RawMessage(`{"booked":true}`)), nil
-	case "inventory.sync":
-		// One infrastructure death (an error, not a failed result: the quantum
-		// dies, the intent stays open), then success on the re-driven intent.
 		d.mu.Lock()
-		if !d.inventoryFailed {
-			d.inventoryFailed = true
-			d.mu.Unlock()
-			return sys.SyscallResult{}, errors.New("inventory hiccup")
-		}
+		d.charges++
 		d.mu.Unlock()
-		return sys.Result(json.RawMessage(`{"synced":true}`)), nil
+		return sys.Result(json.RawMessage(`{"charge_id":"c1"}`)), nil
 	case "core.openaiApi":
-		var req struct {
-			Messages []struct {
-				Role    string `json:"role"`
-				Content string `json:"content"`
-			} `json:"messages"`
-		}
-		_ = json.Unmarshal(syscall.Args, &req)
-		for _, m := range req.Messages {
-			if m.Role == "system" && strings.Contains(m.Content, "attempt 2") {
-				return chatActions(`{"actions":[{"action":"final","content":{"answer":"recovered-after-rollback"}}]}`), nil
-			}
-		}
-		if d.failMidTurn {
-			// The failure story, self-contained. Recovery keys on external
-			// state, not the attempt number: a section refork replays the
-			// original sys.input (attempt and all), so what a fresh attempt
-			// observes differently is the rolled-back world — the refund
-			// exists, the model concludes.
-			d.mu.Lock()
-			refunded := d.refunds > 0
-			d.mu.Unlock()
-			if !refunded {
-				return chatActions(`{"actions":[{"action":"billing.charge","content":{"amount":100}},{"action":"compensate","content":{"name":"billing.refund","args":{"charge_id":"c1"}}},{"action":"kaboom.unavailable","content":{}}]}`), nil
-			}
-			if d.rechargeAfterRollback {
-				// The fresh attempt re-issues the byte-identical charge — it
-				// must land as a NEW effect (the rolled-back attempt's key
-				// space is dead) — then concludes on its observation.
-				if _, later := firstAndLaterUser(req.Messages); later {
-					return chatActions(`{"actions":[{"action":"final","content":{"answer":"recharged"}}]}`), nil
-				}
-				return chatActions(`{"actions":[{"action":"billing.charge","content":{"amount":100}}]}`), nil
-			}
-			return chatActions(`{"actions":[{"action":"final","content":{"answer":"recovered-after-rollback"}}]}`), nil
-		}
-		if _, later := firstAndLaterUser(req.Messages); later {
-			// The charge observation is in: give up and roll back.
-			return chatActions(`{"actions":[{"action":"abort","content":` + d.abortContent + `}]}`), nil
-		}
-		// First turn: charge, and register the refund with the charge's id —
-		// then either park mid-section on a yielding call, or feed the
-		// observations back for the abort story.
-		if d.parkMidTurn {
-			return chatActions(`{"actions":[{"action":"billing.charge","content":{"amount":100}},{"action":"compensate","content":{"name":"billing.refund","args":{"charge_id":"c1"}}},{"action":"shipping.book","content":{"speed":"express"}}]}`), nil
-		}
-		if d.gapInfraFailure {
-			return chatActions(`{"actions":[{"action":"billing.charge","content":{"amount":100}},{"action":"inventory.sync","content":{}},{"action":"compensate","content":{"name":"billing.refund","args":{"charge_id":"c1"}}}]}`), nil
-		}
-		return chatActions(`{"actions":[{"action":"billing.charge","content":{"amount":100}},{"action":"compensate","content":{"name":"billing.refund","args":{"charge_id":"c1"}}}]}`), nil
+		return chatActions(`{"actions":[{"action":"billing.charge","content":{"amount":100}},{"action":"kaboom.unavailable","content":{}}]}`), nil
 	default:
 		return sys.Fail("unsupported call: " + syscall.Name), nil
 	}
 }
 
-func newCompensationRuntime(t *testing.T, disp *compensationDispatcher) *Runtime {
+func newEffectsRuntime(t *testing.T, disp *effectsDispatcher) *Runtime {
 	t.Helper()
 	store := newRuntimeStore()
 	runtime, err := NewRuntime(context.Background(), Config{
-		Dispatchers: compensationDispatchers{d: disp},
+		Dispatchers: effectsDispatchers{d: disp},
 		Log:         store.log,
 		Leases:      store,
 		TaskSecret:  []byte("stable-secret"),
@@ -1517,7 +1384,7 @@ func newCompensationRuntime(t *testing.T, disp *compensationDispatcher) *Runtime
 	return runtime
 }
 
-func startCompensationProcess(t *testing.T, runtime *Runtime) ProcessSnapshot {
+func startEffectsProcess(t *testing.T, runtime *Runtime) ProcessSnapshot {
 	t.Helper()
 	session, err := runtime.CreateSession("", nil)
 	if err != nil {
@@ -1526,241 +1393,10 @@ func startCompensationProcess(t *testing.T, runtime *Runtime) ProcessSnapshot {
 	proc, err := runtime.CreateProcess(session.ID, "place the order", manifest.Manifest{
 		Version:  manifest.Version,
 		Program:  "program@1",
-		Syscalls: cognitionGrants("billing.charge", "billing.refund", "shipping.book", "inventory.sync"),
+		Syscalls: cognitionGrants("billing.charge"),
 	}, 0)
 	if err != nil {
 		t.Fatalf("create process: %v", err)
 	}
 	return proc
-}
-
-// TestAbortRollsBackAndStops: sys.abort with no retry executes the registered
-// compensation with the guest's exact args and finishes as compensated.
-func TestAbortRollsBackAndStops(t *testing.T) {
-	disp := &compensationDispatcher{abortContent: `{"reason":"could not confirm the order"}`}
-	runtime := newCompensationRuntime(t, disp)
-	proc := startCompensationProcess(t, runtime)
-
-	final := waitForStatus(t, runtime, proc.ID, durable.ProcessCompensated)
-
-	disp.mu.Lock()
-	charges, refunds, refundArgs := disp.charges, disp.refunds, disp.refundArgs
-	disp.mu.Unlock()
-	if charges != 1 || refunds != 1 {
-		t.Fatalf("charges = %d, refunds = %d, want 1 and 1", charges, refunds)
-	}
-	if !strings.Contains(refundArgs, `"charge_id":"c1"`) {
-		t.Fatalf("refund args = %s, want the guest-registered charge id", refundArgs)
-	}
-	if !strings.Contains(final.Answer, "could not confirm the order") ||
-		!strings.Contains(final.Answer, "billing.refund") {
-		t.Fatalf("rollback report = %q", final.Answer)
-	}
-
-	// The journal narrates the whole transaction: the registration, the abort,
-	// and the executed compensation (rendered with its Compensates link).
-	entries, err := runtime.Journal(proc.ID)
-	if err != nil {
-		t.Fatalf("journal: %v", err)
-	}
-	var sawRegistration, sawCompensation bool
-	for _, entry := range entries {
-		if entry.Syscall.Name == "billing.refund" && entry.Compensates != nil {
-			sawCompensation = true
-		}
-	}
-	if !sawRegistration || !sawCompensation {
-		t.Fatalf("journal lacks the rollback story: registration=%v compensation=%v", sawRegistration, sawCompensation)
-	}
-}
-
-// TestAbortRetriesImmediately: retry_seconds=0 rolls back and re-runs the task
-// at once as a new attempt; the model recovers on attempt 2.
-func TestAbortRetriesImmediately(t *testing.T) {
-	disp := &compensationDispatcher{abortContent: `{"reason":"provider hiccup","retry_seconds":0}`}
-	runtime := newCompensationRuntime(t, disp)
-	proc := startCompensationProcess(t, runtime)
-
-	final := waitForStatus(t, runtime, proc.ID, durable.ProcessCompleted)
-	if final.Answer != "recovered-after-rollback" {
-		t.Fatalf("answer = %q", final.Answer)
-	}
-	if final.Attempt != 2 {
-		t.Fatalf("attempt = %d, want 2 (one rolled-back attempt, one fresh)", final.Attempt)
-	}
-	disp.mu.Lock()
-	charges, refunds := disp.charges, disp.refunds
-	disp.mu.Unlock()
-	if charges != 1 || refunds != 1 {
-		t.Fatalf("charges = %d, refunds = %d, want 1 and 1 (attempt 2 finished without charging)", charges, refunds)
-	}
-}
-
-// TestAbortParksOnDurableRetryTimer: a positive retry delay parks the process
-// on a host-authored pending sys.timer task; resolving it (as the timer
-// service would) re-runs the task to completion.
-func TestAbortParksOnDurableRetryTimer(t *testing.T) {
-	disp := &compensationDispatcher{abortContent: `{"reason":"provider busy","retry_seconds":3600}`}
-	runtime := newCompensationRuntime(t, disp)
-	proc := startCompensationProcess(t, runtime)
-
-	waitForStatus(t, runtime, proc.ID, durable.ProcessWaitingTask)
-	disp.mu.Lock()
-	refunds := disp.refunds
-	disp.mu.Unlock()
-	if refunds != 1 {
-		t.Fatalf("refunds before retry = %d, want 1 (rollback runs before the park)", refunds)
-	}
-
-	tasks, err := runtime.Tasks(proc.ID)
-	if err != nil {
-		t.Fatalf("tasks: %v", err)
-	}
-	var retry *TaskSnapshot
-	for i := range tasks {
-		if tasks[i].State == task.StatePending && tasks[i].Syscall.Name == manifest.TimerSyscall {
-			retry = &tasks[i]
-		}
-	}
-	if retry == nil {
-		t.Fatalf("no pending retry timer task: %+v", tasks)
-	}
-	var timerArgs struct {
-		DurationSeconds int64 `json:"duration_seconds"`
-	}
-	if err := json.Unmarshal(retry.Syscall.Args, &timerArgs); err != nil || timerArgs.DurationSeconds != 3600 {
-		t.Fatalf("retry timer args = %s (err %v), want duration_seconds 3600", retry.Syscall.Args, err)
-	}
-
-	// Fire the timer the way the distribution's timer service does.
-	if _, err := runtime.ResolveTask(retry.ID, retry.ResolutionToken, task.Resolution{
-		Decision: task.StateCompleted, Data: json.RawMessage(`{"status":"fired"}`), Actor: "timer",
-	}); err != nil {
-		t.Fatalf("resolve retry timer: %v", err)
-	}
-	final := waitForStatus(t, runtime, proc.ID, durable.ProcessCompleted)
-	if final.Answer != "recovered-after-rollback" || final.Attempt != 2 {
-		t.Fatalf("answer = %q attempt = %d, want recovery on attempt 2", final.Answer, final.Attempt)
-	}
-}
-
-// TestFailedCompensationFailsThenResumes: a compensation that fails
-// semantically stops the rollback and fails the process with the report
-// (decision: the system needs a human); a later manual resume re-runs the
-// remaining compensations and settles the abort.
-func TestFailedCompensationFailsThenResumes(t *testing.T) {
-	disp := &compensationDispatcher{
-		abortContent:    `{"reason":"could not confirm the order"}`,
-		failRefundsOnce: true,
-	}
-	runtime := newCompensationRuntime(t, disp)
-	proc := startCompensationProcess(t, runtime)
-
-	failed := waitForStatus(t, runtime, proc.ID, durable.ProcessFailed)
-	if !strings.Contains(failed.Error, "billing.refund") || !strings.Contains(failed.Error, "card network down") {
-		t.Fatalf("failure = %q, want the failed compensation named", failed.Error)
-	}
-	if !strings.Contains(failed.Answer, "outstanding: billing.refund") {
-		t.Fatalf("rollback report = %q, want the outstanding undo listed", failed.Answer)
-	}
-
-	// The card network recovers; a manual resume continues the rollback.
-	if _, err := runtime.Retry(proc.ID, RetryResume); err != nil {
-		t.Fatalf("retry: %v", err)
-	}
-	final := waitForStatus(t, runtime, proc.ID, durable.ProcessCompensated)
-	disp.mu.Lock()
-	refunds := disp.refunds
-	disp.mu.Unlock()
-	if refunds != 1 {
-		t.Fatalf("refunds = %d, want exactly 1 successful", refunds)
-	}
-	if !strings.Contains(final.Answer, "billing.refund") {
-		t.Fatalf("final report = %q", final.Answer)
-	}
-}
-
-// TestRollbackParksForApproval: an undo that needs sign-off yields into a
-// durable task mid-rollback; the rollback parks, approval executes the inverse
-// with the stored authorization, and settlement resumes to compensated — the
-// human as terminal compensator inside the rollback.
-func TestRollbackParksForApproval(t *testing.T) {
-	disp := &compensationDispatcher{
-		abortContent: `{"reason":"could not confirm the order"}`,
-		guardRefunds: true,
-	}
-	runtime := newCompensationRuntime(t, disp)
-	proc := startCompensationProcess(t, runtime)
-
-	waitForStatus(t, runtime, proc.ID, durable.ProcessWaitingTask)
-	tasks, err := runtime.Tasks(proc.ID)
-	if err != nil {
-		t.Fatalf("tasks: %v", err)
-	}
-	var approval *TaskSnapshot
-	for i := range tasks {
-		if tasks[i].State == task.StatePending && tasks[i].Syscall.Name == "billing.refund" {
-			approval = &tasks[i]
-		}
-	}
-	if approval == nil {
-		t.Fatalf("no pending refund approval task: %+v", tasks)
-	}
-	if approval.Summary != "Approve the refund" {
-		t.Fatalf("task summary = %q", approval.Summary)
-	}
-
-	if _, err := runtime.ResolveTask(approval.ID, approval.ResolutionToken, task.Resolution{
-		Decision: task.StateApproved, Actor: "human",
-	}); err != nil {
-		t.Fatalf("approve: %v", err)
-	}
-	final := waitForStatus(t, runtime, proc.ID, durable.ProcessCompensated)
-
-	disp.mu.Lock()
-	refunds := disp.refunds
-	disp.mu.Unlock()
-	if refunds != 1 {
-		t.Fatalf("refunds = %d, want 1 (executed once, after approval)", refunds)
-	}
-	if !strings.Contains(final.Answer, "billing.refund") {
-		t.Fatalf("rollback report = %q", final.Answer)
-	}
-}
-
-// TestRollbackDeniedApprovalFails: denying the undo's sign-off stops the
-// rollback — the terminal compensator said no — and the process fails with the
-// report naming the outstanding undo.
-func TestRollbackDeniedApprovalFails(t *testing.T) {
-	disp := &compensationDispatcher{
-		abortContent: `{"reason":"could not confirm the order"}`,
-		guardRefunds: true,
-	}
-	runtime := newCompensationRuntime(t, disp)
-	proc := startCompensationProcess(t, runtime)
-
-	waitForStatus(t, runtime, proc.ID, durable.ProcessWaitingTask)
-	tasks, err := runtime.Tasks(proc.ID)
-	if err != nil || len(tasks) == 0 {
-		t.Fatalf("tasks = %+v, err=%v", tasks, err)
-	}
-	pending := tasks[len(tasks)-1]
-	if _, err := runtime.ResolveTask(pending.ID, pending.ResolutionToken, task.Resolution{
-		Decision: task.StateDenied, Actor: "human", Reason: "keep the charge",
-	}); err != nil {
-		t.Fatalf("deny: %v", err)
-	}
-	failed := waitForStatus(t, runtime, proc.ID, durable.ProcessFailed)
-	if !strings.Contains(failed.Error, "billing.refund") {
-		t.Fatalf("failure = %q, want the denied undo named", failed.Error)
-	}
-	if !strings.Contains(failed.Answer, "outstanding: billing.refund") {
-		t.Fatalf("report = %q", failed.Answer)
-	}
-	disp.mu.Lock()
-	refunds := disp.refunds
-	disp.mu.Unlock()
-	if refunds != 0 {
-		t.Fatalf("refunds = %d, want 0 (the human said no)", refunds)
-	}
 }

@@ -8,10 +8,10 @@ import (
 	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct/process"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/sched"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/aurora-capcompute/monitor"
-	"github.com/aurora-capcompute/capcompute"
 	"github.com/aurora-capcompute/capcompute/sys"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
@@ -71,11 +71,11 @@ type Config struct {
 	// runtime (0 = a default of 16). Delegated child processes execute inside their
 	// parent's quantum and are not counted.
 	MaxConcurrentProcesses int
-	// MaxAbortRetries bounds how many rollbacks a process gets before a
-	// sys.abort retry is refused and the process finishes as compensated
-	// (0 = a default of 10) — the guard against a guest that aborts forever.
-	// The budget counts rollback cycles (revisions minted), not quanta: crash
-	// re-drives and approval parks never spend it.
+	// MaxAbortRetries bounds how many times a process may abort and re-run the
+	// section it abandoned before the retry is refused and it finishes as failed
+	// (0 = a default of 10) — the guard against a guest that aborts forever. The
+	// budget counts abort forks (revisions minted), not quanta: crash re-drives
+	// and approval parks never spend it.
 	MaxAbortRetries int
 	// NonIdempotentSyscalls names capabilities whose re-execution is unsafe (a
 	// second POST charges twice; a second delete errors). On crash-resume the
@@ -106,14 +106,15 @@ type Config struct {
 
 type Runtime struct {
 	mu sync.Mutex
-	// baseCtx is cancelled by Close; long-running background work (rollback
-	// compensations) derives from it so shutdown can interrupt an in-flight
-	// driver call rather than wait out its timeout. Metadata appends deliberately
-	// do NOT use it — they must complete on shutdown to persist final state.
+	// baseCtx is cancelled by Close; long-running background work derives from
+	// it so shutdown can interrupt an in-flight driver call rather than wait out
+	// its timeout. Metadata appends deliberately do NOT use it — they must
+	// complete on shutdown to persist final state.
 	baseCtx         context.Context
 	cancel          context.CancelFunc
-	programs        *direct.Registry
-	scheduler       *sched.Scheduler[processKey, *capcompute.Process[ProcessContext]]
+	images          direct.Registry[ProgramID, ProcessContext]
+	programs        *programs
+	scheduler       *sched.Scheduler[processKey, process.Handle]
 	taints          *monitor.Taints[processKey]
 	log             eventlog.Log
 	leases          Leases
@@ -185,10 +186,10 @@ type processState struct {
 	// clamped to the host ceiling. It is runtime policy, not process history:
 	// deliberately not journaled, so a process restored after a host restart
 	// falls back to the host default — which the ceiling bounds either way.
-	deadline      time.Duration
-	manifest      manifest.Manifest
-	revision      uint64
-	programDigest string
+	deadline time.Duration
+	manifest manifest.Manifest
+	revision uint64
+	digest   direct.Digest
 	// hideHistory suppresses the session history in this process's sys.input —
 	// set when it was spawned under a sys.spawn grant with history:false, so an
 	// isolated child sees only its input. Persisted, so a restart re-serves the
@@ -213,22 +214,16 @@ type processState struct {
 	// lastFailureLength is the journal length observed at this revision's most
 	// recent guest failure — the re-drive progress guard. Failing again at the
 	// same length means the re-drive appended nothing: a deterministic wall,
-	// resume is impossible, the section rolls back. In-memory only (length
+	// resume is impossible, and the process fails. In-memory only (length
 	// grows monotonically within a revision, so losing it to a crash merely
 	// buys one extra re-drive); cleared when the journal forks.
 	lastFailureLength int
-	// abandoning records the host's abandonment of this revision —
-	// abandonFailure, abandonStop, or abandonRestart — set durably (a process
-	// event) before its rollback runs, so a crash mid-rollback resumes it to
-	// the right end. The stamp stands past the terminal conclusion as the
-	// record that the revision was abandoned — the license for a later retry
-	// to fork over its settled rollback, which a zero-registration scope
-	// leaves no journal trace of — and is cleared only by the fork that opens
-	// the successor revision. It is management state and lives here, in the
-	// management plane: the journal carries only what the guest did (its
-	// sys.abort needs no field — its record is in its journal.
-	abandoning string
-	// calls, and the execution of the undos it registered). The guest's own
+	// abortRetries counts how many times this process forked to re-run a section
+	// its guest abandoned with sys.abort. Bounded by Config.MaxAbortRetries — the
+	// guard against a guest that aborts forever. Being a budget rather than
+	// revision state, it survives both the fork it authorized and (being
+	// persisted) a host restart: a reset budget is an unbounded loop.
+	abortRetries int
 	// cascade re-execution state: when a process is restarted, cascade is set so the
 	// delegation router reuses (retries) the existing children at cascadeCursor in
 	// spawn order rather than spawning fresh ones. cascadeMode records whether the
@@ -247,7 +242,11 @@ type ProcessContext struct {
 	SessionID string
 	ProcessID string
 	Revision  uint64
+	Digest    direct.Digest
 }
+
+func (r ProcessContext) ArtifactDigest() string   { return r.Digest.ArtifactDigest }
+func (r ProcessContext) SourceCodeDigest() string { return r.Digest.SourceCodeDigest }
 
 func (r ProcessContext) PID() processKey {
 	return processKey{processID: r.ProcessID, revision: r.Revision}
@@ -387,9 +386,6 @@ type JournalEntry struct {
 	Revision uint64         `json:"revision"`
 	Syscall  sys.Syscall    `json:"syscall"`
 	Outcome  JournalOutcome `json:"outcome"`
-	// Compensates names the intent position this entry undoes, for entries in
-	// the journal's compensation section (saga unwinding).
-	Compensates *int `json:"compensates,omitempty"`
 }
 
 type JournalOutcome struct {

@@ -29,10 +29,6 @@ const (
 	ProcessCompleted   ProcessStatus = "completed"
 	ProcessStopped     ProcessStatus = "stopped"
 	ProcessFailed      ProcessStatus = "failed"
-	// ProcessCompensated is terminal: the guest rolled the process back with
-	// sys.abort — its registered compensations ran — and declared no retry,
-	// or exhausted the retry budget.
-	ProcessCompensated ProcessStatus = "compensated"
 )
 
 // Session is a session's durable state, derived from the process projection
@@ -57,21 +53,22 @@ type Session struct {
 // Process is a process's durable state, carried by process.state events and folded
 // back into memory on restore.
 type Process struct {
-	TenantID      string
-	ID            string
-	SessionID     string
-	Revision      uint64
-	Input         string
-	Status        ProcessStatus
-	Attempt       int
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
-	StartedAt     *time.Time
-	CompletedAt   *time.Time
-	Answer        string
-	Error         string
-	Manifest      manifest.Manifest
-	ProgramDigest string
+	TenantID         string
+	ID               string
+	SessionID        string
+	Revision         uint64
+	Input            string
+	Status           ProcessStatus
+	Attempt          int
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	StartedAt        *time.Time
+	CompletedAt      *time.Time
+	Answer           string
+	Error            string
+	Manifest         manifest.Manifest
+	ProgramDigest    string
+	SourceCodeDigest string `json:",omitempty"`
 	// HideHistory records that this process was spawned under a sys.spawn grant
 	// with history:false — its sys.input omits the session history. Persisted so
 	// a restart re-serves the same isolated input.
@@ -100,12 +97,11 @@ type Process struct {
 	// logging any record can be reconstructed on restore.
 	ChildSpawnOffsets []int
 	ForkOffset        int
-	// Abandoning is the host's abandonment of the current revision (failure,
-	// stop, or restart), persisted so a crash mid-rollback resumes the
-	// abandonment to its recorded conclusion, and standing until the fork
-	// that opens the successor revision. Management state: the journal
-	// carries only the guest's narrative.
-	Abandoning string `json:",omitempty"`
+	// AbortRetries is how many times the guest has aborted and re-run a section.
+	// Persisted because it is the budget bounding that loop: an in-memory counter
+	// would hand a restart a fresh one, and a guest that aborts forever would
+	// never exhaust it.
+	AbortRetries int `json:",omitempty"`
 }
 
 // DefaultSessionTitle is the placeholder headline a session carries until one of

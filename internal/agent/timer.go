@@ -3,9 +3,7 @@ package agent
 // The sys.timer syscall, served by the runtime below the task layer: a valid
 // call yields, and the task layer above turns the yield into a durable task
 // the application's scheduler fires once the duration elapses — resuming the
-// process from the same point. It lives with the runtime because the runtime
-// itself leans on it: abort-retry parks are sys.timer tasks the runtime
-// authors (see compensate.go). The dispatcher is only ever invoked for the
+// process from the same point. The dispatcher is only ever invoked for the
 // initial yield; on resume the resolved task data is served by the task
 // layer without re-dispatching here.
 
