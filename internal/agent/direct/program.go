@@ -11,52 +11,65 @@ import (
 	"sync"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct/compiler"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct/process"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/errs"
 	"github.com/aurora-capcompute/capcompute"
+	"github.com/aurora-capcompute/capcompute/sys"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
-type Proc interface {
-	ID() string
+type ProgramID interface {
 	comparable
+	fmt.Stringer
 }
 
-type Data[T Proc] struct {
-	proc        T
+type ProcessEntry interface {
+	ArtifactDigest() string
+	SourceCodeDigest() string
+}
+
+type Data[T ProgramID] struct {
+	ID          T
 	SourceCode  []byte
 	Description string
 	Input       json.RawMessage
 	Output      json.RawMessage
 }
 
-func load[T Proc](ctx context.Context, compiler *compiler.Compiler, data Data[T]) (artifact[T], error) {
+type Digest struct {
+	ArtifactDigest   string
+	SourceCodeDigest string
+}
+
+func load[T ProgramID](ctx context.Context, compiler compiler.Compiler, data Data[T]) (artifact[T], error) {
 	description := strings.TrimSpace(data.Description)
 	if description == "" {
-		return artifact[T]{}, fmt.Errorf("%w: program %q interface: a description is required", errs.Invalid, data.proc.ID())
+		return artifact[T]{}, fmt.Errorf("%w: program %q interface: a description is required", errs.Invalid, data.ID)
 	}
 	input, err := prepareSchema("input", data.Input)
 	if err != nil {
-		return artifact[T]{}, fmt.Errorf("%w: program %q interface: %v", errs.Invalid, data.proc.ID, err)
+		return artifact[T]{}, fmt.Errorf("%w: program %q interface: %v", errs.Invalid, data.ID, err)
 	}
 	output, err := prepareSchema("output", data.Output)
 	if err != nil {
-		return artifact[T]{}, fmt.Errorf("%w: program %q interface: %v", errs.Invalid, data.proc.ID(), err)
+		return artifact[T]{}, fmt.Errorf("%w: program %q interface: %v", errs.Invalid, data.ID, err)
 	}
-	image, err := compiler.Compile(ctx, data.proc.ID(), data.SourceCode)
+	image, err := compiler.Compile(ctx, data.ID.String(), data.SourceCode)
 	if err != nil {
 		return artifact[T]{}, err
 	}
 	return artifact[T]{
-		Proc:        data.proc,
-		Digest:      identity(data.SourceCode, input, output),
-		Description: description,
-		Input:       input,
-		Output:      output,
-		Image:       image,
+		ID:               data.ID,
+		ArtifactDigest:   artifactDigest(data.SourceCode, input, output),
+		SourceCodeDigest: sourceCodeDigest(data.SourceCode),
+		Description:      description,
+		Input:            input,
+		Output:           output,
+		Image:            image,
 	}, nil
 }
 
-func identity(sourceCode []byte, input, output schema) string {
+func artifactDigest(sourceCode []byte, input, output schema) string {
 	identity := sha256.New()
 	for _, part := range [][]byte{sourceCode, input.Document, output.Document} {
 		sum := sha256.Sum256(part)
@@ -65,13 +78,21 @@ func identity(sourceCode []byte, input, output schema) string {
 	return hex.EncodeToString(identity.Sum(nil))
 }
 
-type artifact[T Proc] struct {
-	Proc        T
-	Digest      string
-	Description string
-	Input       schema
-	Output      schema
-	Image       *capcompute.Program
+func sourceCodeDigest(sourceCode []byte) string {
+	identity := sha256.New()
+	sum := sha256.Sum256(sourceCode)
+	identity.Write(sum[:])
+	return hex.EncodeToString(identity.Sum(nil))
+}
+
+type artifact[T ProgramID] struct {
+	ID               T
+	ArtifactDigest   string
+	SourceCodeDigest string
+	Description      string
+	Input            schema
+	Output           schema
+	Image            *capcompute.Program
 }
 
 type schema struct {
@@ -129,43 +150,50 @@ func compileDocument(what string, raw json.RawMessage) (*jsonschema.Schema, erro
 	return schema, nil
 }
 
-type Registry[T Proc] struct {
+type Registry[T ProgramID, P ProcessEntry] interface {
+	Add(ctx context.Context, data Data[T]) (Digest, error)
+	Remove(id T) bool
+	Close(ctx context.Context) []error
+	Spawn(ctx context.Context, id T, processEntry P, mkDispatcher func(context.Context, P) (sys.Dispatcher[P], error)) (process.Handle, error)
+}
+
+type registryImpl[T ProgramID, P ProcessEntry] struct {
 	mu       sync.RWMutex
 	programs map[T]artifact[T]
-	compiler *compiler.Compiler
+	compiler compiler.Compiler
 }
 
-func NewRegistry[T Proc]() *Registry[T] {
-	return &Registry[T]{programs: make(map[T]artifact[T])}
+func NewRegistry[T ProgramID, P ProcessEntry](memoryPages uint32) Registry[T, P] {
+	return &registryImpl[T, P]{programs: make(map[T]artifact[T]), compiler: compiler.New(memoryPages)}
 }
 
-func (a *Registry[T]) Add(ctx context.Context, data Data[T]) (added bool, err error) {
+func (a *registryImpl[T, P]) Add(ctx context.Context, data Data[T]) (Digest, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if existing, taken := a.programs[data.proc]; taken {
-		return false, fmt.Errorf("%w: program %q is already registered; remove it first",
-			errs.Conflict, data.proc.ID, existing.Digest)
+	if existing, taken := a.programs[data.ID]; taken {
+		return Digest{}, fmt.Errorf("%w: program %q is already registered; remove it first",
+			errs.Conflict, data.ID, existing.ArtifactDigest)
 	}
 	art, err := load(ctx, a.compiler, data)
 	if err != nil {
-		return false, err
+		return Digest{}, err
 	}
-	a.programs[data.proc] = art
-	return true, nil
+	a.programs[data.ID] = art
+	return Digest{ArtifactDigest: art.ArtifactDigest, SourceCodeDigest: art.SourceCodeDigest}, nil
 }
 
-func (a *Registry[T]) Remove(proc T) bool {
+func (a *registryImpl[T, P]) Remove(id T) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	_, ok := a.programs[proc]
+	_, ok := a.programs[id]
 	if !ok {
 		return false
 	}
-	delete(a.programs, proc)
+	delete(a.programs, id)
 	return true
 }
 
-func (a *Registry[T]) Close(ctx context.Context) []error {
+func (a *registryImpl[T, P]) Close(ctx context.Context) []error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	errors := make([]error, 0, len(a.programs))
@@ -177,4 +205,27 @@ func (a *Registry[T]) Close(ctx context.Context) []error {
 		delete(a.programs, proc)
 	}
 	return errors
+}
+
+func (a *registryImpl[T, P]) Spawn(ctx context.Context, id T, processEntry P, mkDispatcher func(context.Context, P) (sys.Dispatcher[P], error)) (process.Handle, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if art, ok := a.programs[id]; ok {
+		return process.Spawn[P](ctx, processEntry, art.Image, mkDispatcher)
+	}
+
+	return nil, fmt.Errorf("%w: program %q does not exist", errs.NotFound, id)
+}
+
+func (a *registryImpl[T, P]) Resume(ctx context.Context, id T, processEntry P, mkDispatcher func(context.Context, P) (sys.Dispatcher[P], error)) (process.Handle, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if art, ok := a.programs[id]; ok {
+		if art.ArtifactDigest != processEntry.ArtifactDigest() || art.SourceCodeDigest != processEntry.SourceCodeDigest() {
+			return nil, fmt.Errorf("digest for program %s don't match", id.String())
+		}
+		return process.Spawn[P](ctx, processEntry, art.Image, mkDispatcher)
+	}
+
+	return nil, fmt.Errorf("%w: program %q does not exist", errs.NotFound, id)
 }
