@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 
@@ -83,6 +84,26 @@ func sourceCodeDigest(sourceCode []byte) string {
 	sum := sha256.Sum256(sourceCode)
 	identity.Write(sum[:])
 	return hex.EncodeToString(identity.Sum(nil))
+}
+
+// View is what a caller may see of a registered program: its identity and the
+// interface it declared. The compiled schemas and the wasm image stay here.
+type View[T ProgramID] struct {
+	ID          T
+	Digest      Digest
+	Description string
+	Input       json.RawMessage
+	Output      json.RawMessage
+}
+
+func (a artifact[T]) view() View[T] {
+	return View[T]{
+		ID:          a.ID,
+		Digest:      Digest{ArtifactDigest: a.ArtifactDigest, SourceCodeDigest: a.SourceCodeDigest},
+		Description: a.Description,
+		Input:       a.Input.Document,
+		Output:      a.Output.Document,
+	}
 }
 
 type artifact[T ProgramID] struct {
@@ -163,7 +184,13 @@ func compileDocument(what string, raw json.RawMessage) (*jsonschema.Schema, erro
 type Registry[T ProgramID, P ProcessEntry] interface {
 	Add(ctx context.Context, data Data[T]) (Digest, error)
 	Exists(id T) bool
-	Remove(id T) bool
+	Get(id T) (View[T], bool)
+	List() []View[T]
+	// Remove unregisters a program and hands back the release of its image.
+	// Unregistering and releasing are two steps because the caller settles the
+	// processes bound to it in between: nothing can spawn once the id is gone,
+	// and the image must outlive the ones still unwinding.
+	Remove(id T) (release func(context.Context) error, ok bool)
 	ValidateInput(id T, input string) error
 	ValidateOutput(id T, answer string) error
 	Close(ctx context.Context) []error
@@ -202,16 +229,36 @@ func (a *registryImpl[T, P]) Exists(id T) bool {
 	return ok
 }
 
-func (a *registryImpl[T, P]) Remove(id T) bool {
+func (a *registryImpl[T, P]) Get(id T) (View[T], bool) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	art, ok := a.programs[id]
+	if !ok {
+		return View[T]{}, false
+	}
+	return art.view(), true
+}
+
+func (a *registryImpl[T, P]) List() []View[T] {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	out := make([]View[T], 0, len(a.programs))
+	for _, art := range a.programs {
+		out = append(out, art.view())
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID.String() < out[j].ID.String() })
+	return out
+}
+
+func (a *registryImpl[T, P]) Remove(id T) (func(context.Context) error, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	art, ok := a.programs[id]
 	if !ok {
-		return false
+		return nil, false
 	}
 	delete(a.programs, id)
-	_ = art.Image.Close(context.Background())
-	return true
+	return art.Image.Close, true
 }
 
 func (a *registryImpl[T, P]) ValidateInput(id T, input string) error {

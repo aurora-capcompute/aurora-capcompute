@@ -113,7 +113,6 @@ type Runtime struct {
 	baseCtx         context.Context
 	cancel          context.CancelFunc
 	images          direct.Registry[ProgramID, ProcessContext]
-	programs        *programs
 	scheduler       *sched.Scheduler[processKey, process.Handle]
 	taints          *monitor.Taints[processKey]
 	log             eventlog.Log

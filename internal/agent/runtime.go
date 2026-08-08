@@ -185,7 +185,6 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		baseCtx:         baseCtx,
 		cancel:          cancel,
 		images:          direct.NewRegistry[ProgramID, ProcessContext](memoryPages),
-		programs:        newPrograms(),
 		taints:          monitor.NewTaints[processKey](),
 		log:             config.Log,
 		leases:          config.Leases,
@@ -353,8 +352,8 @@ func (r *Runtime) wrapProtocol(cred ProcessContext, next sys.Dispatcher[ProcessC
 }
 
 func (r *Runtime) programBinding(proc *processState) error {
-	program, err := r.programs.resolve(proc.manifest.Program)
-	if err != nil {
+	program, ok := r.images.Get(ProgramID(proc.manifest.Program))
+	if !ok {
 		return fmt.Errorf("program %q is not loaded", proc.manifest.Program)
 	}
 	if program.Digest != proc.digest {
@@ -413,17 +412,9 @@ func (r *Runtime) AddProgram(ctx context.Context, data ProgramData) error {
 			return err
 		}
 	}
-	digest, err := r.images.Add(ctx, data)
-	if err != nil {
+	if _, err := r.images.Add(ctx, data); err != nil {
 		return err
 	}
-	r.programs.put(Program{
-		ID:          data.ID,
-		Digest:      digest,
-		Description: strings.TrimSpace(data.Description),
-		Input:       data.Input,
-		Output:      data.Output,
-	})
 	// A Close that raced this registration has already drained the registry, so
 	// check after publishing and undo: otherwise the image this call compiled
 	// would stay open with nothing left to close it.
@@ -431,8 +422,9 @@ func (r *Runtime) AddProgram(ctx context.Context, data ProgramData) error {
 	closed := r.closed
 	r.mu.Unlock()
 	if closed {
-		r.programs.remove(string(data.ID))
-		r.images.Remove(data.ID)
+		if release, ok := r.images.Remove(data.ID); ok {
+			_ = release(context.Background())
+		}
 		return fmt.Errorf("%w: runtime is closed", errs.Conflict)
 	}
 	return nil
@@ -450,7 +442,7 @@ func (r *Runtime) AddProgram(ctx context.Context, data ProgramData) error {
 // changed program.
 func (r *Runtime) RemoveProgram(ctx context.Context, id string) error {
 	id = strings.TrimSpace(id)
-	removed, ok := r.programs.remove(id)
+	release, ok := r.images.Remove(ProgramID(id))
 	if !ok {
 		return fmt.Errorf("%w: program %q is not registered", errs.NotFound, id)
 	}
@@ -476,7 +468,7 @@ func (r *Runtime) RemoveProgram(ctx context.Context, id string) error {
 	// live module is recovered by the processor, not a crash — but a process is an
 	// audit target and its final state must not turn on which of the two won.
 	r.drainProcesses(ctx, id, bound)
-	r.images.Remove(removed.ID)
+	_ = release(context.Background())
 	return nil
 }
 
@@ -609,7 +601,7 @@ func (r *Runtime) ListSessions() []SessionSummary {
 }
 
 func (r *Runtime) Programs() []Program {
-	return r.programs.list()
+	return r.images.List()
 }
 
 func (r *Runtime) GetSession(sessionID string) (SessionSnapshot, error) {
@@ -652,9 +644,9 @@ func (r *Runtime) CreateProcess(sessionID string, input string, spec manifest.Ma
 			spec.Syscalls[i].Hidden = true
 		}
 	}
-	program, err := r.programs.resolve(spec.Program)
-	if err != nil {
-		return ProcessSnapshot{}, err
+	program, ok := r.images.Get(ProgramID(spec.Program))
+	if !ok {
+		return ProcessSnapshot{}, fmt.Errorf("%w: program %q is not registered", errs.Invalid, spec.Program)
 	}
 	if err := r.images.ValidateInput(program.ID, input); err != nil {
 		return ProcessSnapshot{}, err

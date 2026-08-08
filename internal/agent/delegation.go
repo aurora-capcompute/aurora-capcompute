@@ -147,8 +147,7 @@ func (r *spawnRouter) capability() sys.Capability {
 			desc.WriteString(";")
 		}
 		desc.WriteString("\n- " + spec.Program)
-		program, err := r.runtime.programs.resolve(spec.Program)
-		known := err == nil
+		program, known := r.runtime.images.Get(ProgramID(spec.Program))
 		if known && program.Description != "" {
 			desc.WriteString(": " + program.Description)
 		}
@@ -362,9 +361,9 @@ func (r *Runtime) createChildProcess(ctx context.Context, parentProcessID string
 	if input == "" {
 		return ProcessSnapshot{}, fmt.Errorf("%w: input is required", errs.Invalid)
 	}
-	program, err := r.programs.resolve(manifest.Program)
-	if err != nil {
-		return ProcessSnapshot{}, err
+	program, ok := r.images.Get(ProgramID(manifest.Program))
+	if !ok {
+		return ProcessSnapshot{}, fmt.Errorf("%w: program %q is not registered", errs.Invalid, manifest.Program)
 	}
 	processID, err := r.idSource("proc_")
 	if err != nil {
