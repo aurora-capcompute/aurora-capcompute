@@ -1,6 +1,7 @@
 package aurora
 
 import (
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct/program"
 	"github.com/aurora-capcompute/capcompute/sys"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent"
@@ -8,7 +9,6 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/errs"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/program"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 )
 

@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/program"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct/program"
 )
 
 // testProgram is a conversational test program as an app hands it over: string

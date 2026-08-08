@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct/program"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/sched"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/aurora-capcompute/monitor"
@@ -17,7 +18,6 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
 	internalhost "github.com/aurora-capcompute/aurora-capcompute/internal/agent/host"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/program"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 )
 
@@ -181,7 +181,7 @@ type processState struct {
 	// quantum is in flight.
 	stop          func()
 	stopRequested bool
-	// deadline bounds each of this process's quanta, chosen at CreateProcess and
+	// deadline bounds each of this process's quanta, chosen at MakeProcess and
 	// clamped to the host ceiling. It is runtime policy, not process history:
 	// deliberately not journaled, so a process restored after a host restart
 	// falls back to the host default — which the ceiling bounds either way.
@@ -226,9 +226,9 @@ type processState struct {
 	// leaves no journal trace of — and is cleared only by the fork that opens
 	// the successor revision. It is management state and lives here, in the
 	// management plane: the journal carries only what the guest did (its
-	// calls, and the execution of the undos it registered). The guest's own
 	// sys.abort needs no field — its record is in its journal.
 	abandoning string
+	// calls, and the execution of the undos it registered). The guest's own
 	// cascade re-execution state: when a process is restarted, cascade is set so the
 	// delegation router reuses (retries) the existing children at cascadeCursor in
 	// spawn order rather than spawning fresh ones. cascadeMode records whether the
@@ -242,12 +242,6 @@ type processState struct {
 	reconnectChildren bool
 }
 
-// ProcessContext is the host-side credential for one process revision: the syscall
-// triad's "who". The processor keys instances by PID(); two revisions of one process
-// are distinct processes, so a forked retry (a rollback's re-run, a restart)
-// can never resume a stale instance. A plain resume deliberately keeps its
-// revision — it continues the same attempt — and activates fresh by replay,
-// since every quantum starts on a fresh instance.
 type ProcessContext struct {
 	TenantID  string
 	SessionID string
@@ -269,14 +263,6 @@ func (r ProcessContext) taskScope() task.Scope {
 	}
 }
 
-// processKey is the identity of one process revision — the processor's PID, the
-// run queue's key, and the taint state's key, all the same value. Two revisions
-// of one process are distinct identities: that is what stops a queued quantum
-// from running against a revision the process has since forked past, and what
-// scopes a run's taint to the attempt that accumulated it.
-//
-// It is a pair rather than a formatted string so that holding one costs no
-// parsing to use: activation finds its process by map lookup on processID.
 type processKey struct {
 	processID string
 	revision  uint64

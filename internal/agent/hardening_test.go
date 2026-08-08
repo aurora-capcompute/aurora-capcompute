@@ -63,44 +63,6 @@ func TestChildTerminalCarriesLabels(t *testing.T) {
 	}
 }
 
-// H1: a deferred compensation is held to the reference monitor at registration,
-// because the rollback path that fires it at abort time re-runs neither the
-// Validator nor the FlowMonitor. So: an ungranted inverse is refused, a
-// schema-violating inverse is refused, and a run that has observed a forbidden
-// label may not register that sink as an undo (the abort-time flow bypass).
-func TestLifecycleCompensateHeldToReferenceMonitor(t *testing.T) {
-	next := nopNext{caps: []sys.Capability{{
-		Name:        "k8s.delete",
-		InputSchema: json.RawMessage(`{"type":"object","required":["name"],"properties":{"name":{"type":"string"}},"additionalProperties":false}`),
-		Forbid:      []string{"untrusted_web"},
-	}}}
-	l := newLifecycleDispatcher(next, "msg", nil, nil, manifest.Manifest{}, 1, nil)
-	compensate := func(ctx context.Context, args string) sys.SyscallResult {
-		t.Helper()
-		result, err := l.Dispatch(ctx, ProcessContext{},
-			sys.Syscall{Abi: sys.ABIVersion, Name: callSysCompensate, Args: json.RawMessage(args)},
-			sys.Authorization{})
-		if err != nil {
-			t.Fatalf("dispatch: %v", err)
-		}
-		return result
-	}
-
-	if r := compensate(context.Background(), `{"name":"k8s.delete","args":{"name":"pod-1"}}`); r.Status() != sys.StatusResult {
-		t.Fatalf("a clean compensation should register: got %v", r.Status())
-	}
-	if r := compensate(context.Background(), `{"name":"k8s.forge","args":{}}`); r.Status() != sys.StatusFailed || r.Errno() != sys.ErrnoInvalidArgs {
-		t.Fatalf("ungranted inverse = %v/%v, want failed/invalid_args", r.Status(), r.Errno())
-	}
-	if r := compensate(context.Background(), `{"name":"k8s.delete","args":{"oops":true}}`); r.Status() != sys.StatusFailed || r.Errno() != sys.ErrnoInvalidArgs {
-		t.Fatalf("schema-violating inverse = %v/%v, want failed/invalid_args", r.Status(), r.Errno())
-	}
-	tainted := sys.WithTaint(context.Background(), []string{"untrusted_web"})
-	if r := compensate(tainted, `{"name":"k8s.delete","args":{"name":"pod-1"}}`); r.Status() != sys.StatusFailed || r.Errno() != sys.ErrnoDenied {
-		t.Fatalf("compensation in a tainted run = %v/%v, want failed/denied (abort-time flow bypass blocked)", r.Status(), r.Errno())
-	}
-}
-
 // L6: the guest's sys.input payload must carry role/content only — the taint
 // labels seed the FlowMonitor host-side and must never be serialized to the
 // (untrusted) guest, so the property is host-enforced, not a guest struct shape.

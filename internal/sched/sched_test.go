@@ -46,7 +46,7 @@ func (h *harness) config() sched.Config[string, *instance] {
 	return sched.Config[string, *instance]{Activator: h, Machine: h}
 }
 
-func (h *harness) Activate(_ context.Context, pid string) (*instance, error) {
+func (h *harness) Execute(_ context.Context, pid string) (*instance, error) {
 	h.mu.Lock()
 	h.activations[pid]++
 	err := h.activationErr[pid]

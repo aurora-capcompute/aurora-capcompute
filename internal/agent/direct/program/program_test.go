@@ -30,7 +30,7 @@ func TestLoadProgramPreparesInterfaceAndPinsDigest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load program: %v", err)
 	}
-	if artifact.Digest != Identity(data.SourceCode, artifact.Input, artifact.Output) {
+	if artifact.Digest != identity(data.SourceCode, artifact.Input, artifact.Output) {
 		t.Fatalf("digest = %q, want the (wasm, schemas) identity", artifact.Digest)
 	}
 	if artifact.Description != "a test program" || artifact.Input.compiled == nil || artifact.Output.compiled == nil {

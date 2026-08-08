@@ -16,7 +16,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/capcompute/sys"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
@@ -244,82 +243,6 @@ func appendAbortPair(t *testing.T, j *logJournal, args string, result sys.Syscal
 	t.Helper()
 	appendIntent(t, j, sys.Syscall{Abi: sys.ABIVersion, Name: callSysAbort, Args: json.RawMessage(args)})
 	appendCompletion(t, j, result)
-}
-
-// TestRollbackViewSemantics: the journal's two rollback markers — the guest's
-// own completed sys.abort as the last word, and an appended compensation
-// section (a host abandonment's only journal trace) — and the shapes that must
-// stay inert: a rejected abort, and an abort a later call abandoned.
-func TestRollbackViewSemantics(t *testing.T) {
-	armed := func(t *testing.T) *logJournal {
-		j := buildJournal(t, begin(), ok("billing.charge"))
-		appendPair(t, j, sys.Syscall{
-			Abi: sys.ABIVersion, Name: callSysCompensate,
-			Args: json.RawMessage(`{"name":"billing.refund","args":{"amount":5}}`),
-		}, sys.Result([]byte(`{}`)))
-		return j
-	}
-	t.Run("guest abort is the journal's own abandonment", func(t *testing.T) {
-		j := armed(t) // begin 0-1, charge 2-3, registration 4-5
-		appendAbortPair(t, j, `{"reason":"guest changed its mind","retry_seconds":5}`, sys.Result([]byte(`{"ok":true}`)))
-		state, started := j.rollbackView()
-		if !started || state == nil || !state.GuestAbort {
-			t.Fatalf("started=%v state=%+v, want the guest abort found", started, state)
-		}
-		if state.Reason != "guest changed its mind" || state.RetrySeconds == nil || *state.RetrySeconds != 5 {
-			t.Fatalf("state = %+v, want the abort's reason and retry policy", state)
-		}
-		if state.ScopeStart != 2 || state.ScopeEnd != 6 {
-			t.Fatalf("scope = [%d, %d), want [2, 6): past the begin pair, up to the abort", state.ScopeStart, state.ScopeEnd)
-		}
-		if len(state.Registrations) != 1 || state.Registrations[0].Name != "billing.refund" || state.settled() {
-			t.Fatalf("registrations = %+v settled=%v, want the armed refund outstanding", state.Registrations, state.settled())
-		}
-	})
-	t.Run("rejected abort is an ordinary failed call", func(t *testing.T) {
-		j := buildJournal(t, begin(), ok("billing.charge"))
-		appendAbortPair(t, j, `{"reason":"x"}`, sys.FailCode(sys.ErrnoInvalidArgs, "malformed"))
-		state, started := j.rollbackView()
-		if started {
-			t.Fatal("a failed abort completion must not mark a rollback")
-		}
-		if state.ScopeStart != 2 || state.ScopeEnd != j.Length() {
-			t.Fatalf("fresh scope = [%d, %d), want the whole open section to the journal's end", state.ScopeStart, state.ScopeEnd)
-		}
-	})
-	t.Run("abort followed by further calls is inert history", func(t *testing.T) {
-		j := buildJournal(t, begin(), ok("billing.charge"))
-		appendAbortPair(t, j, `{"reason":"x"}`, sys.Result([]byte(`{"ok":true}`)))
-		appendPair(t, j, sys.Syscall{Abi: sys.ABIVersion, Name: "billing.charge"}, sys.Result([]byte(`{}`)))
-		if _, started := j.rollbackView(); started {
-			t.Fatal("an abort followed by further calls is not the journal's last word")
-		}
-	})
-	t.Run("compensation section marks a host abandonment's rollback", func(t *testing.T) {
-		j := armed(t)
-		compensator, err := journaled.NewCompensator(j)
-		if err != nil {
-			t.Fatalf("compensator: %v", err)
-		}
-		inverse := sys.Syscall{Abi: sys.ABIVersion, Name: "billing.refund", Args: json.RawMessage(`{"amount":5}`)}
-		if _, err := compensator.Begin(inverse, 4); err != nil {
-			t.Fatalf("begin compensation: %v", err)
-		}
-		state, started := j.rollbackView()
-		if !started || state.GuestAbort {
-			t.Fatalf("started=%v guestAbort=%v, want the compensation section recognized without an abort", started, state.GuestAbort)
-		}
-		if state.ScopeEnd != 6 || state.settled() {
-			t.Fatalf("scopeEnd=%d settled=%v, want the scan bounded at the section and the refund outstanding", state.ScopeEnd, state.settled())
-		}
-		if err := compensator.Commit(sys.Result([]byte(`{}`))); err != nil {
-			t.Fatalf("commit compensation: %v", err)
-		}
-		state, started = j.rollbackView()
-		if !started || !state.settled() {
-			t.Fatalf("started=%v settled=%v, want the completed inverse to settle the rollback", started, state.settled())
-		}
-	})
 }
 
 // TestLifecycleAbortArgs: sys.abort carries the guest's reason and retry

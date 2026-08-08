@@ -1,113 +1,19 @@
 package agent
 
-// Process execution: the quantum that drives a program to a terminal state, the
-// finishing path, and the event appends plus subscriber publishing that surface
-// each state change to the durable log and live watchers.
-//
-// Root processes are submitted to the run queue (first-come-first-served,
-// bounded by MaxConcurrentProcesses); a delegated child process runs off the
-// queue, inside its parent's quantum — the processor's own sync-spawn posture —
-// so delegation can never deadlock the concurrency cap.
-//
-// This file also holds the runtime's two halves of the run queue's seam:
-// processActivator, which rebuilds a guest from its journal, and processMachine,
-// which speaks for the capcompute processor.
-
 import (
 	"context"
 	"errors"
 	"fmt"
 	"time"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/sched"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/capcompute"
-
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/errs"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
 )
 
-// processActivator is the application half of the run queue's seam: it
-// reconstructs the guest for one process revision. It assembles the revision's
-// dispatcher chain (monitor stack, replay tape over the journal, task layer,
-// delegation routes, drivers) and instantiates the guest from the program's
-// compiled image, so the syscall host path can find its dispatcher. Activation
-// is exactly journal-replay wiring — the journal, not the instance, is the
-// durable process — which is why the queue cannot do it and the runtime must.
-type processActivator struct{ runtime *Runtime }
-
-func (a processActivator) Activate(ctx context.Context, key processKey) (*capcompute.Process[ProcessContext], error) {
-	r := a.runtime
-	r.mu.Lock()
-	proc := r.processes[key.processID]
-	if proc != nil && proc.revision != key.revision {
-		// The process has forked past the revision this quantum was submitted
-		// for; the submission is stale and must not run.
-		proc = nil
-	}
-	var cred ProcessContext
-	var programID string
-	if proc != nil {
-		cred = r.processContextLocked(proc)
-		programID = proc.manifest.Program
-	}
-	r.mu.Unlock()
-	if proc == nil {
-		return nil, fmt.Errorf("%w: no process for pid %s", errs.NotFound, key)
-	}
-	if err := r.programBinding(proc); err != nil {
-		return nil, err
-	}
-	// The registry holds the program's compiled image; a process whose program has
-	// been withdrawn finds nothing here and never runs again.
-	artifact, err := r.programs.Resolve(programID)
-	if err != nil || artifact.Image() == nil {
-		return nil, fmt.Errorf("program %q is unavailable", programID)
-	}
-
-	chain, err := r.factory.NewDispatcher(ctx, cred)
-	if err != nil {
-		return nil, err
-	}
-	process, err := capcompute.NewProcess(ctx, artifact.Image(), capcompute.ProcessSpec[ProcessContext]{
-		Entrypoint: "run",
-		Cred:       cred,
-		Dispatcher: chain,
-		// The guest fetches its input via the sys.input syscall (served by
-		// the lifecycle dispatcher), so no entrypoint input is supplied here.
-	})
-	if err != nil {
-		return nil, err
-	}
-	return process, nil
-}
-
-// processMachine is the hardware half of the seam: it gives an activated guest
-// one quantum on the capcompute processor and closes the instance afterwards.
-// It holds no runtime state, because it needs none — capcompute *is* the
-// machine, and this type only speaks for it in the queue's vocabulary.
-type processMachine struct{}
-
-func (processMachine) Resume(ctx context.Context, process *capcompute.Process[ProcessContext]) (sched.Result, error) {
-	handle, err := capcompute.Resume(ctx, process)
-	if err != nil {
-		return sched.Result{}, err
-	}
-	return quantumResult(<-handle.Results()), nil
-}
-
-// Release closes the instance. An instance never outlives its quantum: the
-// journal is the durable process, so nothing is lost by closing it and nothing
-// of the guest crosses into the next quantum.
-func (processMachine) Release(process *capcompute.Process[ProcessContext]) {
-	_ = process.Close(context.Background())
-}
-
-// quantumResult restates a processor outcome as a queue outcome. Output and
-// exit code are deliberately dropped: an answer is read from the journal, never
-// from the guest's return value.
-func quantumResult(result capcompute.ResumeResult) sched.Result {
+func toResult(result capcompute.ResumeResult) sched.Result {
 	status := sched.Failed
 	switch result.Status {
 	case capcompute.ResumeCompleted:
@@ -120,11 +26,6 @@ func quantumResult(result capcompute.ResumeResult) sched.Result {
 	return sched.Result{Status: status, Err: result.Err}
 }
 
-// execute drives one process attempt to a terminal-or-parked state. ctx is the
-// quantum context of the parent that is delegating to this process; it is used
-// only on the delegated-child path, where the child must run inside its parent's
-// remaining budget. A root ignores it — the scheduler supplies the quantum
-// context — so root callers pass context.Background().
 func (r *Runtime) execute(ctx context.Context, processID string) {
 	defer r.wg.Done()
 

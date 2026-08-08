@@ -7,33 +7,10 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct/program"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/program"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/capcompute/sys"
-)
-
-// Agent lifecycle syscalls. The guest fetches its input and reports its answer
-// through these calls so both are recorded on the replay journal — making the
-// per-process tape the full narrative: sys.input → capability calls → sys.output.
-const (
-	callSysInput  = "sys.input"
-	callSysOutput = "sys.output"
-	// callSysLog is the side-effect-free progress report, served by the
-	// progress dispatcher below the task layer.
-	callSysLog = "sys.log"
-	// callSysCompensate registers an effect's undo: a deferred syscall the
-	// runtime journals (name + concrete guest-supplied args) but executes only
-	// if the critical section later aborts.
-	callSysCompensate = sys.SyscallCompensate
-	// callSysAbort rolls the open critical section back instead of finishing:
-	// the runtime executes the registered compensations newest-first, then
-	// retries the section after the declared delay or stops the process as
-	// compensated. With no section open, the whole process rolls back. This
-	// call is the guest's own way to abandon its revision — the only one that
-	// belongs on the journal; the host's abandonments (failure, stop, restart)
-	// are management state on the process, never journal records.
-	callSysAbort = sys.SyscallAbort
 )
 
 type finishArgs struct {
@@ -41,49 +18,18 @@ type finishArgs struct {
 }
 
 type abortArgs struct {
-	Reason string `json:"reason"`
-	// RetrySeconds schedules a fresh attempt of the aborted section that many
-	// seconds after the rollback (0 = immediately). Absent means no retry: the
-	// process finishes as compensated.
+	Reason       string `json:"reason"`
 	RetrySeconds *int64 `json:"retry_seconds"`
 }
 
-// The host's abandonment kinds — management state on the process
-// (processState.abandoning), never journal records: the journal carries the
-// guest's narrative, and the guest's own abandonment is its sys.abort call.
-// The kind decides what follows once the rollback settles: failed (the
-// recorded error standing), stopped, or re-run from scratch.
-const (
-	abandonFailure = "failure"
-	abandonStop    = "stop"
-	abandonRestart = "restart"
-)
-
-type compensateArgs struct {
-	Name string          `json:"name"`
-	Args json.RawMessage `json:"args"`
-}
-
-// lifecycleDispatcher serves the sys.input/sys.output lifecycle syscalls
-// below the replay layer (so they are journaled) and forwards everything else
-// to the capability dispatcher. It publishes both — hidden — into the chain's
-// capability set: the processor's Validator enforces complete mediation from the
-// grant set, so even the runtime's own protocol calls are granted explicitly
-// rather than smuggled past the reference monitor.
 type lifecycleDispatcher struct {
-	next  sys.Dispatcher[ProcessContext]
-	input string
-	// inputLabels is the input's provenance — a delegated child's parent-taint
-	// snapshot at spawn. Stamped on the sys.input result beside the history
-	// labels, never serialized into the guest payload.
-	inputLabels []string
-	history     []HistoryMessage
-	manifest    manifest.Manifest
-	attempt     int
-	// validateAnswer checks a finished answer against the program's declared
-	// output schema; a rejected answer comes back as a failed result the guest
-	// can react to.
-	validateAnswer func(string) error
+	next           sys.Dispatcher[ProcessContext]
+	input          string
+	inputLabels    []string
+	history        []HistoryMessage
+	manifest       manifest.Manifest
+	attempt        int
+	validateAnswer func(json.RawMessage) error
 }
 
 func newLifecycleDispatcher(
@@ -93,7 +39,7 @@ func newLifecycleDispatcher(
 	history []HistoryMessage,
 	manifest manifest.Manifest,
 	attempt int,
-	validateAnswer func(string) error,
+	validateAnswer func(json.RawMessage) error,
 ) *lifecycleDispatcher {
 	return &lifecycleDispatcher{
 		next:           next,
@@ -108,7 +54,7 @@ func newLifecycleDispatcher(
 
 func (l *lifecycleDispatcher) Dispatch(ctx context.Context, cred ProcessContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	switch syscall.Name {
-	case callSysInput:
+	case sys.SyscallInput:
 		payload, err := json.Marshal(agentInput{
 			Input:        l.input,
 			History:      guestHistory(l.history),
@@ -126,7 +72,7 @@ func (l *lifecycleDispatcher) Dispatch(ctx context.Context, cred ProcessContext,
 		// and its downward mirror, a parent delegating a guarded sink to a
 		// fresh, untainted child.
 		return sys.Result(payload).WithLabels(append(historyLabels(l.history), l.inputLabels...)...), nil
-	case callSysOutput:
+	case sys.SyscallOutput:
 		// The answer travels in syscall.Args and is recorded on the journal; the
 		// host reads it back from there. Validate it against the program's
 		// declared output schema before acknowledging: a rejected answer is a
@@ -143,40 +89,7 @@ func (l *lifecycleDispatcher) Dispatch(ctx context.Context, cred ProcessContext,
 			}
 		}
 		return sys.Result(json.RawMessage(`{"ok":true}`)), nil
-	case callSysCompensate:
-		// Deferred: journal the registration, never execute it. The undo is a real
-		// syscall waiting to happen, and the rollback path that fires it at abort
-		// time does NOT re-run the Validator or FlowMonitor — so hold it to the
-		// reference monitor's gates HERE, at registration, when the guest's intent
-		// and the run's taint are both known:
-		//   - granted name (a misspelled/ungranted undo surfaces immediately),
-		//   - flow policy (a run that has already observed a label the capability
-		//     forbids may not register it as an undo — this blocks smuggling a
-		//     forbidden sink past the monitor by reading tainted data and then
-		//     aborting, while still allowing an undo registered before an
-		//     unrelated taint arrived), and
-		//   - input schema (the args cannot violate the authority boundary the
-		//     capability's schema encodes, e.g. a path prefix or an amount cap).
-		var args compensateArgs
-		if err := json.Unmarshal(syscall.Args, &args); err != nil {
-			return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode sys.compensate: %v", err)), nil
-		}
-		if strings.TrimSpace(args.Name) == "" {
-			return sys.FailCode(sys.ErrnoInvalidArgs, "sys.compensate: a capability name is required"), nil
-		}
-		capability, ok := sys.FindCapability(l.next.Capabilities(), args.Name)
-		if !ok {
-			return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("sys.compensate: capability %q is not granted", args.Name)), nil
-		}
-		if blocked := sys.BlockedBy(sys.Taint(ctx), capability.Forbid); len(blocked) > 0 {
-			return sys.FailCode(sys.ErrnoDenied, fmt.Sprintf(
-				"sys.compensate: this run has observed %v, which may not flow into %s", blocked, args.Name)), nil
-		}
-		if err := validateCompensationArgs(capability, args.Args); err != nil {
-			return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("sys.compensate: %v", err)), nil
-		}
-		return sys.Result(json.RawMessage(`{}`)), nil
-	case callSysAbort:
+	case sys.SyscallAbort:
 		// The reason and retry delay travel in syscall.Args and are journaled as
 		// the terminal call; the runtime reads them back, executes the registered
 		// compensations, and applies the retry. Acknowledge so the guest returns.
@@ -196,22 +109,17 @@ func (l *lifecycleDispatcher) Dispatch(ctx context.Context, cred ProcessContext,
 func (l *lifecycleDispatcher) Capabilities() []sys.Capability {
 	caps := appendMissing(l.next.Capabilities(),
 		sys.Capability{
-			Name:        callSysInput,
+			Name:        sys.SyscallInput,
 			Description: "fetch this process's input, prior history, and the visible capability menu",
 			Hidden:      true,
 		},
 		sys.Capability{
-			Name:        callSysOutput,
+			Name:        sys.SyscallOutput,
 			Description: "record this process's final answer on the journal",
 			Hidden:      true,
 		},
 		sys.Capability{
-			Name:        callSysCompensate,
-			Description: "register an effect's undo, executed only if the section later aborts",
-			Hidden:      true,
-		},
-		sys.Capability{
-			Name:        callSysAbort,
+			Name:        sys.SyscallAbort,
 			Description: "roll the open section back (registered compensations run newest-first), then retry or stop",
 			Hidden:      true,
 		},
@@ -278,12 +186,8 @@ func historyLabels(history []HistoryMessage) []string {
 	return labels
 }
 
-// answerFromJournal reads a completed process's answer from the journal's final
-// intent/completion pair, which must be the sys.output syscall. The answer is
-// therefore sourced from the tape (the single source of truth) rather than the
-// guest's return value.
 func (r *Runtime) answerFromJournal(processID string) (string, error) {
-	journal, ok := r.liveJournal(processID)
+	journal, ok := r.Journal(processID)
 	if !ok {
 		return "", errors.New("agent process journal is unavailable")
 	}
@@ -302,7 +206,7 @@ func (r *Runtime) answerFromJournal(processID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if intent.Syscall == nil || intent.Syscall.Name != callSysOutput {
+	if intent.Syscall == nil || intent.Syscall.Name != sys.SyscallOutput {
 		name := ""
 		if intent.Syscall != nil {
 			name = intent.Syscall.Name

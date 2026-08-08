@@ -41,14 +41,10 @@ var (
 type Status string
 
 const (
-	// Completed: the instance ran to the end of its entrypoint.
 	Completed Status = "completed"
-	// Yielded: the instance parked awaiting something outside itself.
-	Yielded Status = "yielded"
-	// Stopped: the quantum was cancelled or ran out of wall-clock time.
-	Stopped Status = "stopped"
-	// Failed: the quantum could not run, or the instance faulted.
-	Failed Status = "failed"
+	Yielded   Status = "yielded"
+	Stopped   Status = "stopped"
+	Failed    Status = "failed"
 )
 
 // Result is one quantum's outcome.
@@ -65,7 +61,7 @@ type Result struct {
 // ordering is load-bearing: a process whose program is withdrawn while its
 // submission sits in the queue must fail activation and never run.
 type Activator[ID comparable, T any] interface {
-	Activate(ctx context.Context, pid ID) (T, error)
+	Execute(ctx context.Context, pid ID) (T, error)
 }
 
 // Machine is the execution hardware: it gives an activated instance one quantum
@@ -305,7 +301,7 @@ func (s *Scheduler[ID, T]) runQuantum(ctx context.Context, running *entry[ID]) {
 // before the slot is — so nothing of one quantum's instance survives into the
 // next.
 func (s *Scheduler[ID, T]) run(ctx context.Context, pid ID) Result {
-	instance, err := s.config.Activator.Activate(ctx, pid)
+	instance, err := s.config.Activator.Execute(ctx, pid)
 	if err != nil {
 		return Result{Status: Failed, Err: fmt.Errorf("activate %v: %w", pid, err)}
 	}

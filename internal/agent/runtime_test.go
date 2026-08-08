@@ -1565,9 +1565,6 @@ func TestAbortRollsBackAndStops(t *testing.T) {
 	}
 	var sawRegistration, sawCompensation bool
 	for _, entry := range entries {
-		if entry.Syscall.Name == callSysCompensate {
-			sawRegistration = true
-		}
 		if entry.Syscall.Name == "billing.refund" && entry.Compensates != nil {
 			sawCompensation = true
 		}

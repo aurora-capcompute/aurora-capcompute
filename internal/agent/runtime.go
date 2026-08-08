@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct/program"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/sched"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/aurora-capcompute/monitor"
@@ -35,10 +36,7 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/errs"
 	internalhost "github.com/aurora-capcompute/aurora-capcompute/internal/agent/host"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/program"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
-
-	extism "github.com/extism/go-sdk"
 )
 
 const (
@@ -336,15 +334,26 @@ func (r *Runtime) wrapProtocol(cred ProcessContext, next sys.Dispatcher[ProcessC
 	if grant, ok := spec.Grant(manifest.SpawnSyscall); ok {
 		next = newSpawnRouter(next, grant, r)
 	}
-	return newLifecycleDispatcher(next, input, inputLabels, history, spec, attempt, r.programs.AnswerValidator(spec.Program)), nil
+	return newLifecycleDispatcher(
+		next,
+		input,
+		inputLabels,
+		history,
+		spec,
+		attempt,
+		func(answer json.RawMessage) error {
+			a, err := r.programs.Resolve(spec.Program)
+			if err != nil {
+				return err
+			}
+			if err = a.Output.ValidateJSON(answer); err != nil {
+				return err
+			}
+			return nil
+		},
+	), nil
 }
 
-// programBinding checks that the process's program is loaded with the exact
-// identity the process was created from — the same wasm bytes and the same
-// interface manifest. A process is an audit target: its journal, effects, and
-// conclusions attest to one program under one contract, so it never resumes or
-// restarts under changed code or a changed interface. The new program runs in
-// new processes, bound by their own manifest.
 func (r *Runtime) programBinding(proc *processState) error {
 	artifact, err := r.programs.Resolve(proc.manifest.Program)
 	if err != nil {
@@ -353,7 +362,7 @@ func (r *Runtime) programBinding(proc *processState) error {
 	if artifact.Digest != proc.programDigest {
 		return fmt.Errorf(
 			"program %q changed (loaded %s, process bound to %s): a process is immutable — its code and interface are fixed; spawn a new process from the new program, or kill this one to settle its effects",
-			proc.manifest.Program, program.ShortDigest(artifact.Digest), program.ShortDigest(proc.programDigest))
+			proc.manifest.Program, artifact.Digest, proc.programDigest)
 	}
 	return nil
 }
@@ -395,24 +404,6 @@ func (r *Runtime) Header(cred ProcessContext) journaled.Header {
 	return journaled.Header{ABI: sys.ABIVersion, Program: program, Process: cred.ProcessID}
 }
 
-// compileProgram compiles a program's wasm into a compiled program. It is pure with respect
-// to runtime state, so it can be called outside the runtime mutex while
-// preparing an AddProgram swap. The wasm engine gets the bytes' own sha256 for
-// integrity (not the program identity, which also covers the interface).
-func (r *Runtime) compileProgram(ctx context.Context, id string, wasm []byte) (*capcompute.Program, error) {
-	image, err := capcompute.NewProgram(ctx, capcompute.Config{
-		Image: extism.Manifest{
-			Wasm: []extism.Wasm{extism.WasmData{Data: wasm, Hash: program.DigestOf(wasm), Name: id}},
-		},
-		PluginConfig:   extism.PluginConfig{EnableWasi: true},
-		MaxMemoryPages: r.memoryPages,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("compile program %q: %w", id, err)
-	}
-	return image, nil
-}
-
 // AddProgram registers one program and compiles its wasm. The id is the app's to
 // choose and it must be free: a program is never replaced in place, because
 // processes are immutably bound to the (name, identity) they were created from.
@@ -437,7 +428,7 @@ func (r *Runtime) AddProgram(ctx context.Context, data program.Data) error {
 	if err != nil {
 		return err
 	}
-	artifact = artifact.WithImage(image)
+	artifact.Image = image
 	added, err := r.programs.Add(artifact)
 	if err != nil || !added {
 		_ = image.Close(context.Background())
@@ -495,7 +486,7 @@ func (r *Runtime) RemoveProgram(ctx context.Context, id string) error {
 	// live module is recovered by the processor, not a crash — but a process is an
 	// audit target and its final state must not turn on which of the two won.
 	r.drainProcesses(ctx, id, bound)
-	if image := removed.Image(); image != nil {
+	if image := removed.Image; image != nil {
 		_ = image.Close(context.Background())
 	}
 	return nil
@@ -651,7 +642,7 @@ func (r *Runtime) GetSession(sessionID string) (SessionSnapshot, error) {
 // one place that rule is written down.
 func (r *Runtime) enrollLocked() { r.wg.Add(1) }
 
-// CreateProcess starts a process on a session. deadline bounds each of its
+// MakeProcess starts a process on a session. deadline bounds each of its
 // quanta — the guest's own uninterrupted compute between syscalls, and anything
 // it delegates inside that quantum. Zero takes the host default; anything above
 // the host ceiling is clamped down to it, so a caller can only ever ask for less
@@ -916,8 +907,8 @@ func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, erro
 }
 
 // retryUnder is Retry with the quantum context of a parent that is delegating to
-// this process: the cascade path re-drives a child from inside the parent's
 // quantum, and the child must inherit its remaining budget rather than start a
+// this process: the cascade path re-drives a child from inside the parent's
 // fresh one. A host-initiated retry passes context.Background() and the process
 // falls back to its own deadline.
 func (r *Runtime) retryUnder(ctx context.Context, processID string, mode RetryMode) (ProcessSnapshot, error) {
@@ -1232,7 +1223,7 @@ func (r *Runtime) Close(ctx context.Context) error {
 
 	closeErrors := []error{}
 	for _, artifact := range r.programs.Drain() {
-		image := artifact.Image()
+		image := artifact.Image
 		if image == nil {
 			continue
 		}

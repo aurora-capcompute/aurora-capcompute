@@ -129,15 +129,6 @@ func visibleCapabilities(caps []sys.Capability) []sys.Capability {
 	return visible
 }
 
-func (r *Runtime) processContextLocked(proc *processState) ProcessContext {
-	return ProcessContext{
-		TenantID:  r.tenantID,
-		SessionID: proc.sessionID,
-		ProcessID: proc.id,
-		Revision:  proc.revision,
-	}
-}
-
 func (r *Runtime) storedProcessLocked(proc *processState) durable.Process {
 	var tags map[string]string
 	if session := r.sessions[proc.sessionID]; session != nil {

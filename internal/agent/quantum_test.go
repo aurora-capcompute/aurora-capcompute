@@ -59,7 +59,7 @@ func TestQuantumResultRestatesProcessorOutcomes(t *testing.T) {
 		{capcompute.ResumeFailed, sched.Failed},
 		{capcompute.ResumeStatus("something new"), sched.Failed},
 	} {
-		got := quantumResult(capcompute.ResumeResult{Status: test.from, Err: cause})
+		got := toResult(capcompute.ResumeResult{Status: test.from, Err: cause})
 		if got.Status != test.want {
 			t.Errorf("%s became %s, want %s", test.from, got.Status, test.want)
 		}
@@ -91,14 +91,14 @@ func TestActivateRefusesAStaleRevision(t *testing.T) {
 		{"unknown process", processKey{processID: "nope", revision: 1}},
 		{"superseded revision", processKey{processID: "p1", revision: 1}},
 	} {
-		if _, err := activator.Activate(context.Background(), test.key); !errors.Is(err, errs.NotFound) {
+		if _, err := activator.Execute(context.Background(), test.key); !errors.Is(err, errs.NotFound) {
 			t.Errorf("%s: err = %v, want NotFound", test.name, err)
 		}
 	}
 
 	// The current revision gets past the lookup and fails later, on the program
 	// binding — which is what proves the lookup itself matched.
-	_, err := activator.Activate(context.Background(), processKey{processID: "p1", revision: 2})
+	_, err := activator.Execute(context.Background(), processKey{processID: "p1", revision: 2})
 	if err == nil || !strings.Contains(err.Error(), "unloaded@1") {
 		t.Fatalf("err = %v, want the current revision to reach its program binding", err)
 	}

@@ -137,7 +137,7 @@ func (r *Runtime) restoreSession(proj durable.Projection, journals map[string]ma
 		proc.history = append([]HistoryMessage(nil), session.history...)
 		session.processIDs = append(session.processIDs, proc.id)
 		// Only a completed ROOT contributes to session history, matching the live
-		// append (execution.go). Without the parent filter a restart would fold
+		// append (executor.go). Without the parent filter a restart would fold
 		// every completed child's Q&A into the shared transcript — diverging
 		// history and cross-run taint from the pre-restart state, and disclosing a
 		// child's answer (even a history:false-isolated child's) into the session.
