@@ -1,4 +1,4 @@
-package program
+package direct
 
 import (
 	"bytes"
@@ -215,7 +215,7 @@ func TestLoadedProgramsBookkeeping(t *testing.T) {
 // happens to look like JSON still counts as a string for a string schema, and
 // a structured schema accepts a JSON document but rejects prose.
 func TestValidateTextStringFirstRule(t *testing.T) {
-	strSchema, err := PrepareSchema("input", json.RawMessage(`{"type":"string"}`))
+	strSchema, err := prepareSchema("input", json.RawMessage(`{"type":"string"}`))
 	if err != nil {
 		t.Fatalf("compile string schema: %v", err)
 	}
@@ -225,7 +225,7 @@ func TestValidateTextStringFirstRule(t *testing.T) {
 		}
 	}
 
-	objSchema, err := PrepareSchema("input", json.RawMessage(
+	objSchema, err := prepareSchema("input", json.RawMessage(
 		`{"type":"object","required":["task"],"properties":{"task":{"type":"string"}}}`))
 	if err != nil {
 		t.Fatalf("compile object schema: %v", err)

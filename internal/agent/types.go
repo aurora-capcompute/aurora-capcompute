@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct/program"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/sched"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/aurora-capcompute/monitor"
@@ -112,7 +112,7 @@ type Runtime struct {
 	// do NOT use it — they must complete on shutdown to persist final state.
 	baseCtx         context.Context
 	cancel          context.CancelFunc
-	programs        *program.Registry
+	programs        *direct.Registry
 	scheduler       *sched.Scheduler[processKey, *capcompute.Process[ProcessContext]]
 	taints          *monitor.Taints[processKey]
 	log             eventlog.Log

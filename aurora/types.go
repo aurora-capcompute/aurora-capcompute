@@ -1,7 +1,7 @@
 package aurora
 
 import (
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct/program"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct"
 	"github.com/aurora-capcompute/capcompute/sys"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent"
@@ -29,9 +29,9 @@ type SessionGraphProcess = agent.SessionGraphProcess
 type Event = agent.Event
 type JournalEvent = agent.JournalEvent
 type ProgressEvent = agent.ProgressEvent
-type ProgramArtifact = program.Artifact
-type ProgramData = program.Data
-type Schema = program.Schema
+type ProgramArtifact = direct.artifact
+type ProgramData = direct.Data
+type Schema = direct.schema
 
 // Status types
 

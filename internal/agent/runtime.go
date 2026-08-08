@@ -24,7 +24,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct/program"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/sched"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/aurora-capcompute/monitor"
@@ -180,7 +180,7 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 	runtime := &Runtime{
 		baseCtx:         baseCtx,
 		cancel:          cancel,
-		programs:        program.NewRegistry(),
+		programs:        direct.NewRegistry(),
 		taints:          monitor.NewTaints[processKey](),
 		log:             config.Log,
 		leases:          config.Leases,
@@ -346,7 +346,7 @@ func (r *Runtime) wrapProtocol(cred ProcessContext, next sys.Dispatcher[ProcessC
 			if err != nil {
 				return err
 			}
-			if err = a.Output.ValidateJSON(answer); err != nil {
+			if err = a.Output.validateJSON(answer); err != nil {
 				return err
 			}
 			return nil
@@ -413,11 +413,11 @@ func (r *Runtime) Header(cred ProcessContext) journaled.Header {
 // the old program first, which settles the processes bound to it. Compilation
 // happens outside the runtime mutex, so dispatch is only briefly paused for the
 // swap.
-func (r *Runtime) AddProgram(ctx context.Context, data program.Data) error {
+func (r *Runtime) AddProgram(ctx context.Context, data direct.Data) error {
 	// Preparing the program is the cheap half — interface normalization and
 	// schema compilation — and it pins the digest, so an unchanged program is
 	// settled without compiling any wasm.
-	artifact, err := program.Load(data)
+	artifact, err := direct.Load(data)
 	if err != nil {
 		return err
 	}
@@ -620,7 +620,7 @@ func (r *Runtime) ListSessions() []SessionSummary {
 	return out
 }
 
-func (r *Runtime) Programs() []program.Artifact {
+func (r *Runtime) Programs() []direct.artifact {
 	return r.programs.List()
 }
 
@@ -1222,7 +1222,7 @@ func (r *Runtime) Close(ctx context.Context) error {
 	}
 
 	closeErrors := []error{}
-	for _, artifact := range r.programs.Drain() {
+	for _, artifact := range r.programs.Close() {
 		image := artifact.Image
 		if image == nil {
 			continue

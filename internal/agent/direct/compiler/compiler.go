@@ -11,7 +11,7 @@ import (
 )
 
 type Compiler interface {
-	Compile(ctx context.Context, id string, wasm []byte) (*capcompute.Program, error)
+	Compile(ctx context.Context, id string, code []byte) (*capcompute.Program, error)
 }
 
 func New(memoryPages uint32) Compiler {

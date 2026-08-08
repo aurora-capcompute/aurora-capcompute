@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct/program"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/capcompute/sys"
@@ -168,11 +168,11 @@ func validateCompensationArgs(capability sys.Capability, rawArgs json.RawMessage
 	if len(capability.InputSchema) == 0 {
 		return nil
 	}
-	schema, err := program.PrepareSchema("compensation", capability.InputSchema)
+	schema, err := direct.prepareSchema("compensation", capability.InputSchema)
 	if err != nil {
 		return fmt.Errorf("compile %s schema: %w", capability.Name, err)
 	}
-	if err := schema.ValidateJSON(rawArgs); err != nil {
+	if err := schema.validateJSON(rawArgs); err != nil {
 		return fmt.Errorf("%s args violate its input schema: %w", capability.Name, err)
 	}
 	return nil
