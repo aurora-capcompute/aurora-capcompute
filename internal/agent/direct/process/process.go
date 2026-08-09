@@ -21,32 +21,9 @@ type Result struct {
 	Error  error
 }
 
-type processHandle[T any] struct {
-	inner   *capcompute.ResumeHandle
-	process *capcompute.Process[T]
-}
-
-func (h processHandle[T]) Result() <-chan Result {
-	return mapChannel(h.inner.Results, func(r capcompute.ResumeResult) Result {
-		return Result{Status: Status(r.Status), Error: r.Err}
-	})
-}
-
-func (h processHandle[T]) Cancel() {
-	h.inner.Cancel()
-}
-
-// Release closes the instance once its quantum has ended. An instance never
-// outlives its quantum: the journal is the durable process, so nothing of the
-// guest crosses into the next one.
-func (h processHandle[T]) Release() {
-	_ = h.process.Close(context.Background())
-}
-
 type Handle interface {
 	Result() <-chan Result
 	Cancel()
-	Release()
 }
 
 func Spawn[T any](
@@ -74,16 +51,25 @@ func Spawn[T any](
 		return nil, err
 	}
 
-	return processHandle[T]{inner: handle, process: process}, nil
-}
-
-func mapChannel[T, U any](in <-chan T, f func(T) U) <-chan U {
-	out := make(chan U, 1)
+	// The instance is closed as its quantum ends, before the outcome is handed
+	// on: an instance never outlives its quantum, so dropping the handle cannot
+	// leak one. Buffered, so this finishes whether or not anyone reads.
+	out := make(chan Result, 1)
 	go func() {
 		defer close(out)
-		for v := range in {
-			out <- f(v)
+		for r := range handle.Results {
+			_ = process.Close(context.Background())
+			out <- Result{Status: Status(r.Status), Error: r.Err}
 		}
 	}()
-	return out
+	return processHandle{inner: handle, results: out}, nil
 }
+
+type processHandle struct {
+	inner   *capcompute.ResumeHandle
+	results <-chan Result
+}
+
+func (h processHandle) Result() <-chan Result { return h.results }
+
+func (h processHandle) Cancel() { h.inner.Cancel() }

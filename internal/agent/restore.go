@@ -94,28 +94,24 @@ func (r *Runtime) restoreSession(proj durable.Projection, journals map[string]ma
 			status = durable.ProcessInterrupted
 		}
 		proc := &processState{
-			id:                sr.ID,
-			sessionID:         sr.SessionID,
-			input:             sr.Input,
-			status:            status,
-			attempt:           sr.Attempt,
-			revision:          sr.Revision,
-			createdAt:         sr.CreatedAt,
-			updatedAt:         sr.UpdatedAt,
-			startedAt:         copyTime(sr.StartedAt),
-			completedAt:       copyTime(sr.CompletedAt),
-			answer:            sr.Answer,
-			err:               sr.Error,
-			manifest:          em.Clone(),
-			digest:            direct.Digest{ArtifactDigest: sr.ProgramDigest, SourceCodeDigest: sr.SourceCodeDigest},
-			hideHistory:       sr.HideHistory,
-			labels:            append([]string(nil), sr.Labels...),
-			inputLabels:       append([]string(nil), sr.InputLabels...),
-			parentProcessID:   sr.ParentProcessID,
-			childProcessIDs:   append([]string(nil), sr.ChildProcessIDs...),
-			childSpawnOffsets: append([]int(nil), sr.ChildSpawnOffsets...),
-			forkOffset:        sr.ForkOffset,
-			abortRetries:      sr.AbortRetries,
+			id:           sr.ID,
+			sessionID:    sr.SessionID,
+			input:        sr.Input,
+			status:       status,
+			attempt:      sr.Attempt,
+			revision:     sr.Revision,
+			createdAt:    sr.CreatedAt,
+			updatedAt:    sr.UpdatedAt,
+			startedAt:    copyTime(sr.StartedAt),
+			completedAt:  copyTime(sr.CompletedAt),
+			answer:       sr.Answer,
+			err:          sr.Error,
+			manifest:     em.Clone(),
+			digest:       direct.Digest{ArtifactDigest: sr.ProgramDigest, SourceCodeDigest: sr.SourceCodeDigest},
+			hideHistory:  sr.HideHistory,
+			labels:       append([]string(nil), sr.Labels...),
+			forkOffset:   sr.ForkOffset,
+			abortRetries: sr.AbortRetries,
 		}
 		if proc.revision == 0 {
 			proc.revision = 1
@@ -138,11 +134,7 @@ func (r *Runtime) restoreSession(proj durable.Projection, journals map[string]ma
 		proc.history = append([]HistoryMessage(nil), session.history...)
 		session.processIDs = append(session.processIDs, proc.id)
 		// Only a completed ROOT contributes to session history, matching the live
-		// append (executor.go). Without the parent filter a restart would fold
-		// every completed child's Q&A into the shared transcript — diverging
-		// history and cross-run taint from the pre-restart state, and disclosing a
-		// child's answer (even a history:false-isolated child's) into the session.
-		if proc.status == durable.ProcessCompleted && proc.parentProcessID == "" {
+		if proc.status == durable.ProcessCompleted {
 			session.history = append(session.history,
 				HistoryMessage{Role: "user", Content: proc.input},
 				HistoryMessage{Role: "assistant", Content: proc.answer, Labels: proc.labels},
@@ -176,12 +168,6 @@ func (r *Runtime) restoreSession(proj durable.Projection, journals map[string]ma
 			lost = !pending[proc.id]
 		case durable.ProcessYielded:
 			lost = true
-			for _, childID := range proc.childProcessIDs {
-				if child := r.processes[childID]; child != nil && !isTerminal(child.status) {
-					lost = false
-					break
-				}
-			}
 		}
 		if lost {
 			slog.Info("parked process lost its wakeup in a crash; folding to interrupted",

@@ -40,7 +40,6 @@ type abortArgs struct {
 type lifecycleDispatcher struct {
 	next           sys.Dispatcher[ProcessContext]
 	input          string
-	inputLabels    []string
 	history        []HistoryMessage
 	manifest       manifest.Manifest
 	attempt        int
@@ -50,7 +49,6 @@ type lifecycleDispatcher struct {
 func newLifecycleDispatcher(
 	next sys.Dispatcher[ProcessContext],
 	input string,
-	inputLabels []string,
 	history []HistoryMessage,
 	manifest manifest.Manifest,
 	attempt int,
@@ -59,7 +57,6 @@ func newLifecycleDispatcher(
 	return &lifecycleDispatcher{
 		next:           next,
 		input:          input,
-		inputLabels:    inputLabels,
 		history:        history,
 		manifest:       manifest,
 		attempt:        attempt,
@@ -79,14 +76,10 @@ func (l *lifecycleDispatcher) Dispatch(ctx context.Context, cred ProcessContext,
 		if err != nil {
 			return sys.Fail(err.Error()), nil
 		}
-		// The input is this run's loopback from everything that came before it:
-		// the session history (prior runs) and, for a delegated child, the input
-		// text a tainted parent composed. Stamp both provenances so the flow
-		// monitor (which observes every result's labels) taints this run with
-		// what its predecessors observed — closing the cross-run laundering path
-		// and its downward mirror, a parent delegating a guarded sink to a
-		// fresh, untainted child.
-		return sys.Result(payload).WithLabels(append(historyLabels(l.history), l.inputLabels...)...), nil
+		// The input is this run's loopback from the session history that came
+		// before it. Stamp its provenance so the flow monitor taints this run with
+		// what its predecessors observed — closing the cross-run laundering path.
+		return sys.Result(payload).WithLabels(historyLabels(l.history)...), nil
 	case sys.SyscallOutput:
 		// The answer travels in syscall.Args and is recorded on the journal; the
 		// host reads it back from there. Validate it against the program's

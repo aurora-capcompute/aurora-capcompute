@@ -89,7 +89,7 @@ func (r *Runtime) retryAbortedSection(processID, reason string) {
 			fmt.Errorf("%w (no attempts left after %d)", failure, r.maxAbortRetries))
 	default:
 		proc.abortRetries++
-		r.forkJournalLocked(proc, forkOffset, RetryResume)
+		r.forkJournalLocked(proc, forkOffset)
 		if _, err := r.relaunchLocked(context.Background(), proc); err != nil {
 			slog.Warn("abort retry relaunch", "process_id", processID, "error", err)
 		}
@@ -142,4 +142,14 @@ func (r *Runtime) redriveAfterFailure(processID string) bool {
 // resumes or restarts from there.
 func (r *Runtime) stopProcess(processID string, cause error) {
 	r.finish(processID, durable.ProcessStopped, "", cause)
+}
+
+// isTerminal reports whether a process status is a final state (no further execution).
+func isTerminal(status durable.ProcessStatus) bool {
+	switch status {
+	case durable.ProcessCompleted, durable.ProcessFailed, durable.ProcessStopped, durable.ProcessInterrupted:
+		return true
+	default:
+		return false
+	}
 }

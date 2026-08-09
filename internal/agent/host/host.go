@@ -59,10 +59,8 @@ type Config[ID comparable, K capcompute.PID[ID]] struct {
 	TaskTTL    time.Duration
 
 	// Wrap stacks the runtime's protocol layers above the task layer and below
-	// the savepoint markers — delegation routing (which must see a syscall
-	// before the task layer, so a delegated child's park never becomes a human
-	// task) and the agent lifecycle (whose input payload advertises the whole
-	// capability surface beneath it). Nil adds no layer.
+	// the savepoint markers — the agent lifecycle, whose input payload
+	// advertises the whole capability surface beneath it. Nil adds no layer.
 	Wrap func(K, sys.Dispatcher[K]) (sys.Dispatcher[K], error)
 	// OpenIntents overrides the replay open-intent policy — what to do with an
 	// effect journaled without a recorded completion, met on crash-resume. Nil
@@ -158,7 +156,7 @@ func (f *Factory[ID, K]) NewDispatcher(ctx context.Context, cred K) (sys.Dispatc
 	withSavepoints := &savepointDispatcher[K]{next: withWorld}
 
 	// The grant set is the complete mediation surface: everything this process's
-	// chain can serve — drivers, delegation routes, and the runtime's own
+	// chain can serve — drivers and the runtime's own
 	// protocol capabilities — is granted explicitly; anything else is denied
 	// by the Validator before it reaches a driver.
 	stack := monitor.Stack[ID, K]{

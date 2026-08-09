@@ -8,8 +8,6 @@ import (
 	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct/process"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/sched"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/aurora-capcompute/monitor"
 	"github.com/aurora-capcompute/capcompute/sys"
@@ -68,8 +66,7 @@ type Config struct {
 	LeaseTTL    time.Duration
 
 	// MaxConcurrentProcesses bounds simultaneously executing process quanta across the
-	// runtime (0 = a default of 16). Delegated child processes execute inside their
-	// parent's quantum and are not counted.
+	// runtime (0 = a default of 16).
 	MaxConcurrentProcesses int
 	// MaxAbortRetries bounds how many times a process may abort and re-run the
 	// section it abandoned before the retry is refused and it finishes as failed
@@ -113,7 +110,6 @@ type Runtime struct {
 	baseCtx         context.Context
 	cancel          context.CancelFunc
 	images          direct.Registry[ProgramID, ProcessContext]
-	scheduler       *sched.Scheduler[processKey, process.Handle]
 	taints          *monitor.Taints[processKey]
 	log             eventlog.Log
 	leases          Leases
@@ -169,16 +165,8 @@ type processState struct {
 	// per-revision taint is released) so it can ride onto the session-history entry
 	// this process contributes and, through it, into a later run that reads it.
 	labels []string
-	// inputLabels is the provenance the process's input arrived with — for a
-	// delegated child, the parent's taint snapshot at spawn. sys.input stamps
-	// them on its result (beside the history labels) so the child observes what
-	// the parent had observed: the input text was composed from the parent's
-	// sources, and a fresh, untainted child would otherwise launder them downward
-	// — the mirror of the child→parent stamp on the spawn answer.
-	inputLabels []string
-	// stop aborts the process's in-flight quantum: the scheduler submission for a
-	// root process, the direct resume handle for a delegated child. Nil when no
-	// quantum is in flight.
+	// stop aborts the process's in-flight quantum — the handle the scheduler
+	// returned. Nil when no quantum is in flight.
 	stop          func()
 	stopRequested bool
 	// deadline bounds each of this process's quanta, chosen at MakeProcess and
@@ -189,22 +177,10 @@ type processState struct {
 	manifest manifest.Manifest
 	revision uint64
 	digest   direct.Digest
-	// hideHistory suppresses the session history in this process's sys.input —
-	// set when it was spawned under a sys.spawn grant with history:false, so an
-	// isolated child sees only its input. Persisted, so a restart re-serves the
-	// same isolated input. (A hidden capability menu needs no field: the child's
-	// grants are simply marked hidden in its stored manifest.)
+	// hideHistory suppresses the session history in this process's sys.input,
+	// set when its manifest declares history:false. Persisted, so a restart
+	// re-serves the same isolated input.
 	hideHistory bool
-	// parentProcessID and childProcessIDs make delegated processes addressable: a child knows
-	// the process that spawned it, and a parent records its children in spawn order.
-	parentProcessID string
-	childProcessIDs []string
-	// childSpawnOffsets records, parallel to childProcessIDs, the journal length at
-	// the moment each child was spawned (one past the delegation intent). It
-	// lets a fork-from-offset retry start the cascade cursor past children whose
-	// delegation call is replayed from the shared prefix, so only re-executed
-	// children are reused.
-	childSpawnOffsets []int
 	// forkOffset is the current revision's copy-on-write fork point (positions
 	// [0, forkOffset) are served from the shared history). It is persisted so a
 	// revision that was forked but crashed before logging any record can be
@@ -223,17 +199,6 @@ type processState struct {
 	// revision state, it survives both the fork it authorized and (being
 	// persisted) a host restart: a reset budget is an unbounded loop.
 	abortRetries int
-	// cascade re-execution state: when a process is restarted, cascade is set so the
-	// delegation router reuses (retries) the existing children at cascadeCursor in
-	// spawn order rather than spawning fresh ones. cascadeMode records whether the
-	// parent was resumed or restarted so children inherit the right retry mode.
-	cascade       bool
-	cascadeCursor int
-	cascadeMode   RetryMode
-	// reconnectChildren makes the delegation router reuse a finished child's
-	// terminal result directly when the parent is re-driven after that child's
-	// out-of-band approval resolved. Consumed and cleared when the play ends.
-	reconnectChildren bool
 }
 
 type ProcessContext struct {
@@ -242,10 +207,14 @@ type ProcessContext struct {
 	ProcessID string
 	Revision  uint64
 	Digest    direct.Digest
+	// Quantum is what sched.Process asks of a credential: how long this guest
+	// may hold its slot.
+	Quantum time.Duration
 }
 
 func (r ProcessContext) ArtifactDigest() string   { return r.Digest.ArtifactDigest }
 func (r ProcessContext) SourceCodeDigest() string { return r.Digest.SourceCodeDigest }
+func (r ProcessContext) Deadline() time.Duration  { return r.Quantum }
 
 func (r ProcessContext) PID() processKey {
 	return processKey{processID: r.ProcessID, revision: r.Revision}
@@ -348,13 +317,7 @@ type ProcessSnapshot struct {
 	// Labels is the run's accumulated taint at snapshot time (the union of every
 	// source class it has observed). A completed process carries its final taint,
 	// which the spawn boundary reads to propagate a child's provenance to its
-	// parent — so a parent cannot launder a forbidden source by delegating the
-	// read to a child and reading the answer back.
 	Labels []string `json:"labels,omitempty"`
-	// Delegation lineage, so a single-process read shows the call tree the same
-	// way durable.Process and the session graph do.
-	ParentProcessID string   `json:"parent_process_id,omitempty"`
-	ChildProcessIDs []string `json:"child_process_ids,omitempty"`
 }
 
 type TaskSnapshot struct {

@@ -198,16 +198,7 @@ func deriveSession(processes map[string]Process) Session {
 		}
 	}
 	// ActiveProcessID is the session's foreground process: the earliest
-	// non-terminal top-level process. Preferring a root over a delegated child
-	// means a crash that leaves a running child and a waiting parent resolves to
-	// the parent — so restore never pins the session to a child that the
-	// parent's own retry would then collide with.
-	for _, proc := range ordered {
-		if isActiveStatus(proc.Status) && proc.ParentProcessID == "" {
-			session.ActiveProcessID = proc.ID
-			break
-		}
-	}
+	// non-terminal one.
 	if session.ActiveProcessID == "" {
 		for _, proc := range ordered {
 			if isActiveStatus(proc.Status) {

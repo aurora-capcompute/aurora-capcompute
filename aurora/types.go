@@ -22,7 +22,6 @@ type ProcessSnapshot = agent.ProcessSnapshot
 type TaskSnapshot = agent.TaskSnapshot
 type JournalEntry = agent.JournalEntry
 type JournalOutcome = agent.JournalOutcome
-type ProcessGraphNode = agent.ProcessGraphNode
 type SessionGraph = agent.SessionGraph
 type SessionGraphProcess = agent.SessionGraphProcess
 type Event = agent.Event
@@ -107,7 +106,6 @@ var (
 const (
 	DefaultTenantID   = agent.DefaultTenantID
 	ManifestVersion   = manifest.Version
-	SpawnSyscall      = manifest.SpawnSyscall
 	TimerSyscall      = manifest.TimerSyscall
 	DeclassifySyscall = manifest.DeclassifySyscall
 )

@@ -62,14 +62,14 @@ func TestReconcileGrants(t *testing.T) {
 	})
 
 	t.Run("a driver may not advertise a runtime-served capability", func(t *testing.T) {
-		// sys.spawn is runtime-served, so it is not a leaf grant; a driver that
+		// sys.timer is runtime-served, so it is not a leaf grant; a driver that
 		// published it would be shadowing the runtime's own — refused.
-		spawnManifest := manifest.Manifest{Version: manifest.Version, Syscalls: []manifest.Syscall{
-			{Syscall: manifest.SpawnSyscall, Programs: []manifest.Manifest{{Program: "child"}}},
+		timerManifest := manifest.Manifest{Version: manifest.Version, Syscalls: []manifest.Syscall{
+			{Syscall: manifest.TimerSyscall},
 		}}
-		err := reconcileGrants([]sys.Capability{leafCap(manifest.SpawnSyscall)}, spawnManifest)
-		if err == nil || !strings.Contains(err.Error(), manifest.SpawnSyscall) {
-			t.Fatalf("err = %v, want a driver advertising %s to be rejected", err, manifest.SpawnSyscall)
+		err := reconcileGrants([]sys.Capability{leafCap(manifest.TimerSyscall)}, timerManifest)
+		if err == nil || !strings.Contains(err.Error(), manifest.TimerSyscall) {
+			t.Fatalf("err = %v, want a driver advertising %s to be rejected", err, manifest.TimerSyscall)
 		}
 	})
 }
@@ -107,7 +107,7 @@ func TestProcessDriversAdmitsFaithfulProvider(t *testing.T) {
 }
 
 // The reserved sys.* namespace belongs to the processor and runtime. A manifest may
-// grant only its runtime-served members (sys.spawn, sys.timer, sys.declassify);
+// grant only its runtime-served members (sys.timer, sys.declassify);
 // every other sys.* leaf grant is refused at validation, so a driver can never be
 // built for a name that would shadow a protocol call.
 func TestManifestRejectsReservedSyscallNamespace(t *testing.T) {
@@ -120,11 +120,6 @@ func TestManifestRejectsReservedSyscallNamespace(t *testing.T) {
 	}
 
 	// The two runtime-served members remain grantable.
-	if _, err := manifest.Validate(manifest.Manifest{Version: manifest.Version, Program: "parent", Syscalls: []manifest.Syscall{
-		{Syscall: manifest.SpawnSyscall, Programs: []manifest.Manifest{{Program: "child"}}},
-	}}, provider); err != nil {
-		t.Fatalf("sys.spawn grant rejected: %v", err)
-	}
 	if _, err := manifest.Validate(manifest.Manifest{Version: manifest.Version, Program: "parent", Syscalls: []manifest.Syscall{
 		{Syscall: manifest.TimerSyscall},
 	}}, provider); err != nil {

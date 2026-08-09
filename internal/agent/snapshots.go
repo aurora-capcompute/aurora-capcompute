@@ -60,24 +60,22 @@ func (r *Runtime) processSnapshotLocked(proc *processState) ProcessSnapshot {
 		journalLength = proc.journal.Length()
 	}
 	return ProcessSnapshot{
-		ID:              proc.id,
-		SessionID:       proc.sessionID,
-		Input:           proc.input,
-		Status:          proc.status,
-		Attempt:         proc.attempt,
-		Revision:        proc.revision,
-		Answer:          proc.answer,
-		Error:           proc.err,
-		Labels:          append([]string(nil), proc.labels...),
-		JournalLength:   journalLength,
-		CreatedAt:       proc.createdAt,
-		UpdatedAt:       proc.updatedAt,
-		StartedAt:       copyTime(proc.startedAt),
-		CompletedAt:     copyTime(proc.completedAt),
-		Manifest:        proc.manifest.Clone(),
-		ProgramDigest:   proc.digest.ArtifactDigest,
-		ParentProcessID: proc.parentProcessID,
-		ChildProcessIDs: append([]string(nil), proc.childProcessIDs...),
+		ID:            proc.id,
+		SessionID:     proc.sessionID,
+		Input:         proc.input,
+		Status:        proc.status,
+		Attempt:       proc.attempt,
+		Revision:      proc.revision,
+		Answer:        proc.answer,
+		Error:         proc.err,
+		Labels:        append([]string(nil), proc.labels...),
+		JournalLength: journalLength,
+		CreatedAt:     proc.createdAt,
+		UpdatedAt:     proc.updatedAt,
+		StartedAt:     copyTime(proc.startedAt),
+		CompletedAt:   copyTime(proc.completedAt),
+		Manifest:      proc.manifest.Clone(),
+		ProgramDigest: proc.digest.ArtifactDigest,
 	}
 }
 
@@ -129,37 +127,44 @@ func visibleCapabilities(caps []sys.Capability) []sys.Capability {
 	return visible
 }
 
+func (r *Runtime) processContextLocked(proc *processState) ProcessContext {
+	return ProcessContext{
+		TenantID:  r.tenantID,
+		SessionID: proc.sessionID,
+		ProcessID: proc.id,
+		Revision:  proc.revision,
+		Digest:    proc.digest,
+		Quantum:   proc.deadline,
+	}
+}
+
 func (r *Runtime) storedProcessLocked(proc *processState) durable.Process {
 	var tags map[string]string
 	if session := r.sessions[proc.sessionID]; session != nil {
 		tags = durable.CloneTags(session.tags)
 	}
 	return durable.Process{
-		TenantID:          r.tenantID,
-		ID:                proc.id,
-		SessionID:         proc.sessionID,
-		Revision:          proc.revision,
-		Input:             proc.input,
-		Status:            proc.status,
-		Attempt:           proc.attempt,
-		CreatedAt:         proc.createdAt,
-		UpdatedAt:         proc.updatedAt,
-		StartedAt:         copyTime(proc.startedAt),
-		CompletedAt:       copyTime(proc.completedAt),
-		Answer:            proc.answer,
-		Error:             proc.err,
-		Manifest:          proc.manifest.Clone(),
-		ProgramDigest:     proc.digest.ArtifactDigest,
-		SourceCodeDigest:  proc.digest.SourceCodeDigest,
-		HideHistory:       proc.hideHistory,
-		Labels:            append([]string(nil), proc.labels...),
-		InputLabels:       append([]string(nil), proc.inputLabels...),
-		Tags:              tags,
-		ParentProcessID:   proc.parentProcessID,
-		ChildProcessIDs:   append([]string(nil), proc.childProcessIDs...),
-		ChildSpawnOffsets: append([]int(nil), proc.childSpawnOffsets...),
-		ForkOffset:        proc.forkOffset,
-		AbortRetries:      proc.abortRetries,
+		TenantID:         r.tenantID,
+		ID:               proc.id,
+		SessionID:        proc.sessionID,
+		Revision:         proc.revision,
+		Input:            proc.input,
+		Status:           proc.status,
+		Attempt:          proc.attempt,
+		CreatedAt:        proc.createdAt,
+		UpdatedAt:        proc.updatedAt,
+		StartedAt:        copyTime(proc.startedAt),
+		CompletedAt:      copyTime(proc.completedAt),
+		Answer:           proc.answer,
+		Error:            proc.err,
+		Manifest:         proc.manifest.Clone(),
+		ProgramDigest:    proc.digest.ArtifactDigest,
+		SourceCodeDigest: proc.digest.SourceCodeDigest,
+		HideHistory:      proc.hideHistory,
+		Labels:           append([]string(nil), proc.labels...),
+		Tags:             tags,
+		ForkOffset:       proc.forkOffset,
+		AbortRetries:     proc.abortRetries,
 	}
 }
 

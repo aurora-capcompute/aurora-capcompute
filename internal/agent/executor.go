@@ -8,78 +8,10 @@ import (
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct/process"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/errs"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/sched"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 )
-
-// processActivator is the application half of the run queue's seam: it puts one
-// process revision on the CPU. It assembles the revision's dispatcher chain
-// (monitor stack, replay tape over the journal, task layer, delegation routes,
-// drivers) and hands it to the direct package, which owns everything below —
-// instantiating the guest from the program's compiled image and starting its
-// quantum. Activation is exactly journal-replay wiring — the journal, not the
-// instance, is the durable process — which is why the queue cannot do it and the
-// runtime must.
-type processActivator struct{ runtime *Runtime }
-
-func (a processActivator) Execute(ctx context.Context, key processKey) (process.Handle, error) {
-	r := a.runtime
-	r.mu.Lock()
-	proc := r.processes[key.processID]
-	if proc != nil && proc.revision != key.revision {
-		// The process has forked past the revision this quantum was submitted
-		// for; the submission is stale and must not run.
-		proc = nil
-	}
-	var cred ProcessContext
-	var program ProgramID
-	if proc != nil {
-		cred = ProcessContext{
-			TenantID:  r.tenantID,
-			SessionID: proc.sessionID,
-			ProcessID: proc.id,
-			Revision:  proc.revision,
-			Digest:    proc.digest,
-		}
-		program = ProgramID(proc.manifest.Program)
-	}
-	r.mu.Unlock()
-	if proc == nil {
-		return nil, fmt.Errorf("%w: no process for pid %s", errs.NotFound, key)
-	}
-	if err := r.programBinding(proc); err != nil {
-		return nil, err
-	}
-	return r.images.Spawn(ctx, program, cred, r.factory.NewDispatcher)
-}
-
-// processMachine is the hardware half of the seam: it waits out one quantum and
-// releases the instance afterwards. It holds no runtime state, because it needs
-// none — the direct package speaks for the processor, and this type only
-// restates its handle in the queue's vocabulary.
-type processMachine struct{}
-
-func (processMachine) Resume(_ context.Context, handle process.Handle) (sched.Result, error) {
-	return quantumResult(<-handle.Result()), nil
-}
-
-func (processMachine) Release(handle process.Handle) { handle.Release() }
-
-// quantumResult restates a process outcome as a queue outcome.
-func quantumResult(result process.Result) sched.Result {
-	status := sched.Failed
-	switch result.Status {
-	case process.Completed:
-		status = sched.Completed
-	case process.Yielded:
-		status = sched.Yielded
-	case process.Stopped:
-		status = sched.Stopped
-	}
-	return sched.Result{Status: status, Err: result.Error}
-}
 
 func (r *Runtime) execute(ctx context.Context, processID string) {
 	defer r.wg.Done()
@@ -112,22 +44,29 @@ func (r *Runtime) execute(ctx context.Context, processID string) {
 	defer r.leases.Release(
 		context.Background(), r.tenantID, "process", leaseResource, r.instanceID,
 	)
-	key := proc.key()
-	isChild := proc.parentProcessID != ""
-	deadline := proc.deadline
+	cred := r.processContextLocked(proc)
+	program := ProgramID(proc.manifest.Program)
 	r.mu.Unlock()
 
-	results, stop, err := r.startQuantum(ctx, key, deadline, isChild)
+	// A process is an audit target: it never runs under program bytes or an
+	// interface that changed underneath it. direct re-checks the same identity
+	// when it instantiates — after the slot is taken, which is what makes a
+	// program withdrawn while this sat in the queue fail rather than run.
+	if err := r.programBinding(proc); err != nil {
+		r.failProcess(processID, err)
+		return
+	}
+
+	handle, err := r.images.Spawn(ctx, program, cred, r.factory.NewDispatcher)
 	if err != nil {
-		// Only admission can fail here; an activation that fails arrives as a
-		// result, on both paths alike.
-		if r.failureStatus(err) == durable.ProcessFailed {
-			r.failProcess(processID, err)
-		} else {
+		if errors.Is(err, sched.ErrClosed) {
 			r.finish(processID, durable.ProcessInterrupted, "", err)
+		} else {
+			r.failProcess(processID, err)
 		}
 		return
 	}
+	stop, results := handle.Cancel, handle.Result()
 
 	r.mu.Lock()
 	proc = r.processes[processID]
@@ -162,7 +101,7 @@ func (r *Runtime) execute(ctx context.Context, processID string) {
 	}
 	r.mu.Unlock()
 	switch result.Status {
-	case sched.Completed:
+	case process.Completed:
 		if reason, aborted := r.guestAbort(processID); aborted {
 			// The guest ended with sys.abort: re-drive its open savepoint
 			// section instead of reading an answer.
@@ -175,14 +114,14 @@ func (r *Runtime) execute(ctx context.Context, processID string) {
 			return
 		}
 		r.finish(processID, durable.ProcessCompleted, answer, nil)
-	case sched.Yielded:
+	case process.Yielded:
 		tasks, taskErr := r.tasks.List(context.Background(), r.tenantID, processID)
 		if taskErr == nil && hasPendingTask(tasks) {
 			r.finish(processID, durable.ProcessWaitingTask, "", nil)
 		} else {
 			r.finish(processID, durable.ProcessYielded, "", taskErr)
 		}
-	case sched.Stopped:
+	case process.Stopped:
 		r.mu.Lock()
 		closing := r.closed
 		r.mu.Unlock()
@@ -190,48 +129,19 @@ func (r *Runtime) execute(ctx context.Context, processID string) {
 		case closing:
 			// A closing host interrupts, never aborts: the restart resumes the
 			// open section mid-flight — a host restart must not touch effects.
-			r.finish(processID, durable.ProcessInterrupted, "", result.Err)
-		case errors.Is(result.Err, context.DeadlineExceeded):
+			r.finish(processID, durable.ProcessInterrupted, "", result.Error)
+		case errors.Is(result.Error, context.DeadlineExceeded):
 			// The quantum ran out of wall-clock. That is a bound on execution,
 			// not a verdict on the work: the guest may have been waiting on a
 			// third party that hung. So the process is interrupted — its journal
 			// stands, and a retry resumes from the last open savepoint.
-			r.finish(processID, durable.ProcessInterrupted, "", result.Err)
+			r.finish(processID, durable.ProcessInterrupted, "", result.Error)
 		default:
-			r.stopProcess(processID, result.Err)
+			r.stopProcess(processID, result.Error)
 		}
 	default:
-		r.failProcess(processID, result.Err)
+		r.failProcess(processID, result.Error)
 	}
-}
-
-// startQuantum puts a process on the CPU and returns the channel its outcome
-// will arrive on, with the means to abort it. A root queues for a slot; a
-// delegated child runs off the queue inside its parent's quantum — ctx — rather
-// than competing for a slot the parent is already holding, which is what keeps
-// delegation from deadlocking against the concurrency cap. Only a root can fail
-// here, and only on admission: an activation that fails is a result, not an
-// error, on both paths alike.
-func (r *Runtime) startQuantum(ctx context.Context, key processKey, deadline time.Duration, isChild bool) (<-chan sched.Result, func(), error) {
-	if isChild {
-		results, cancel := r.scheduler.Run(ctx, key, deadline)
-		return results, cancel, nil
-	}
-	results, err := r.scheduler.Submit(key, deadline)
-	if err != nil {
-		return nil, nil, err
-	}
-	return results, func() { r.scheduler.Stop(key) }, nil
-}
-
-// failureStatus maps an admission error to the process status it should finish
-// with: a scheduling conflict is an interruption (the process can be re-driven);
-// anything else is a failure.
-func (r *Runtime) failureStatus(err error) durable.ProcessStatus {
-	if errors.Is(err, sched.ErrAlreadyScheduled) || errors.Is(err, sched.ErrClosed) {
-		return durable.ProcessInterrupted
-	}
-	return durable.ProcessFailed
 }
 
 func (r *Runtime) finish(processID string, status durable.ProcessStatus, answer string, err error) {
@@ -245,17 +155,8 @@ func (r *Runtime) finish(processID string, status durable.ProcessStatus, answer 
 	_ = r.appendProcess(proc)
 	snapshot := r.processSnapshotLocked(proc)
 	sessionID := proc.sessionID
-	parentProcessID := proc.parentProcessID
 	r.mu.Unlock()
 	r.publish(sessionID, Event{Type: "process.updated", Data: snapshot})
-
-	// When a delegated child reaches a terminal state, re-drive its parent if the
-	// parent is suspended waiting on it (HITL approval flow). resumeParentIfWaiting
-	// is a no-op for a parent still actively blocked in a synchronous delegation
-	// call, so the existing fast path is unaffected.
-	if parentProcessID != "" && isTerminal(status) {
-		r.resumeParentIfWaiting(parentProcessID)
-	}
 }
 
 func (r *Runtime) finishLocked(proc *processState, status durable.ProcessStatus, answer string, err error) {
@@ -265,9 +166,6 @@ func (r *Runtime) finishLocked(proc *processState, status durable.ProcessStatus,
 	proc.updatedAt = now
 	proc.completedAt = &now
 	proc.stop = nil
-	// Consumed by the reconnect re-drive during the play; clear it now the play has
-	// ended so a later unrelated retry isn't treated as a reconnect.
-	proc.reconnectChildren = false
 	if err != nil {
 		proc.err = err.Error()
 	} else {
@@ -286,20 +184,10 @@ func (r *Runtime) finishLocked(proc *processState, status durable.ProcessStatus,
 	session := r.sessions[proc.sessionID]
 	if session != nil {
 		if status != durable.ProcessYielded && status != durable.ProcessWaitingTask && session.activeProcessID == proc.id {
-			// When a child process finishes in the parent's session, return activeProcessID to
-			// the parent so the parent goroutine can resume on the same session.
-			if proc.parentProcessID != "" {
-				if parent := r.processes[proc.parentProcessID]; parent != nil && parent.sessionID == proc.sessionID {
-					session.activeProcessID = proc.parentProcessID
-				} else {
-					session.activeProcessID = ""
-				}
-			} else {
-				session.activeProcessID = ""
-			}
+			session.activeProcessID = ""
 		}
 		session.updatedAt = now
-		if status == durable.ProcessCompleted && proc.parentProcessID == "" {
+		if status == durable.ProcessCompleted {
 			session.history = append(session.history,
 				HistoryMessage{Role: "user", Content: proc.input},
 				HistoryMessage{Role: "assistant", Content: answer, Labels: proc.labels},

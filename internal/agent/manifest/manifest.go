@@ -1,7 +1,6 @@
 // Package manifest is the grant tree: what a process may do, declared as data.
 //
 // A Manifest is one program node — the program it runs plus its granted syscalls
-// — and a sys.spawn grant's spawnable children are themselves Manifests, the
 // recursion that makes the whole tree one shape. Validate normalizes a tree and
 // refuses one that grants what cannot be served, so an invalid manifest never
 // reaches a process.
@@ -24,21 +23,17 @@ import (
 const Version = 4
 
 // reservedSyscallPrefix namespaces the processor/runtime syscalls. A manifest may
-// grant only the runtime-served members in it (sys.spawn, sys.timer); any other
-// sys.* leaf grant is refused so a driver cannot shadow a protocol call.
+// grant only the runtime-served members in it (sys.timer, sys.declassify); any
+// other sys.* leaf grant is refused so a driver cannot shadow a protocol call.
 const reservedSyscallPrefix = "sys."
 
-// The runtime-served syscalls a manifest may grant. All live in the sys
+// The runtime-served syscalls a manifest may grant. Both live in the sys
 // namespace because they are the runtime's own, not leaf I/O drivers:
-// SpawnSyscall's grant carries Programs — the manifests of the only programs
-// this process may spawn, each with its own recursive grant set — TimerSyscall
-// yields the durable timer tasks the runtime itself leans on for abort-retry
-// parks, and DeclassifySyscall lets a program request a taint lift (the only
-// governed way out of a flow label): granting it is opt-in per program, and
-// every crossing still requires human approval and is journaled — the guest
-// can request, never self-lift.
+// TimerSyscall yields the durable timer tasks, and DeclassifySyscall lets a
+// program request a taint lift (the only governed way out of a flow label):
+// granting it is opt-in per program, and every crossing still requires human
+// approval and is journaled — the guest can request, never self-lift.
 const (
-	SpawnSyscall      = sys.SyscallSpawn
 	TimerSyscall      = sys.SyscallTimer
 	DeclassifySyscall = sys.SyscallDeclassify
 )
@@ -50,7 +45,6 @@ type TimerSettings struct {
 }
 
 // Manifest is one process node: Program names it and Syscalls is its grant
-// set. A spawnable child inside a sys.spawn grant is itself a Manifest — the
 // recursion that makes the whole grant tree one shape — carrying no Version
 // of its own: the root's governs. A child's failure is a recoverable
 // observation to its parent's cognition; a program that must abort on it makes
@@ -93,25 +87,21 @@ func (m Manifest) SharesCapabilities() bool {
 }
 
 // Syscall is one granted syscall — a tagged union discriminated by Syscall. The
-// runtime owns three fields: Syscall (which family), Hidden (dispatchable but
-// off the discoverable menu), and Programs (a sys.spawn grant's spawnable
-// children, each a recursive Manifest). Everything else is Config: the family's
-// own configuration, opaque to the runtime and interpreted by whoever serves the
+// runtime owns two fields: Syscall (which family) and Hidden (dispatchable but
+// off the discoverable menu). Everything else is Config: the family's own
+// configuration, opaque to the runtime and interpreted by whoever serves the
 // syscall — a leaf driver's `capabilities` list and knobs, a sys.timer grant's
-// bound (a sys.spawn grant carries no Config: its programs' context settings live
-// on each program node). Data-flow policy
-// (labels/taints) lives inside a leaf's `capabilities` entries, in Config; the
-// driver enforces it per call.
+// bound. Data-flow policy (labels/taints) lives inside a leaf's `capabilities`
+// entries, in Config; the driver enforces it per call.
 type Syscall struct {
-	Syscall  string
-	Hidden   bool
-	Programs []Manifest
-	Config   json.RawMessage
+	Syscall string
+	Hidden  bool
+	Config  json.RawMessage
 }
 
 // runtimeKeys are the grant fields the runtime owns; every other key of a grant
 // object is the family's Config.
-var runtimeKeys = map[string]struct{}{"syscall": {}, "hidden": {}, "programs": {}}
+var runtimeKeys = map[string]struct{}{"syscall": {}, "hidden": {}}
 
 func (s *Syscall) UnmarshalJSON(data []byte) error {
 	var raw map[string]json.RawMessage
@@ -125,11 +115,6 @@ func (s *Syscall) UnmarshalJSON(data []byte) error {
 	}
 	if v, ok := raw["hidden"]; ok {
 		if err := json.Unmarshal(v, &s.Hidden); err != nil {
-			return err
-		}
-	}
-	if v, ok := raw["programs"]; ok {
-		if err := json.Unmarshal(v, &s.Programs); err != nil {
 			return err
 		}
 	}
@@ -162,24 +147,13 @@ func (s Syscall) MarshalJSON() ([]byte, error) {
 	if s.Hidden {
 		out["hidden"], _ = json.Marshal(true)
 	}
-	if len(s.Programs) > 0 {
-		programs, err := json.Marshal(s.Programs)
-		if err != nil {
-			return nil, err
-		}
-		out["programs"] = programs
-	}
 	return json.Marshal(out)
 }
-
-// isSpawn reports whether a grant spawns child processes rather than naming
-// a leaf I/O driver.
-func (s Syscall) isSpawn() bool { return s.Syscall == SpawnSyscall }
 
 // runtimeServed reports whether the runtime itself serves the granted
 // syscall, rather than a driver built by the dispatcher provider.
 func (s Syscall) runtimeServed() bool {
-	return s.Syscall == SpawnSyscall || s.Syscall == TimerSyscall || s.Syscall == DeclassifySyscall
+	return s.Syscall == TimerSyscall || s.Syscall == DeclassifySyscall
 }
 
 // LeafSyscalls returns the node's driver grants. Dispatcher providers build
@@ -235,7 +209,6 @@ func Validate(spec Manifest, normalizer Normalizer) (Manifest, error) {
 }
 
 // validateNode normalizes one manifest node — the root, or a spawnable
-// program inside a sys.spawn grant — and recurses into its grant set.
 func validateNode(node *Manifest, normalizer Normalizer) error {
 	node.Program = strings.TrimSpace(node.Program)
 	node.BindingRef = strings.TrimSpace(node.BindingRef)
@@ -254,7 +227,7 @@ func validateSyscalls(syscalls []Syscall, normalizer Normalizer) error {
 			return fmt.Errorf("%w: grant %d: a syscall is required", errs.Invalid, i)
 		}
 		// The sys.* namespace belongs to the processor and the runtime. A manifest
-		// may grant only its two runtime-served members (sys.spawn, sys.timer);
+		// may grant only its two runtime-served members (sys.timer, sys.declassify);
 		// every other sys.* name is a reserved protocol call (sys.input/output/
 		// log/now/random/abort/declassify/begin/commit). Granting one
 		// as a leaf would hand it to a driver, which could then shadow the
@@ -263,37 +236,7 @@ func validateSyscalls(syscalls []Syscall, normalizer Normalizer) error {
 		if strings.HasPrefix(grant.Syscall, reservedSyscallPrefix) && !grant.runtimeServed() {
 			return fmt.Errorf("%w: syscall %q is in the reserved %q namespace and may not be granted", errs.Invalid, grant.Syscall, reservedSyscallPrefix)
 		}
-		if grant.isSpawn() {
-			if len(grant.Programs) == 0 {
-				return fmt.Errorf("%w: %s requires at least one program", errs.Invalid, SpawnSyscall)
-			}
-			// Context settings (history, share_capabilities) live on each program
-			// node now, not on the grant — so the grant carries only its programs.
-			if len(bytes.TrimSpace(grant.Config)) > 0 {
-				return fmt.Errorf("%w: %s takes no settings; set history/share_capabilities on each program", errs.Invalid, SpawnSyscall)
-			}
-			grant.Config = nil
-			programs := make(map[string]struct{}, len(grant.Programs))
-			for j := range grant.Programs {
-				child := &grant.Programs[j]
-				if child.Version != 0 {
-					return fmt.Errorf("%w: spawnable program %d carries a version; the root's governs", errs.Invalid, j)
-				}
-				if err := validateNode(child, normalizer); err != nil {
-					return fmt.Errorf("spawnable program %d: %w", j, err)
-				}
-				if child.Program == "" {
-					return fmt.Errorf("%w: spawnable program %d requires a program", errs.Invalid, j)
-				}
-				if _, dup := programs[child.Program]; dup {
-					return fmt.Errorf("%w: duplicate spawnable program %q", errs.Invalid, child.Program)
-				}
-				programs[child.Program] = struct{}{}
-			}
-		} else if grant.Syscall == TimerSyscall {
-			if len(grant.Programs) > 0 {
-				return fmt.Errorf("%w: syscall %q: only %s carries programs", errs.Invalid, grant.Syscall, SpawnSyscall)
-			}
+		if grant.Syscall == TimerSyscall {
 			normalized, err := normalizeTimerSettings(grant.Config)
 			if err != nil {
 				return fmt.Errorf("%w: sys.timer settings: %v", errs.Invalid, err)
@@ -303,17 +246,11 @@ func validateSyscalls(syscalls []Syscall, normalizer Normalizer) error {
 			// Runtime-served by the processor Declassifier; the grant is a bare opt-in,
 			// carrying no settings and no programs. Its authority is fully gated at
 			// dispatch by the mandatory human approval.
-			if len(grant.Programs) > 0 {
-				return fmt.Errorf("%w: syscall %q: only %s carries programs", errs.Invalid, grant.Syscall, SpawnSyscall)
-			}
 			if len(bytes.TrimSpace(grant.Config)) > 0 {
 				return fmt.Errorf("%w: %s takes no settings", errs.Invalid, DeclassifySyscall)
 			}
 			grant.Config = nil
 		} else {
-			if len(grant.Programs) > 0 {
-				return fmt.Errorf("%w: syscall %q: only %s carries programs", errs.Invalid, grant.Syscall, SpawnSyscall)
-			}
 			normalized, err := normalizer.Normalize(grant.Syscall, grant.Config)
 			if err != nil {
 				return fmt.Errorf("%w: syscall %q config: %v", errs.Invalid, grant.Syscall, err)
@@ -376,12 +313,6 @@ func cloneSyscalls(syscalls []Syscall) []Syscall {
 	for i, grant := range syscalls {
 		out[i] = grant
 		out[i].Config = append(json.RawMessage(nil), grant.Config...)
-		if len(grant.Programs) > 0 {
-			out[i].Programs = make([]Manifest, len(grant.Programs))
-			for j, child := range grant.Programs {
-				out[i].Programs[j] = child.Clone()
-			}
-		}
 	}
 	return out
 }

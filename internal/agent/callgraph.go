@@ -10,20 +10,18 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
 )
 
-// SessionGraphProcess is a process within a session graph: its metadata and the flat
-// journal of every syscall entry ever written, across all revisions. The fork
-// structure is derivable from duplicate positions with different revision
+// SessionGraphProcess is a process within a session graph: its metadata and the
+// flat journal of every syscall entry ever written, across all revisions. The
+// fork structure is derivable from duplicate positions with different revision
 // numbers.
 type SessionGraphProcess struct {
 	ProcessID       string
 	Input           string
-	ParentProcessID string
 	Status          durable.ProcessStatus
 	Answer          string
 	Error           string
 	Attempt         int
 	CurrentRevision uint64
-	ChildProcessIDs []string
 	Entries         []JournalEntry
 }
 
@@ -48,12 +46,11 @@ func (r *Runtime) SessionGraph(sessionID string) (SessionGraph, error) {
 	}
 	graph := SessionGraph{SessionID: session.id, Title: session.title}
 	type runMeta struct {
-		id, input, parentProcessID string
-		status                     durable.ProcessStatus
-		answer, err                string
-		attempt                    int
-		currentRevision            uint64
-		childProcessIDs            []string
+		id, input       string
+		status          durable.ProcessStatus
+		answer, err     string
+		attempt         int
+		currentRevision uint64
 	}
 	metas := make([]runMeta, 0, len(session.processIDs))
 	for _, processID := range session.processIDs {
@@ -62,10 +59,9 @@ func (r *Runtime) SessionGraph(sessionID string) (SessionGraph, error) {
 			continue
 		}
 		metas = append(metas, runMeta{
-			id: proc.id, input: proc.input, parentProcessID: proc.parentProcessID,
+			id: proc.id, input: proc.input,
 			status: proc.status, answer: proc.answer, err: proc.err,
 			attempt: proc.attempt, currentRevision: proc.revision,
-			childProcessIDs: append([]string(nil), proc.childProcessIDs...),
 		})
 	}
 	tenantID := r.tenantID
@@ -111,13 +107,11 @@ func (r *Runtime) SessionGraph(sessionID string) (SessionGraph, error) {
 		graph.Processes = append(graph.Processes, SessionGraphProcess{
 			ProcessID:       meta.id,
 			Input:           meta.input,
-			ParentProcessID: meta.parentProcessID,
 			Status:          meta.status,
 			Answer:          meta.answer,
 			Error:           meta.err,
 			Attempt:         meta.attempt,
 			CurrentRevision: meta.currentRevision,
-			ChildProcessIDs: meta.childProcessIDs,
 			Entries:         entries,
 		})
 	}
@@ -125,50 +119,3 @@ func (r *Runtime) SessionGraph(sessionID string) (SessionGraph, error) {
 }
 
 // ProcessGraphNode is a node in the projected call graph: a process together with
-// the delegated child processes it spawned, in spawn order.
-type ProcessGraphNode struct {
-	ProcessID       string
-	Name            string
-	SessionID       string
-	ParentProcessID string
-	Status          durable.ProcessStatus
-	Attempt         int
-	Revision        uint64
-	Answer          string
-	Error           string
-	Children        []ProcessGraphNode
-}
-
-// CallGraph projects a process and its delegated child processes (recursively) into a
-// tree, using the recorded parent/child links.
-func (r *Runtime) CallGraph(processID string) (ProcessGraphNode, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if _, ok := r.processes[processID]; !ok {
-		return ProcessGraphNode{}, fmt.Errorf("%w: process %s", errs.NotFound, processID)
-	}
-	return r.callGraphLocked(processID, make(map[string]bool)), nil
-}
-
-func (r *Runtime) callGraphLocked(processID string, visited map[string]bool) ProcessGraphNode {
-	proc := r.processes[processID]
-	if proc == nil || visited[processID] {
-		return ProcessGraphNode{ProcessID: processID}
-	}
-	visited[processID] = true
-	node := ProcessGraphNode{
-		ProcessID:       proc.id,
-		Name:            proc.manifest.Program,
-		SessionID:       proc.sessionID,
-		ParentProcessID: proc.parentProcessID,
-		Status:          proc.status,
-		Attempt:         proc.attempt,
-		Revision:        proc.revision,
-		Answer:          proc.answer,
-		Error:           proc.err,
-	}
-	for _, childID := range proc.childProcessIDs {
-		node.Children = append(node.Children, r.callGraphLocked(childID, visited))
-	}
-	return node
-}

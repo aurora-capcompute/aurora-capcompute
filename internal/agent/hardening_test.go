@@ -8,60 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 	"github.com/aurora-capcompute/aurora-capcompute/replay"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
-
-// C1: a completed child's taint must ride its spawn result so the parent's
-// FlowMonitor observes what the child observed — a parent cannot launder a
-// forbidden source by delegating the read to a child and reading it back.
-func TestSpawnAnswerStampsChildLabels(t *testing.T) {
-	result, err := spawnAnswer("done", "untrusted_web", "secret")
-	if err != nil {
-		t.Fatalf("spawnAnswer: %v", err)
-	}
-	got := map[string]bool{}
-	for _, l := range result.Labels() {
-		got[l] = true
-	}
-	if len(got) != 2 || !got["untrusted_web"] || !got["secret"] {
-		t.Fatalf("spawn result labels = %v, want the child's taint stamped", result.Labels())
-	}
-}
-
-// C1: the child's terminal snapshot carries its taint out of waitForCompletion,
-// which is where the spawn result gets it — on the completed path AND on every
-// failed/rolled-back path. The spawn call sites stamp these labels on their
-// error returns too, so a child cannot launder an observed source to the parent
-// through a (guest-controlled) failure or abort reason.
-func TestChildTerminalCarriesLabels(t *testing.T) {
-	answer, labels, done, err := childTerminal(ProcessSnapshot{
-		Status: durable.ProcessCompleted, Answer: "a", Labels: []string{"untrusted_web"},
-	})
-	if !done || err != nil || answer != "a" {
-		t.Fatalf("childTerminal = %q, %v, %v, %v", answer, labels, done, err)
-	}
-	if len(labels) != 1 || labels[0] != "untrusted_web" {
-		t.Fatalf("labels = %v, want the snapshot's taint", labels)
-	}
-
-	// The error terminals must carry the taint too — these are the states the
-	// spawn error branches propagate. durable.ProcessFailed is the sharpest: its
-	// error text embeds the guest's own abort reason, which can carry read data.
-	for _, status := range []durable.ProcessStatus{durable.ProcessFailed, durable.ProcessStopped, durable.ProcessInterrupted} {
-		_, labels, done, err := childTerminal(ProcessSnapshot{
-			Status: status, Answer: "leak", Labels: []string{"secret"},
-		})
-		if !done || err == nil {
-			t.Fatalf("childTerminal(%s) = done %v, err %v, want a terminal error", status, done, err)
-		}
-		if len(labels) != 1 || labels[0] != "secret" {
-			t.Fatalf("childTerminal(%s) labels = %v, want the child's taint carried on the error", status, labels)
-		}
-	}
-}
 
 // L6: the guest's sys.input payload must carry role/content only — the taint
 // labels seed the FlowMonitor host-side and must never be serialized to the
@@ -71,7 +21,7 @@ func TestSysInputOmitsHistoryLabelsFromGuestPayload(t *testing.T) {
 		{Role: "user", Content: "q"},
 		{Role: "assistant", Content: "a", Labels: []string{"untrusted_web", "credential:ONYX@abc"}},
 	}
-	l := newLifecycleDispatcher(nopNext{}, "task", nil, history, manifest.Manifest{}, 1, nil)
+	l := newLifecycleDispatcher(nopNext{}, "task", history, manifest.Manifest{}, 1, nil)
 	result, err := l.Dispatch(context.Background(), ProcessContext{},
 		sys.Syscall{Abi: sys.ABIVersion, Name: callSysInput}, sys.Authorization{})
 	if err != nil {
@@ -86,18 +36,6 @@ func TestSysInputOmitsHistoryLabelsFromGuestPayload(t *testing.T) {
 	// the FlowMonitor even though the guest payload does not.
 	if len(result.Labels()) == 0 {
 		t.Fatal("sys.input result must carry the history taint for the FlowMonitor")
-	}
-}
-
-// L3: only sys.spawn carries programs; a sys.timer grant with a stray programs
-// field is rejected (an un-recursed, un-validated child manifest must not ride
-// along).
-func TestValidateManifestRejectsTimerWithPrograms(t *testing.T) {
-	if _, err := manifest.Validate(manifest.Manifest{
-		Version:  manifest.Version,
-		Syscalls: []manifest.Syscall{{Syscall: manifest.TimerSyscall, Programs: []manifest.Manifest{{Program: "x"}}}},
-	}, &testDispatchers{}); err == nil {
-		t.Fatal("expected sys.timer with programs to be rejected")
 	}
 }
 
@@ -130,12 +68,6 @@ func TestValidateManifestDeclassifyGrant(t *testing.T) {
 	}, &testDispatchers{}); err == nil {
 		t.Fatal("sys.declassify with settings should be rejected")
 	}
-	if _, err := manifest.Validate(manifest.Manifest{
-		Version:  manifest.Version,
-		Syscalls: []manifest.Syscall{{Syscall: manifest.DeclassifySyscall, Programs: []manifest.Manifest{{Program: "x"}}}},
-	}, &testDispatchers{}); err == nil {
-		t.Fatal("sys.declassify with programs should be rejected")
-	}
 }
 
 // The lifecycle admits sys.declassify to the grant set ONLY when the manifest
@@ -144,7 +76,7 @@ func TestValidateManifestDeclassifyGrant(t *testing.T) {
 // still gates every crossing on human approval, so this only makes the governed
 // path reachable; it does not let the guest self-lift.
 func TestLifecyclePublishesDeclassifyWhenGranted(t *testing.T) {
-	granted := newLifecycleDispatcher(nopNext{}, "msg", nil, nil,
+	granted := newLifecycleDispatcher(nopNext{}, "msg", nil,
 		manifest.Manifest{Syscalls: []manifest.Syscall{{Syscall: manifest.DeclassifySyscall}}}, 1, nil)
 	cap, ok := sys.FindCapability(granted.Capabilities(), manifest.DeclassifySyscall)
 	if !ok {
@@ -156,7 +88,7 @@ func TestLifecyclePublishesDeclassifyWhenGranted(t *testing.T) {
 	if len(cap.InputSchema) == 0 {
 		t.Fatal("sys.declassify must carry an input schema for the Validator")
 	}
-	ungranted := newLifecycleDispatcher(nopNext{}, "msg", nil, nil, manifest.Manifest{}, 1, nil)
+	ungranted := newLifecycleDispatcher(nopNext{}, "msg", nil, manifest.Manifest{}, 1, nil)
 	if _, ok := sys.FindCapability(ungranted.Capabilities(), manifest.DeclassifySyscall); ok {
 		t.Fatal("sys.declassify must not appear unless the manifest grants it (opt-in)")
 	}

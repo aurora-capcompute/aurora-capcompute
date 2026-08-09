@@ -69,7 +69,7 @@ type Process struct {
 	Manifest         manifest.Manifest
 	ProgramDigest    string
 	SourceCodeDigest string `json:",omitempty"`
-	// HideHistory records that this process was spawned under a sys.spawn grant
+	// HideHistory records that this process's manifest declared history:false
 	// with history:false — its sys.input omits the session history. Persisted so
 	// a restart re-serves the same isolated input.
 	HideHistory bool `json:",omitempty"`
@@ -77,26 +77,14 @@ type Process struct {
 	// process contributes is rebuilt with its provenance on restore — the
 	// cross-run flow policy survives a restart.
 	Labels []string `json:",omitempty"`
-	// InputLabels is the provenance the process's input arrived with — a
-	// delegated child's parent-taint snapshot at spawn. Persisted so a restart or
-	// revision restart re-serves sys.input with the same taint seed; the
-	// parent→child flow policy survives a restart exactly like the cross-run one.
-	InputLabels []string `json:",omitempty"`
 	// Tags carries the owning session's tags. A session.state event now carries
 	// them too; this copy is retained so sessions from pre-session.state streams
 	// (which have no such event) still restore their tags.
 	Tags map[string]string
-	// ParentProcessID links a delegated child back to the process that spawned
-	// it; ChildProcessIDs records, in spawn order, the children this process
-	// delegated to.
-	ParentProcessID string
-	ChildProcessIDs []string
-	// ChildSpawnOffsets records the journal length at each child's spawn,
-	// parallel to ChildProcessIDs. ForkOffset is the current revision's copy-on-write
-	// fork point; it is persisted so a revision that was forked but crashed before
-	// logging any record can be reconstructed on restore.
-	ChildSpawnOffsets []int
-	ForkOffset        int
+	// ForkOffset is the current revision's copy-on-write fork point; it is
+	// persisted so a revision that was forked but crashed before logging any
+	// record can be reconstructed on restore.
+	ForkOffset int
 	// AbortRetries is how many times the guest has aborted and re-run a section.
 	// Persisted because it is the budget bounding that loop: an in-memory counter
 	// would hand a restart a fresh one, and a guest that aborts forever would

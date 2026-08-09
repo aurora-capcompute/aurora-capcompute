@@ -17,7 +17,6 @@ type Runtime interface {
 	GetProcess(processID string) (ProcessSnapshot, error)
 	Journal(processID string) ([]JournalEntry, error)
 	JournalRevisions(processID string) (map[uint64][]JournalEntry, error)
-	CallGraph(processID string) (ProcessGraphNode, error)
 	SessionGraph(sessionID string) (SessionGraph, error)
 	Tasks(processID string) ([]TaskSnapshot, error)
 	ResolveTask(taskID string, token string, resolution Resolution) (TaskSnapshot, error)

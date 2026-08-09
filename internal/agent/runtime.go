@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct/process"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/sched"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/aurora-capcompute/monitor"
@@ -115,7 +114,7 @@ func (r *Runtime) clampDeadline(requested time.Duration) time.Duration {
 //
 // Only the provider's own leaf capabilities are checked: the runtime layers its
 // protocol capabilities (sys.input/output/log/abort/now/random and
-// the manifest-gated sys.spawn/sys.timer) on top afterwards, so they never
+// the manifest-gated sys.timer) on top afterwards, so they never
 // appear in `advertised` and need no exception here. Under-advertising (a leaf
 // grant the provider chose not to serve) is not a leak — the guest simply cannot
 // call it — so only over-advertising fails the check.
@@ -184,7 +183,6 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 	runtime := &Runtime{
 		baseCtx:         baseCtx,
 		cancel:          cancel,
-		images:          direct.NewRegistry[ProgramID, ProcessContext](memoryPages),
 		taints:          monitor.NewTaints[processKey](),
 		log:             config.Log,
 		leases:          config.Leases,
@@ -260,9 +258,7 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 	if maxConcurrent <= 0 {
 		maxConcurrent = defaultMaxConcurrentProcesses
 	}
-	runtime.scheduler, err = sched.New(sched.Config[processKey, process.Handle]{
-		Activator: processActivator{runtime: runtime},
-		Machine:   processMachine{},
+	runtime.images, err = sched.New(direct.NewRegistry[ProgramID, ProcessContext](memoryPages), sched.Config{
 		// Quanta hang off the runtime's own lifetime rather than a root the queue
 		// invents, so shutdown has one tree to cancel and not two.
 		Parent:        baseCtx,
@@ -303,29 +299,21 @@ func (r *Runtime) Drivers(resolveCtx context.Context, cred ProcessContext) (sys.
 	return newProgressDispatcher(base, r.publish, cred.SessionID, cred.ProcessID), nil
 }
 
-// wrapProtocol stacks the runtime's protocol layers above the task layer:
-// the delegation router (above tasks, so a delegated child's park suspends
-// the parent transparently instead of becoming a human-approvable task), then
-// the agent lifecycle outermost — its sys.input payload advertises every
-// capability beneath it, spawn grants included.
+// wrapProtocol stacks the runtime's protocol layers above the task layer: the
+// agent lifecycle outermost, whose sys.input payload advertises every capability
+// beneath it.
 func (r *Runtime) wrapProtocol(cred ProcessContext, next sys.Dispatcher[ProcessContext]) (sys.Dispatcher[ProcessContext], error) {
 	r.mu.Lock()
 	proc := r.processes[cred.ProcessID]
 	var spec manifest.Manifest
 	var input string
-	var inputLabels []string
 	var history []HistoryMessage
 	var attempt int
 	if proc != nil {
 		spec = proc.manifest.Clone()
 		input = proc.input
-		// The input's provenance (a delegated child's parent-taint snapshot)
-		// rides sys.input regardless of history sharing: history:false isolates
-		// the conversation, not the flow policy.
-		inputLabels = append([]string(nil), proc.inputLabels...)
-		// A child spawned with history:false serves no session history on its
-		// sys.input — it sees only its own input. The capability menu is gated
-		// separately, by hidden grants in the child's own manifest.
+		// A manifest declaring history:false serves no session history on its
+		// sys.input — the process sees only its own input.
 		if !proc.hideHistory {
 			history = append([]HistoryMessage(nil), proc.history...)
 		}
@@ -335,13 +323,9 @@ func (r *Runtime) wrapProtocol(cred ProcessContext, next sys.Dispatcher[ProcessC
 	if proc == nil {
 		return nil, fmt.Errorf("%w: process %s", errs.NotFound, cred.ProcessID)
 	}
-	if grant, ok := spec.Grant(manifest.SpawnSyscall); ok {
-		next = newSpawnRouter(next, grant, r)
-	}
 	return newLifecycleDispatcher(
 		next,
 		input,
-		inputLabels,
 		history,
 		spec,
 		attempt,
@@ -624,7 +608,7 @@ func (r *Runtime) enrollLocked() { r.wg.Add(1) }
 
 // MakeProcess starts a process on a session. deadline bounds each of its
 // quanta — the guest's own uninterrupted compute between syscalls, and anything
-// it delegates inside that quantum. Zero takes the host default; anything above
+// between syscalls. Zero takes the host default; anything above
 // the host ceiling is clamped down to it, so a caller can only ever ask for less
 // than the host allows.
 func (r *Runtime) CreateProcess(sessionID string, input string, spec manifest.Manifest, deadline time.Duration) (ProcessSnapshot, error) {
@@ -868,11 +852,6 @@ func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, erro
 	return r.retryUnder(context.Background(), processID, mode)
 }
 
-// retryUnder is Retry with the quantum context of a parent that is delegating to
-// quantum, and the child must inherit its remaining budget rather than start a
-// this process: the cascade path re-drives a child from inside the parent's
-// fresh one. A host-initiated retry passes context.Background() and the process
-// falls back to its own deadline.
 func (r *Runtime) retryUnder(ctx context.Context, processID string, mode RetryMode) (ProcessSnapshot, error) {
 	if mode != RetryResume && mode != RetryRestart {
 		return ProcessSnapshot{}, fmt.Errorf("%w: retry mode must be resume or restart", errs.Invalid)
@@ -888,8 +867,7 @@ func (r *Runtime) retryUnder(ctx context.Context, processID string, mode RetryMo
 	case durable.ProcessYielded, durable.ProcessWaitingTask, durable.ProcessStopped, durable.ProcessFailed, durable.ProcessInterrupted:
 	case durable.ProcessCompleted:
 		// A completed process has nothing to resume, but it can be restarted from
-		// scratch (re-run as a new copy-on-write revision). This also lets a
-		// parent restart cascade into already-completed children.
+		// scratch (re-run as a new copy-on-write revision).
 		if mode != RetryRestart {
 			r.mu.Unlock()
 			return ProcessSnapshot{}, fmt.Errorf("%w: completed process %s can only be restarted, not resumed", errs.Conflict, processID)
@@ -899,24 +877,13 @@ func (r *Runtime) retryUnder(ctx context.Context, processID string, mode RetryMo
 		return ProcessSnapshot{}, fmt.Errorf("%w: process %s cannot retry from %s", errs.Conflict, processID, proc.status)
 	}
 	session := r.sessions[proc.sessionID]
-	if proc.parentProcessID == "" {
-		// Root processes may only be retried if no later user-initiated process has arrived.
-		// Child processes that were added to the same session by delegation do not count.
-		lastRootID := ""
-		for i := len(session.processIDs) - 1; i >= 0; i-- {
-			if r.processes[session.processIDs[i]] != nil && r.processes[session.processIDs[i]].parentProcessID == "" {
-				lastRootID = session.processIDs[i]
-				break
-			}
-		}
-		if lastRootID == "" || lastRootID != proc.id {
-			r.mu.Unlock()
-			return ProcessSnapshot{}, fmt.Errorf("%w: only the latest session process can be retried", errs.Conflict)
-		}
+	// Only the latest process in a session may be retried: an earlier one's
+	// answer is already folded into the history the later ones read.
+	if len(session.processIDs) == 0 || session.processIDs[len(session.processIDs)-1] != proc.id {
+		r.mu.Unlock()
+		return ProcessSnapshot{}, fmt.Errorf("%w: only the latest session process can be retried", errs.Conflict)
 	}
-	// Allow cascade retry of a child while its parent holds activeProcessID.
-	if session.activeProcessID != "" && session.activeProcessID != proc.id &&
-		(proc.parentProcessID == "" || session.activeProcessID != proc.parentProcessID) {
+	if session.activeProcessID != "" && session.activeProcessID != proc.id {
 		r.mu.Unlock()
 		return ProcessSnapshot{}, fmt.Errorf("%w: session already has active process %s", errs.Conflict, session.activeProcessID)
 	}
@@ -933,34 +900,23 @@ func (r *Runtime) retryUnder(ctx context.Context, processID string, mode RetryMo
 		// fresh revision with no shared prefix. The abandoned attempt stays in
 		// the log as an audited, closed revision; nothing it did is undone.
 		proc.err = ""
-		r.forkJournalLocked(proc, 0, RetryRestart)
+		r.forkJournalLocked(proc, 0)
 	} else if proc.status == durable.ProcessYielded || proc.status == durable.ProcessWaitingTask {
 		// Resume from a park: no fork. The journal's open intent at the tail is
-		// re-driven by replay under its original idempotency key; a resolved
-		// task's stored authorization is injected by the task layer. When the
-		// park was a delegated child's approval, enable cascade reconnection so
-		// the re-executed delegation call reuses the now-finished child.
-		if proc.reconnectChildren {
-			proc.resumeCascade()
-		} else {
-			proc.cascade = false
-		}
+		// re-driven by replay under its original idempotency key, and a resolved
+		// task's stored authorization is injected by the task layer.
 	} else if forkOffset, open := proc.journal.outermostOpenBegin(); open {
 		// Failed/stopped inside a savepoint section: fork at the section's
 		// sys.begin so the whole declared unit re-executes live. That is what
 		// the brackets are for — without the fork, a deterministic failure
 		// replays its broken completion to the same wall forever.
 		proc.err = ""
-		r.forkJournalLocked(proc, forkOffset, RetryResume)
-	} else {
-		// Nothing bracketed: same revision, no fork. A resume continues the
-		// attempt — replay serves everything recorded (an open intent at the
-		// tail re-drives under its original key) and the guest proceeds
-		// mid-flight, so an interruption never opens a new key space. Reuse the
-		// whole child subtree: every delegation call is served or re-driven from
-		// the recorded prefix.
-		proc.resumeCascade()
+		r.forkJournalLocked(proc, forkOffset)
 	}
+	// Nothing bracketed: same revision, no fork. A resume continues the attempt —
+	// replay serves everything recorded (an open intent at the tail re-drives
+	// under its original key) and the guest proceeds mid-flight, so an
+	// interruption never opens a new key space.
 	return r.relaunchLocked(context.Background(), proc)
 }
 
@@ -1002,13 +958,11 @@ func (r *Runtime) relaunchLocked(ctx context.Context, proc *processState) (Proce
 	return snapshot, nil
 }
 
-// forkJournalLocked re-forks process's journal at forkOffset as a new revision,
-// records the retry mode for downstream cascade children, and positions the
-// cascade cursor. Forks happen only where an attempt boundary is real — a
-// settled rollback re-running its section, or an explicit restart — never for
-// a plain resume, which continues the same revision. Must be called with the
-// runtime mutex held.
-func (r *Runtime) forkJournalLocked(proc *processState, forkOffset int, mode RetryMode) {
+// forkJournalLocked re-forks a process's journal at forkOffset as a new
+// revision. Forks happen only where an attempt boundary is real — an abandoned
+// section re-running, or an explicit restart — never for a plain resume, which
+// continues the same revision. Must be called with the runtime mutex held.
+func (r *Runtime) forkJournalLocked(proc *processState, forkOffset int) {
 	parent := proc.journal
 	// The outgoing revision can never run again — this fork is its abandonment —
 	// so release its taint. Otherwise the shared taint map accumulates one dead
@@ -1023,38 +977,6 @@ func (r *Runtime) forkJournalLocked(proc *processState, forkOffset int, mode Ret
 		parent.history, forkOffset,
 		parent.now, parent.onAppend,
 	)
-	// Reuse the existing child subtree in spawn order (deep cascade resume).
-	// Children whose delegation call is replayed from the shared prefix are
-	// skipped; the cursor starts at the first child re-executed past the fork.
-	proc.cascade = true
-	proc.cascadeMode = mode
-	proc.cascadeCursor = childrenBefore(proc.childSpawnOffsets, forkOffset)
-}
-
-// resumeCascade arms cascade reconnection for a resume at the same revision:
-// the delegation router reuses the recorded children in spawn order, the
-// cursor starting past those whose delegation call replay serves from the
-// journal. Called with the runtime mutex held.
-func (p *processState) resumeCascade() {
-	p.cascade = true
-	p.cascadeMode = RetryResume
-	p.cascadeCursor = childrenBefore(p.childSpawnOffsets, p.journal.Length())
-}
-
-// childrenBefore counts the children whose delegation completion sits inside
-// the shared prefix [0, offset). A spawn offset is one past the delegation
-// intent, so a child is prefix-served — and skipped by the cascade cursor —
-// exactly when its offset is strictly below the fork offset; a child whose
-// intent closes the prefix (offset == fork offset) is re-executed and must be
-// the first the cursor reuses.
-func childrenBefore(spawnOffsets []int, offset int) int {
-	n := 0
-	for _, off := range spawnOffsets {
-		if off < offset {
-			n++
-		}
-	}
-	return n
 }
 
 func (r *Runtime) Subscribe(sessionID string) (Event, <-chan Event, func(), error) {
@@ -1111,7 +1033,6 @@ func (r *Runtime) Close(ctx context.Context) error {
 	done := make(chan struct{})
 	go func() {
 		r.wg.Wait()
-		r.scheduler.Close()
 		close(done)
 	}()
 	select {
@@ -1120,5 +1041,7 @@ func (r *Runtime) Close(ctx context.Context) error {
 		return ctx.Err()
 	}
 
+	// Closing the registry drains the queue, waits out the running quanta, and
+	// releases every compiled image.
 	return errors.Join(r.images.Close(context.Background())...)
 }
