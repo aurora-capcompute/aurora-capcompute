@@ -134,7 +134,6 @@ func (r *Runtime) processContextLocked(proc *processState) ProcessContext {
 		ProcessID: proc.id,
 		Revision:  proc.revision,
 		Digest:    proc.digest,
-		Quantum:   proc.deadline,
 	}
 }
 

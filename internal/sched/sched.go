@@ -1,6 +1,6 @@
 // Package sched bounds how many guests run at once. It is a direct.Registry
 // wrapped around another: everything but Spawn passes straight through, and
-// Spawn waits for a slot, bounds the quantum's wall-clock, and hands back a
+// Spawn waits for a worker, bounds the quantum's wall-clock, and hands back a
 // handle the caller cannot tell from an unqueued one.
 package sched
 
@@ -18,23 +18,21 @@ import (
 var (
 	ErrClosed  = errors.New("sched: scheduler is closed")
 	ErrStopped = errors.New("sched: stopped before running")
+	// ErrDeadline is the cause a quantum's context carries when its wall-clock
+	// bound expires, so a caller can tell a timeout from a stop.
+	ErrDeadline = errors.New("sched: quantum deadline exceeded")
 )
 
-// Process is what the scheduler needs of a credential beyond what direct does.
-// It lives here rather than on direct.ProcessEntry because queueing is this
-// package's concern: direct spawns whatever it is handed, immediately.
-type Process interface {
-	direct.ProcessEntry
-	// Deadline bounds the quantum's wall-clock once it starts (0 = unbounded).
-	// Queue time does not count against it — the clock starts with the guest.
-	Deadline() time.Duration
+// Handle is a submission: its outcome, and the one lever that stops it. Closing
+// drops the submission while it waits for a worker, or stops the guest once it
+// has started.
+type Handle interface {
+	process.Handle
+	Close()
 }
 
 type Config struct {
 	// Parent is the lifetime every quantum derives from (nil = Background).
-	// Spawn takes no lifetime of its own — tying a quantum to its submitter would
-	// let one caller's cancellation kill unrelated queued work — so this is the
-	// one place a caller bounds the queue's work.
 	Parent context.Context
 	// MaxConcurrent bounds simultaneously running quanta. 0 = 1: uniprocessing
 	// is the default posture, concurrency is opt-in. This is a resource bound —
@@ -43,16 +41,19 @@ type Config struct {
 }
 
 // Scheduler is direct.Registry with a bound on concurrent guests. The bound is
-// a slot channel: a submission holds one for as long as its guest runs.
-type Scheduler[T direct.ProgramID, P Process] struct {
-	inner     direct.Registry[T, P]
-	slots     chan submittedTask[T, P]
-	root      context.Context
-	stopRoot  context.CancelFunc
-	closeOnce sync.Once
+// the worker count: MaxConcurrent goroutines each run one guest to completion
+// before taking the next, so nothing counts slots and nothing can overrun.
+type Scheduler[T direct.ProgramID, P direct.ProcessEntry] struct {
+	inner    direct.Registry[T, P]
+	tasks    chan submittedTask[T, P]
+	root     context.Context
+	stopRoot context.CancelFunc
+	// live counts the workers, and only them: they are started in New, so no Add
+	// can ever race the Wait in Close.
+	live sync.WaitGroup
 }
 
-func New[T direct.ProgramID, P Process](inner direct.Registry[T, P], config Config) (*Scheduler[T, P], error) {
+func New[T direct.ProgramID, P direct.ProcessEntry](inner direct.Registry[T, P], config Config) (*Scheduler[T, P], error) {
 	if inner == nil {
 		return nil, errors.New("sched: a registry is required")
 	}
@@ -63,29 +64,16 @@ func New[T direct.ProgramID, P Process](inner direct.Registry[T, P], config Conf
 		config.Parent = context.Background()
 	}
 	root, stopRoot := context.WithCancel(config.Parent)
-	slots := make(chan submittedTask[T, P], config.MaxConcurrent)
-	go func() {
-		for task := range slots {
-			task := task
-			go func() {
-				deadlineCtx, _ := context.WithTimeoutCause(task.ctx, task.timeoutDuration, errors.New("sched: deadline exceeded"))
-				handle, err := inner.Spawn(deadlineCtx, task.id, task.entry, task.mkDispatcher)
-				if err != nil {
-					task.result <- process.Result{Status: process.Failed, Error: err}
-					return
-				}
-				res := <-handle.Result()
-				task.result <- res
-			}()
-		}
-	}()
-	return &Scheduler[T, P]{
-		inner:     inner,
-		slots:     slots,
-		root:      root,
-		stopRoot:  stopRoot,
-		closeOnce: sync.Once{},
-	}, nil
+	s := &Scheduler[T, P]{
+		inner:    inner,
+		tasks:    make(chan submittedTask[T, P]),
+		root:     root,
+		stopRoot: stopRoot,
+	}
+	for range config.MaxConcurrent {
+		s.live.Go(s.work)
+	}
+	return s, nil
 }
 
 func (s *Scheduler[T, P]) Add(ctx context.Context, data direct.Data[T]) (direct.Digest, error) {
@@ -101,73 +89,128 @@ func (s *Scheduler[T, P]) Remove(id T) (func(context.Context) error, bool) {
 	return s.inner.Remove(id)
 }
 
-// Close releases everything still waiting for a slot, stops the guests already
-// running, and closes the registry underneath.
+// Close releases everything still waiting for a worker, stops the guests already
+// running, waits them out, and closes the registry underneath. Shutdown is the
+// root's cancellation, never the task channel's close, so a Spawn racing Close
+// settles its submission instead of panicking on a closed send. Safe to call
+// more than once, and a cancelled Config.Parent shuts the scheduler down the
+// same way.
 func (s *Scheduler[T, P]) Close(ctx context.Context) []error {
-	s.closeOnce.Do(func() {
-		close(s.slots)
-		s.stopRoot()
-		for task := range s.slots {
-			task.stop()
-		}
-	})
-
+	s.stopRoot()
+	s.live.Wait()
 	return s.inner.Close(ctx)
 }
 
-// Spawn runs a guest once a slot is free. It returns before the guest starts:
-// the handle's result arrives when the quantum ends, and cancelling it drops the
-// submission if it is still waiting.
+// Spawn runs a guest as soon as a worker is free. It returns before the guest
+// starts: the outcome arrives on the handle, and closing the handle drops the
+// submission while it waits, or stops the guest once it has started. deadline
+// bounds the quantum's wall-clock once it starts (0 = unbounded) — queue time
+// never counts against it.
+//
+// The quantum's lifetime originates here, hanging off the scheduler's root: no
+// caller's context reaches it, so one caller can never cancel work it did not
+// submit. The handle is the only lever.
 func (s *Scheduler[T, P]) Spawn(
 	id T,
 	entry P,
-	timeout time.Duration,
+	deadline time.Duration,
 	mkDispatcher func(context.Context, P) (sys.Dispatcher[P], error),
-) (process.Handle, error) {
+) (Handle, error) {
 	select {
 	case <-s.root.Done():
 		return nil, ErrClosed
 	default:
 	}
 
-	result := make(chan process.Result)
-	taskCtx, stopTask := context.WithCancel(s.root)
+	taskCtx, stop := context.WithCancel(s.root)
 	task := submittedTask[T, P]{
-		ctx:             taskCtx,
-		stop:            stopTask,
-		id:              id,
-		entry:           entry,
-		mkDispatcher:    mkDispatcher,
-		result:          result,
-		timeoutDuration: timeout,
+		ctx:          taskCtx,
+		id:           id,
+		entry:        entry,
+		deadline:     deadline,
+		mkDispatcher: mkDispatcher,
+		// Buffered: the outcome lands whether or not anyone reads it, so a
+		// dropped handle strands no goroutine.
+		result: make(chan process.Result, 1),
 	}
-	s.slots <- task
-	submitted := &submissionHandle{
-		result: result,
-		stop:   stopTask,
-	}
-	return submitted, nil
+
+	// Off the caller's goroutine, because the send blocks until a worker is free
+	// and Spawn must hand back the handle first: a submission still waiting for a
+	// worker has to be closable. Deliberately not in s.live — that counts the
+	// fixed workers, added before any Wait, and a Spawn racing Close would
+	// otherwise add to a WaitGroup whose Wait has already returned. This
+	// goroutine needs no waiting: every arm below is a closed channel at
+	// shutdown, so it exits at once.
+	go func() {
+		select {
+		case s.tasks <- task:
+			// A worker owns it now; closing the handle reaches the guest through
+			// taskCtx, which its quantum derives from.
+		case <-s.root.Done():
+			stop()
+			task.settle(process.Result{Status: process.Stopped, Error: ErrClosed})
+		case <-taskCtx.Done():
+			task.settle(process.Result{Status: process.Stopped, Error: ErrStopped})
+		}
+	}()
+	return submissionHandle{result: task.result, close: stop}, nil
 }
 
-type submittedTask[T direct.ProgramID, P Process] struct {
-	ctx             context.Context
-	stop            context.CancelFunc
-	id              T
-	entry           P
-	mkDispatcher    func(context.Context, P) (sys.Dispatcher[P], error)
-	result          chan<- process.Result
-	timeoutDuration time.Duration
+// work runs one guest at a time, for as long as the scheduler is open. The
+// number of these is the concurrency bound.
+func (s *Scheduler[T, P]) work() {
+	for {
+		select {
+		case task := <-s.tasks:
+			s.run(task)
+		case <-s.root.Done():
+			return
+		}
+	}
+}
+
+func (s *Scheduler[T, P]) run(task submittedTask[T, P]) {
+	// The worker is held, so the wall-clock bound starts now: queue time never
+	// counts against a guest's deadline. A zero deadline is the host's opt-out
+	// (Config.MaxQuantumDuration negative) and must stay unbounded — a zero
+	// timeout would expire before the guest ran.
+	quantum, done := context.WithCancel(task.ctx)
+	if task.deadline > 0 {
+		quantum, done = context.WithTimeoutCause(task.ctx, task.deadline, ErrDeadline)
+	}
+	defer done()
+
+	handle, err := s.inner.Spawn(quantum, task.id, task.entry, task.mkDispatcher)
+	if err != nil {
+		task.settle(process.Result{Status: process.Failed, Error: err})
+		return
+	}
+	task.settle(<-handle.Result())
+}
+
+type submittedTask[T direct.ProgramID, P direct.ProcessEntry] struct {
+	ctx          context.Context
+	id           T
+	entry        P
+	deadline     time.Duration
+	mkDispatcher func(context.Context, P) (sys.Dispatcher[P], error)
+	result       chan process.Result
+}
+
+// settle delivers the one outcome. Exactly one path reaches it: a submission is
+// either handed to a worker, which runs it, or dropped before it ever was.
+func (t submittedTask[T, P]) settle(result process.Result) {
+	t.result <- result
+	close(t.result)
 }
 
 type submissionHandle struct {
 	result <-chan process.Result
-	stop   context.CancelFunc
+	close  context.CancelFunc
 }
 
-func (s *submissionHandle) Result() <-chan process.Result {
-	return s.result
-}
+func (s submissionHandle) Result() <-chan process.Result { return s.result }
 
-func (s *submissionHandle) Cancel() {
-	s.stop()
-}
+// Close is idempotent: it cancels the submission's lifetime, dropping it if it
+// is still waiting and stopping the guest if it has started.
+func (s submissionHandle) Close() { s.close() }

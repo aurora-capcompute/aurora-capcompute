@@ -46,6 +46,7 @@ func (r *Runtime) execute(ctx context.Context, processID string) {
 	)
 	cred := r.processContextLocked(proc)
 	program := ProgramID(proc.manifest.Program)
+	deadline := proc.deadline
 	r.mu.Unlock()
 
 	// A process is an audit target: it never runs under program bytes or an
@@ -57,7 +58,7 @@ func (r *Runtime) execute(ctx context.Context, processID string) {
 		return
 	}
 
-	handle, err := r.images.Spawn(ctx, program, cred, r.factory.NewDispatcher)
+	handle, err := r.images.Spawn(program, cred, deadline, r.factory.NewDispatcher)
 	if err != nil {
 		if errors.Is(err, sched.ErrClosed) {
 			r.finish(processID, durable.ProcessInterrupted, "", err)
@@ -66,7 +67,7 @@ func (r *Runtime) execute(ctx context.Context, processID string) {
 		}
 		return
 	}
-	stop, results := handle.Cancel, handle.Result()
+	stop, results := handle.Close, handle.Result()
 
 	r.mu.Lock()
 	proc = r.processes[processID]

@@ -19,15 +19,11 @@ type programID string
 
 func (p programID) String() string { return string(p) }
 
-// cred is a credential the scheduler can read: how long a guest may hold a slot.
-type cred struct {
-	deadline time.Duration
-}
+// cred is the credential direct needs; the scheduler reads nothing off it.
+type cred struct{}
 
-func (cred) ArtifactDigest() string    { return "artifact" }
-func (cred) SourceCodeDigest() string  { return "source" }
-func (c cred) Deadline() time.Duration { return c.deadline }
-func root(d time.Duration) cred        { return cred{deadline: d} }
+func (cred) ArtifactDigest() string   { return "artifact" }
+func (cred) SourceCodeDigest() string { return "source" }
 
 // registry is a direct.Registry that records its spawns and hands back a handle
 // the test drives by hand. Only Spawn and Close carry behaviour; the rest exist
@@ -39,6 +35,11 @@ type registry struct {
 	closed  bool
 	// block, when set, holds each spawned guest until the test releases it.
 	block chan struct{}
+	// hold, when set, keeps each guest alive that long, so the test can watch
+	// how many are alive at once.
+	hold time.Duration
+	live int
+	peak int
 }
 
 type spawn struct {
@@ -83,23 +84,39 @@ func (r *registry) Spawn(
 	_, bounded := ctx.Deadline()
 	h := &handle{results: make(chan process.Result, 1), ctx: ctx}
 	r.spawned = append(r.spawned, spawn{id: id, deadline: bounded, handle: h})
-	block := r.block
+	block, hold := r.block, r.hold
+	r.live++
+	if r.live > r.peak {
+		r.peak = r.live
+	}
 	r.mu.Unlock()
 
+	// A guest counts as alive until it delivers its outcome — the moment the
+	// worker is free to take the next one. Booking out after settling would let
+	// the successor start first and read a peak that never happened.
+	settle := func(result process.Result) {
+		r.mu.Lock()
+		r.live--
+		r.mu.Unlock()
+		h.settle(result)
+	}
 	go func() {
+		if hold > 0 {
+			time.Sleep(hold)
+		}
 		if block != nil {
 			select {
 			case <-block:
 			case <-ctx.Done():
-				h.settle(process.Result{Status: process.Stopped, Error: ctx.Err()})
+				settle(process.Result{Status: process.Stopped, Error: ctx.Err()})
 				return
 			}
 		}
 		select {
 		case <-ctx.Done():
-			h.settle(process.Result{Status: process.Stopped, Error: ctx.Err()})
+			settle(process.Result{Status: process.Stopped, Error: ctx.Err()})
 		default:
-			h.settle(process.Result{Status: process.Completed})
+			settle(process.Result{Status: process.Completed})
 		}
 	}()
 	return h, nil
@@ -112,22 +129,13 @@ func (r *registry) calls() []spawn {
 }
 
 type handle struct {
-	results   chan process.Result
-	ctx       context.Context
-	once      sync.Once
-	mu        sync.Mutex
-	cancelled bool
+	results chan process.Result
+	ctx     context.Context
+	once    sync.Once
 }
 
 func (h *handle) Result() <-chan process.Result { return h.results }
 
-// Cancel stops the guest, as direct's handle does: the outcome still arrives.
-func (h *handle) Cancel() {
-	h.mu.Lock()
-	h.cancelled = true
-	h.mu.Unlock()
-	h.settle(process.Result{Status: process.Stopped, Error: context.Canceled})
-}
 func (h *handle) settle(r process.Result) {
 	h.once.Do(func() { h.results <- r; close(h.results) })
 }
@@ -141,9 +149,9 @@ func newScheduler(t *testing.T, inner *registry, maxConcurrent int) *sched.Sched
 	return s
 }
 
-func spawn1(t *testing.T, s *sched.Scheduler[programID, cred], id programID, c cred) process.Handle {
+func spawn1(t *testing.T, s *sched.Scheduler[programID, cred], id programID, deadline time.Duration) sched.Handle {
 	t.Helper()
-	h, err := s.Spawn(context.Background(), id, c, nil)
+	h, err := s.Spawn(id, cred{}, deadline, nil)
 	if err != nil {
 		t.Fatalf("spawn %s: %v", id, err)
 	}
@@ -164,7 +172,7 @@ func running(t *testing.T, inner *registry, n int) {
 	t.Fatalf("only %d of %d guests started", len(inner.calls()), n)
 }
 
-func await(t *testing.T, h process.Handle) process.Result {
+func await(t *testing.T, h sched.Handle) process.Result {
 	t.Helper()
 	select {
 	case r := <-h.Result():
@@ -182,12 +190,11 @@ func TestRegistryRequired(t *testing.T) {
 	}
 }
 
-// Everything but Spawn reaches the registry underneath unchanged.
+// Everything but Spawn reaches the registry underneath unchanged. Spawn is the
+// one call that differs: it takes a deadline and returns a closable handle.
 func TestNonSpawnCallsPassThrough(t *testing.T) {
 	inner := &registry{}
 	s := newScheduler(t, inner, 1)
-
-	var _ direct.Registry[programID, cred] = s
 
 	if !s.Exists("p") {
 		t.Fatal("Exists did not reach the registry")
@@ -210,9 +217,9 @@ func TestConcurrencyCapHoldsTheQueue(t *testing.T) {
 	s := newScheduler(t, inner, 1)
 	defer s.Close(context.Background())
 
-	first := spawn1(t, s, "a", root(0))
+	first := spawn1(t, s, "a", 0)
 	running(t, inner, 1)
-	second := spawn1(t, s, "b", root(0))
+	second := spawn1(t, s, "b", 0)
 
 	// Give the queue a chance to over-run the cap if it were going to.
 	time.Sleep(50 * time.Millisecond)
@@ -233,9 +240,9 @@ func TestEverySubmissionRuns(t *testing.T) {
 	s := newScheduler(t, inner, 1)
 	defer s.Close(context.Background())
 
-	handles := make([]process.Handle, 0, 3)
+	handles := make([]sched.Handle, 0, 3)
 	for _, id := range []programID{"a", "b", "c"} {
-		handles = append(handles, spawn1(t, s, id, root(0)))
+		handles = append(handles, spawn1(t, s, id, 0))
 	}
 	for _, h := range handles {
 		if result := await(t, h); result.Status != process.Completed {
@@ -260,8 +267,8 @@ func TestDeadlineExcludesQueueTime(t *testing.T) {
 	s := newScheduler(t, inner, 1)
 	defer s.Close(context.Background())
 
-	await(t, spawn1(t, s, "a", root(time.Minute)))
-	second := spawn1(t, s, "b", root(time.Minute))
+	await(t, spawn1(t, s, "a", time.Minute))
+	second := spawn1(t, s, "b", time.Minute)
 	await(t, second)
 
 	for i, call := range inner.calls() {
@@ -277,7 +284,7 @@ func TestNoDeadlineLeavesTheQuantumUnbounded(t *testing.T) {
 	s := newScheduler(t, inner, 1)
 	defer s.Close(context.Background())
 
-	await(t, spawn1(t, s, "a", root(0)))
+	await(t, spawn1(t, s, "a", 0))
 	if inner.calls()[0].deadline {
 		t.Fatal("a zero deadline bounded the quantum")
 	}
@@ -290,12 +297,12 @@ func TestCancelDropsAQueuedSubmission(t *testing.T) {
 	s := newScheduler(t, inner, 1)
 	defer func() { close(inner.block); s.Close(context.Background()) }()
 
-	spawn1(t, s, "running", root(0))
-	running(t, inner, 1) // the slot is taken before the next submission arrives
-	queued := spawn1(t, s, "queued", root(0))
+	spawn1(t, s, "running", 0)
+	running(t, inner, 1) // the worker is taken before the next submission arrives
+	queued := spawn1(t, s, "queued", 0)
 	time.Sleep(50 * time.Millisecond)
 
-	queued.Cancel()
+	queued.Close()
 	result := await(t, queued)
 	if result.Status != process.Stopped || !errors.Is(result.Error, sched.ErrStopped) {
 		t.Fatalf("cancelled submission = %+v, want stopped/ErrStopped", result)
@@ -312,9 +319,9 @@ func TestCloseSettlesQueuedWork(t *testing.T) {
 	inner := &registry{block: make(chan struct{})}
 	s := newScheduler(t, inner, 1)
 
-	spawn1(t, s, "running", root(0))
+	spawn1(t, s, "running", 0)
 	running(t, inner, 1) // the slot is taken before the next submission arrives
-	queued := spawn1(t, s, "queued", root(0))
+	queued := spawn1(t, s, "queued", 0)
 	time.Sleep(50 * time.Millisecond)
 
 	// Close cancels the running guest, which frees the slot; the waiting one
@@ -326,7 +333,7 @@ func TestCloseSettlesQueuedWork(t *testing.T) {
 	if result.Status != process.Stopped || !errors.Is(result.Error, sched.ErrClosed) {
 		t.Fatalf("queued at close = %+v, want stopped/ErrClosed", result)
 	}
-	if _, err := s.Spawn(context.Background(), "late", root(0), nil); !errors.Is(err, sched.ErrClosed) {
+	if _, err := s.Spawn("late", cred{}, 0, nil); !errors.Is(err, sched.ErrClosed) {
 		t.Fatalf("spawn after close = %v, want ErrClosed", err)
 	}
 }
@@ -338,7 +345,7 @@ func TestSpawnFailureReachesTheCaller(t *testing.T) {
 	s := newScheduler(t, inner, 1)
 	defer s.Close(context.Background())
 
-	result := await(t, spawn1(t, s, "gone", root(0)))
+	result := await(t, spawn1(t, s, "gone", 0))
 	if result.Status != process.Failed || result.Error == nil {
 		t.Fatalf("spawn failure = %+v, want a failed result", result)
 	}
@@ -350,18 +357,46 @@ func TestCancelStopsARunningGuest(t *testing.T) {
 	s := newScheduler(t, inner, 1)
 	defer func() { close(inner.block); s.Close(context.Background()) }()
 
-	h := spawn1(t, s, "running", root(0))
-	time.Sleep(50 * time.Millisecond)
-	h.Cancel()
+	h := spawn1(t, s, "running", 0)
+	running(t, inner, 1)
+	h.Close()
 
 	result := await(t, h)
 	if result.Status != process.Stopped {
 		t.Fatalf("cancelled running guest = %+v, want stopped", result)
 	}
+	// Closing the handle reached the guest through the context its quantum was
+	// started from — the one lever, and it originates in the scheduler.
 	inner.mu.Lock()
-	cancelled := inner.spawned[0].handle.cancelled
+	guestCtx := inner.spawned[0].handle.ctx
 	inner.mu.Unlock()
-	if !cancelled {
-		t.Fatal("the inner handle's Cancel was never called")
+	if guestCtx.Err() == nil {
+		t.Fatal("the guest's quantum context was never cancelled")
+	}
+}
+
+// The cap is structural, not a counter: however many submissions pile up, the
+// number of guests alive at once never exceeds the worker count.
+func TestConcurrencyNeverExceedsTheCap(t *testing.T) {
+	const maxConcurrent = 2
+	inner := &registry{hold: 20 * time.Millisecond}
+	s := newScheduler(t, inner, maxConcurrent)
+	defer s.Close(context.Background())
+
+	handles := make([]sched.Handle, 0, 20)
+	for i := range 20 {
+		handles = append(handles, spawn1(t, s, programID(rune('a'+i)), 0))
+	}
+	for _, h := range handles {
+		await(t, h)
+	}
+	inner.mu.Lock()
+	peak := inner.peak
+	inner.mu.Unlock()
+	if peak > maxConcurrent {
+		t.Fatalf("peak guests running = %d, want at most %d", peak, maxConcurrent)
+	}
+	if peak == 0 {
+		t.Fatal("no guest ever ran")
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/sched"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/aurora-capcompute/monitor"
 	"github.com/aurora-capcompute/capcompute/sys"
@@ -109,7 +110,7 @@ type Runtime struct {
 	// complete on shutdown to persist final state.
 	baseCtx         context.Context
 	cancel          context.CancelFunc
-	images          direct.Registry[ProgramID, ProcessContext]
+	images          *sched.Scheduler[ProgramID, ProcessContext]
 	taints          *monitor.Taints[processKey]
 	log             eventlog.Log
 	leases          Leases
@@ -207,14 +208,10 @@ type ProcessContext struct {
 	ProcessID string
 	Revision  uint64
 	Digest    direct.Digest
-	// Quantum is what sched.Process asks of a credential: how long this guest
-	// may hold its slot.
-	Quantum time.Duration
 }
 
 func (r ProcessContext) ArtifactDigest() string   { return r.Digest.ArtifactDigest }
 func (r ProcessContext) SourceCodeDigest() string { return r.Digest.SourceCodeDigest }
-func (r ProcessContext) Deadline() time.Duration  { return r.Quantum }
 
 func (r ProcessContext) PID() processKey {
 	return processKey{processID: r.ProcessID, revision: r.Revision}
