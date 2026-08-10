@@ -1,7 +1,7 @@
 // Package sched bounds how many guests run at once. It is a direct.Registry
 // wrapped around another: everything but Spawn passes straight through, and
-// Spawn queues, waits for a slot, bounds the quantum's wall-clock, and hands
-// back a handle the caller cannot tell from an unqueued one.
+// Spawn waits for a slot, bounds the quantum's wall-clock, and hands back a
+// handle the caller cannot tell from an unqueued one.
 package sched
 
 import (
@@ -32,9 +32,9 @@ type Process interface {
 
 type Config struct {
 	// Parent is the lifetime every quantum derives from (nil = Background).
-	// Spawn takes no lifetime of its own for a queued guest — tying a quantum to
-	// its submitter would let one caller's cancellation kill unrelated queued
-	// work — so this is the one place a caller bounds the queue's work.
+	// Spawn takes no lifetime of its own — tying a quantum to its submitter would
+	// let one caller's cancellation kill unrelated queued work — so this is the
+	// one place a caller bounds the queue's work.
 	Parent context.Context
 	// MaxConcurrent bounds simultaneously running quanta. 0 = 1: uniprocessing
 	// is the default posture, concurrency is opt-in. This is a resource bound —
@@ -42,17 +42,14 @@ type Config struct {
 	MaxConcurrent int
 }
 
+// Scheduler is direct.Registry with a bound on concurrent guests. The bound is
+// a slot channel: a submission holds one for as long as its guest runs.
 type Scheduler[T direct.ProgramID, P Process] struct {
-	inner    direct.Registry[T, P]
-	config   Config
-	root     context.Context
-	stopRoot context.CancelFunc
-
-	mu      sync.Mutex
-	closed  bool
-	queue   []*pending[T, P]
-	running int
-	quanta  sync.WaitGroup
+	inner     direct.Registry[T, P]
+	slots     chan submittedTask[T, P]
+	root      context.Context
+	stopRoot  context.CancelFunc
+	closeOnce sync.Once
 }
 
 func New[T direct.ProgramID, P Process](inner direct.Registry[T, P], config Config) (*Scheduler[T, P], error) {
@@ -66,7 +63,28 @@ func New[T direct.ProgramID, P Process](inner direct.Registry[T, P], config Conf
 		config.Parent = context.Background()
 	}
 	root, stopRoot := context.WithCancel(config.Parent)
-	return &Scheduler[T, P]{inner: inner, config: config, root: root, stopRoot: stopRoot}, nil
+	slots := make(chan submittedTask[T, P], config.MaxConcurrent)
+	go func() {
+		for task := range slots {
+			task := task
+			go func() {
+				deadlineCtx, _ := context.WithTimeoutCause(task.ctx, task.timeoutDuration, errors.New("sched: deadline exceeded"))
+				handle, err := inner.Spawn(deadlineCtx, task.id, task.entry, task.mkDispatcher)
+				if err != nil {
+					task.result <- process.Result{Status: process.Failed, Error: err}
+				}
+				res := <-handle.Result()
+				task.result <- res
+			}()
+		}
+	}()
+	return &Scheduler[T, P]{
+		inner:     inner,
+		slots:     slots,
+		root:      root,
+		stopRoot:  stopRoot,
+		closeOnce: sync.Once{},
+	}, nil
 }
 
 func (s *Scheduler[T, P]) Add(ctx context.Context, data direct.Data[T]) (direct.Digest, error) {
@@ -82,18 +100,13 @@ func (s *Scheduler[T, P]) Remove(id T) (func(context.Context) error, bool) {
 	return s.inner.Remove(id)
 }
 
-// Close drains the queue, waits out the quanta already running, and closes the
-// registry underneath.
+// Close releases everything still waiting for a slot, stops the guests already
+// running, and closes the registry underneath.
 func (s *Scheduler[T, P]) Close(ctx context.Context) []error {
-	s.mu.Lock()
-	s.closed = true
-	for _, queued := range s.queue {
-		queued.settle(process.Result{Status: process.Stopped, Error: ErrClosed})
-	}
-	s.queue = nil
-	s.mu.Unlock()
-	s.quanta.Wait()
 	s.stopRoot()
+	for task := range s.slots {
+		task.stop()
+	}
 	return s.inner.Close(ctx)
 }
 
@@ -101,124 +114,54 @@ func (s *Scheduler[T, P]) Close(ctx context.Context) []error {
 // the handle's result arrives when the quantum ends, and cancelling it drops the
 // submission if it is still waiting.
 func (s *Scheduler[T, P]) Spawn(
-	_ context.Context,
 	id T,
 	entry P,
+	deadline time.Duration,
 	mkDispatcher func(context.Context, P) (sys.Dispatcher[P], error),
 ) (process.Handle, error) {
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
+	select {
+	case <-s.root.Done():
 		return nil, ErrClosed
+	default:
 	}
-	submitted := &pending[T, P]{
-		scheduler: s,
-		id:        id,
-		entry:     entry,
-		mk:        mkDispatcher,
-		results:   make(chan process.Result, 1),
+
+	result := make(chan process.Result)
+	taskCtx, stopTask := context.WithCancel(s.root)
+	task := submittedTask[T, P]{
+		ctx:          taskCtx,
+		stop:         stopTask,
+		id:           id,
+		entry:        entry,
+		mkDispatcher: mkDispatcher,
+		result:       result,
 	}
-	s.queue = append(s.queue, submitted)
-	s.schedule()
-	s.mu.Unlock()
+	s.slots <- task
+	submitted := &submissionHandle{
+		result: result,
+		stop:   stopTask,
+	}
 	return submitted, nil
 }
 
-// schedule starts submissions while capacity remains, in arrival order. Caller
-// holds the lock.
-func (s *Scheduler[T, P]) schedule() {
-	for s.running < s.config.MaxConcurrent && len(s.queue) > 0 {
-		next := s.queue[0]
-		copy(s.queue, s.queue[1:])
-		s.queue[len(s.queue)-1] = nil
-		s.queue = s.queue[:len(s.queue)-1]
-		s.running++
-		// Derived under the lock so the submission carries its canceller before
-		// the quantum can start: a Cancel landing in between must cancel the run,
-		// not mistake it for one still waiting.
-		quantum, cancel := quantumContext(s.root, next.entry.Deadline())
-		next.quantum, next.cancel = quantum, cancel
-		s.quanta.Add(1)
-		go s.run(next)
-	}
+type submittedTask[T direct.ProgramID, P Process] struct {
+	ctx             context.Context
+	stop            context.CancelFunc
+	id              T
+	entry           P
+	mkDispatcher    func(context.Context, P) (sys.Dispatcher[P], error)
+	result          chan<- process.Result
+	timeoutDuration time.Duration
 }
 
-func (s *Scheduler[T, P]) run(p *pending[T, P]) {
-	defer s.quanta.Done()
-	defer p.cancel()
-	result := process.Result{Status: process.Completed}
-	handle, err := s.inner.Spawn(p.quantum, p.id, p.entry, p.mk)
-	if err != nil {
-		result = process.Result{Status: process.Failed, Error: err}
-	} else {
-		result = <-handle.Result()
-	}
-	s.mu.Lock()
-	s.running--
-	if !s.closed {
-		s.schedule()
-	}
-	s.mu.Unlock()
-	p.settle(result)
+type submissionHandle struct {
+	result <-chan process.Result
+	stop   context.CancelFunc
 }
 
-// drop removes a submission that has not started. Reports false when it already
-// has, in which case cancelling its quantum is the way to stop it.
-func (s *Scheduler[T, P]) drop(p *pending[T, P]) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for i, waiting := range s.queue {
-		if waiting == p {
-			copy(s.queue[i:], s.queue[i+1:])
-			s.queue[len(s.queue)-1] = nil
-			s.queue = s.queue[:len(s.queue)-1]
-			return true
-		}
-	}
-	return false
+func (s *submissionHandle) Result() <-chan process.Result {
+	return s.result
 }
 
-func quantumContext(parent context.Context, deadline time.Duration) (context.Context, context.CancelFunc) {
-	if parent == nil {
-		parent = context.Background()
-	}
-	if _, bounded := parent.Deadline(); !bounded && deadline > 0 {
-		return context.WithTimeout(parent, deadline)
-	}
-	return context.WithCancel(parent)
-}
-
-// pending is one queued spawn, and the handle the caller holds for it.
-type pending[T direct.ProgramID, P Process] struct {
-	scheduler *Scheduler[T, P]
-	id        T
-	entry     P
-	mk        func(context.Context, P) (sys.Dispatcher[P], error)
-	results   chan process.Result
-
-	quantum context.Context
-	cancel  context.CancelFunc
-	once    sync.Once
-}
-
-func (p *pending[T, P]) Result() <-chan process.Result { return p.results }
-
-func (p *pending[T, P]) Cancel() {
-	if p.scheduler.drop(p) {
-		p.settle(process.Result{Status: process.Stopped, Error: ErrStopped})
-		return
-	}
-	p.scheduler.mu.Lock()
-	cancel := p.cancel
-	p.scheduler.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-}
-
-func (p *pending[T, P]) settle(result process.Result) {
-	p.once.Do(func() {
-		p.results <- result
-		close(p.results)
-	})
+func (s *submissionHandle) Cancel() {
+	s.stop()
 }

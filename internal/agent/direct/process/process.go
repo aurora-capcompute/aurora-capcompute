@@ -23,7 +23,6 @@ type Result struct {
 
 type Handle interface {
 	Result() <-chan Result
-	Cancel()
 }
 
 func Spawn[T any](
@@ -71,5 +70,3 @@ type processHandle struct {
 }
 
 func (h processHandle) Result() <-chan Result { return h.results }
-
-func (h processHandle) Cancel() { h.inner.Cancel() }

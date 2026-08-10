@@ -112,13 +112,22 @@ func (r *registry) calls() []spawn {
 }
 
 type handle struct {
-	results chan process.Result
-	ctx     context.Context
-	once    sync.Once
+	results   chan process.Result
+	ctx       context.Context
+	once      sync.Once
+	mu        sync.Mutex
+	cancelled bool
 }
 
 func (h *handle) Result() <-chan process.Result { return h.results }
-func (h *handle) Cancel()                       {}
+
+// Cancel stops the guest, as direct's handle does: the outcome still arrives.
+func (h *handle) Cancel() {
+	h.mu.Lock()
+	h.cancelled = true
+	h.mu.Unlock()
+	h.settle(process.Result{Status: process.Stopped, Error: context.Canceled})
+}
 func (h *handle) settle(r process.Result) {
 	h.once.Do(func() { h.results <- r; close(h.results) })
 }
@@ -139,6 +148,20 @@ func spawn1(t *testing.T, s *sched.Scheduler[programID, cred], id programID, c c
 		t.Fatalf("spawn %s: %v", id, err)
 	}
 	return h
+}
+
+// running blocks until n guests have reached the registry, so a test can be sure
+// which submission holds the slot before it adds the next.
+func running(t *testing.T, inner *registry, n int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(inner.calls()) >= n {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("only %d of %d guests started", len(inner.calls()), n)
 }
 
 func await(t *testing.T, h process.Handle) process.Result {
@@ -188,6 +211,7 @@ func TestConcurrencyCapHoldsTheQueue(t *testing.T) {
 	defer s.Close(context.Background())
 
 	first := spawn1(t, s, "a", root(0))
+	running(t, inner, 1)
 	second := spawn1(t, s, "b", root(0))
 
 	// Give the queue a chance to over-run the cap if it were going to.
@@ -203,8 +227,8 @@ func TestConcurrencyCapHoldsTheQueue(t *testing.T) {
 	}
 }
 
-// The queue runs submissions in arrival order.
-func TestQueueIsFIFO(t *testing.T) {
+// Every submission runs, however many are waiting at once.
+func TestEverySubmissionRuns(t *testing.T) {
 	inner := &registry{}
 	s := newScheduler(t, inner, 1)
 	defer s.Close(context.Background())
@@ -214,11 +238,17 @@ func TestQueueIsFIFO(t *testing.T) {
 		handles = append(handles, spawn1(t, s, id, root(0)))
 	}
 	for _, h := range handles {
-		await(t, h)
+		if result := await(t, h); result.Status != process.Completed {
+			t.Fatalf("submission = %+v, want completed", result)
+		}
 	}
-	for i, want := range []programID{"a", "b", "c"} {
-		if got := inner.calls()[i].id; got != want {
-			t.Fatalf("position %d ran %s, want %s", i, got, want)
+	ran := map[programID]bool{}
+	for _, call := range inner.calls() {
+		ran[call.id] = true
+	}
+	for _, want := range []programID{"a", "b", "c"} {
+		if !ran[want] {
+			t.Fatalf("%s never ran: %v", want, inner.calls())
 		}
 	}
 }
@@ -261,6 +291,7 @@ func TestCancelDropsAQueuedSubmission(t *testing.T) {
 	defer func() { close(inner.block); s.Close(context.Background()) }()
 
 	spawn1(t, s, "running", root(0))
+	running(t, inner, 1) // the slot is taken before the next submission arrives
 	queued := spawn1(t, s, "queued", root(0))
 	time.Sleep(50 * time.Millisecond)
 
@@ -282,11 +313,14 @@ func TestCloseSettlesQueuedWork(t *testing.T) {
 	s := newScheduler(t, inner, 1)
 
 	spawn1(t, s, "running", root(0))
+	running(t, inner, 1) // the slot is taken before the next submission arrives
 	queued := spawn1(t, s, "queued", root(0))
 	time.Sleep(50 * time.Millisecond)
 
-	close(inner.block)
+	// Close cancels the running guest, which frees the slot; the waiting one
+	// must still refuse to start rather than slip through behind it.
 	s.Close(context.Background())
+	close(inner.block)
 
 	result := await(t, queued)
 	if result.Status != process.Stopped || !errors.Is(result.Error, sched.ErrClosed) {
@@ -307,5 +341,27 @@ func TestSpawnFailureReachesTheCaller(t *testing.T) {
 	result := await(t, spawn1(t, s, "gone", root(0)))
 	if result.Status != process.Failed || result.Error == nil {
 		t.Fatalf("spawn failure = %+v, want a failed result", result)
+	}
+}
+
+// Cancelling a running guest must stop it.
+func TestCancelStopsARunningGuest(t *testing.T) {
+	inner := &registry{block: make(chan struct{})}
+	s := newScheduler(t, inner, 1)
+	defer func() { close(inner.block); s.Close(context.Background()) }()
+
+	h := spawn1(t, s, "running", root(0))
+	time.Sleep(50 * time.Millisecond)
+	h.Cancel()
+
+	result := await(t, h)
+	if result.Status != process.Stopped {
+		t.Fatalf("cancelled running guest = %+v, want stopped", result)
+	}
+	inner.mu.Lock()
+	cancelled := inner.spawned[0].handle.cancelled
+	inner.mu.Unlock()
+	if !cancelled {
+		t.Fatal("the inner handle's Cancel was never called")
 	}
 }
