@@ -72,6 +72,7 @@ func New[T direct.ProgramID, P Process](inner direct.Registry[T, P], config Conf
 				handle, err := inner.Spawn(deadlineCtx, task.id, task.entry, task.mkDispatcher)
 				if err != nil {
 					task.result <- process.Result{Status: process.Failed, Error: err}
+					return
 				}
 				res := <-handle.Result()
 				task.result <- res
@@ -103,10 +104,14 @@ func (s *Scheduler[T, P]) Remove(id T) (func(context.Context) error, bool) {
 // Close releases everything still waiting for a slot, stops the guests already
 // running, and closes the registry underneath.
 func (s *Scheduler[T, P]) Close(ctx context.Context) []error {
-	s.stopRoot()
-	for task := range s.slots {
-		task.stop()
-	}
+	s.closeOnce.Do(func() {
+		close(s.slots)
+		s.stopRoot()
+		for task := range s.slots {
+			task.stop()
+		}
+	})
+
 	return s.inner.Close(ctx)
 }
 
@@ -116,7 +121,7 @@ func (s *Scheduler[T, P]) Close(ctx context.Context) []error {
 func (s *Scheduler[T, P]) Spawn(
 	id T,
 	entry P,
-	deadline time.Duration,
+	timeout time.Duration,
 	mkDispatcher func(context.Context, P) (sys.Dispatcher[P], error),
 ) (process.Handle, error) {
 	select {
@@ -128,12 +133,13 @@ func (s *Scheduler[T, P]) Spawn(
 	result := make(chan process.Result)
 	taskCtx, stopTask := context.WithCancel(s.root)
 	task := submittedTask[T, P]{
-		ctx:          taskCtx,
-		stop:         stopTask,
-		id:           id,
-		entry:        entry,
-		mkDispatcher: mkDispatcher,
-		result:       result,
+		ctx:             taskCtx,
+		stop:            stopTask,
+		id:              id,
+		entry:           entry,
+		mkDispatcher:    mkDispatcher,
+		result:          result,
+		timeoutDuration: timeout,
 	}
 	s.slots <- task
 	submitted := &submissionHandle{
