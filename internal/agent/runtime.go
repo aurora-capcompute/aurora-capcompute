@@ -333,15 +333,18 @@ func (r *Runtime) wrapProtocol(cred ProcessContext, next sys.Dispatcher[ProcessC
 	), nil
 }
 
-func (r *Runtime) programBinding(proc *processState) error {
-	program, ok := r.scheduler.Get(ProgramID(proc.manifest.Program))
+// programBinding refuses a relaunch under program bytes or an interface that
+// changed under the process. It reads the registry, so callers must not hold
+// r.mu: the spawn path takes the registry lock first and r.mu second.
+func (r *Runtime) programBinding(id ProgramID, bound direct.Digest) error {
+	program, ok := r.scheduler.Get(id)
 	if !ok {
-		return fmt.Errorf("program %q is not loaded", proc.manifest.Program)
+		return fmt.Errorf("program %q is not loaded", id)
 	}
-	if program.Digest != proc.digest {
+	if program.Digest != bound {
 		return fmt.Errorf(
 			"program %q changed (loaded %s, process bound to %s): a process is immutable — its code and interface are fixed; spawn a new process from the new program, or kill this one to settle its effects",
-			proc.manifest.Program, program.Digest.ArtifactDigest, proc.digest.ArtifactDigest)
+			id, program.Digest.ArtifactDigest, bound.ArtifactDigest)
 	}
 	return nil
 }
@@ -847,17 +850,30 @@ func (r *Runtime) Stop(processID string) (ProcessSnapshot, error) {
 
 // Retry re-drives a process on a fresh quantum of its own.
 func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, error) {
-	return r.retryUnder(context.Background(), processID, mode)
-}
-
-func (r *Runtime) retryUnder(ctx context.Context, processID string, mode RetryMode) (ProcessSnapshot, error) {
 	if mode != RetryResume && mode != RetryRestart {
 		return ProcessSnapshot{}, fmt.Errorf("%w: retry mode must be resume or restart", errs.Invalid)
 	}
 
+	// Every branch below relaunches the guest. A process is an audit target: it
+	// never resumes or restarts under different program bytes. The check reads the
+	// registry, so it runs before r.mu is taken: a worker starting a quantum holds
+	// the registry lock and reaches back for r.mu through the dispatcher factory,
+	// so taking the two the other way round here would invert the order. What it
+	// reads is fixed for the process's life, and the registry re-checks the same
+	// binding when it instantiates — this is the early, legible refusal.
 	r.mu.Lock()
 	proc := r.processes[processID]
+	r.mu.Unlock()
 	if proc == nil {
+		return ProcessSnapshot{}, fmt.Errorf("%w: process %s", errs.NotFound, processID)
+	}
+	// Both are written once, when the process is built, and never again.
+	if err := r.programBinding(ProgramID(proc.manifest.Program), proc.digest); err != nil {
+		return ProcessSnapshot{}, fmt.Errorf("%w: %v", errs.Conflict, err)
+	}
+
+	r.mu.Lock()
+	if proc = r.processes[processID]; proc == nil {
 		r.mu.Unlock()
 		return ProcessSnapshot{}, fmt.Errorf("%w: process %s", errs.NotFound, processID)
 	}
@@ -886,13 +902,6 @@ func (r *Runtime) retryUnder(ctx context.Context, processID string, mode RetryMo
 		return ProcessSnapshot{}, fmt.Errorf("%w: session already has active process %s", errs.Conflict, session.activeProcessID)
 	}
 
-	// Every branch below relaunches the guest. A process is an audit target: it
-	// never resumes or restarts under different program bytes.
-	if err := r.programBinding(proc); err != nil {
-		r.mu.Unlock()
-		return ProcessSnapshot{}, fmt.Errorf("%w: %v", errs.Conflict, err)
-	}
-
 	if mode == RetryRestart {
 		// Hard restart: fork from the beginning, giving the program a completely
 		// fresh revision with no shared prefix. The abandoned attempt stays in
@@ -915,13 +924,13 @@ func (r *Runtime) retryUnder(ctx context.Context, processID string, mode RetryMo
 	// replay serves everything recorded (an open intent at the tail re-drives
 	// under its original key) and the guest proceeds mid-flight, so an
 	// interruption never opens a new key space.
-	return r.relaunchLocked(context.Background(), proc)
+	return r.relaunchLocked(proc)
 }
 
 // relaunchLocked resets a process for a fresh quantum and starts it: queued,
 // attempt bumped, terminal fields cleared, its session made active, and the
 // transition appended and published. Called with r.mu held; unlocks it.
-func (r *Runtime) relaunchLocked(ctx context.Context, proc *processState) (ProcessSnapshot, error) {
+func (r *Runtime) relaunchLocked(proc *processState) (ProcessSnapshot, error) {
 	// Refuse to enroll a new quantum once shutdown has begun: Close sets closed
 	// under r.mu then waits on r.wg, so a Retry/ResolveTask/child-finish racing
 	// Close must not wg.Add after the counter may already be draining (a reuse of

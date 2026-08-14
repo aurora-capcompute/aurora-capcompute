@@ -15,7 +15,6 @@ package agent
 // process fails.
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -90,7 +89,7 @@ func (r *Runtime) retryAbortedSection(processID, reason string) {
 	default:
 		proc.abortRetries++
 		r.forkJournalLocked(proc, forkOffset)
-		if _, err := r.relaunchLocked(context.Background(), proc); err != nil {
+		if _, err := r.relaunchLocked(proc); err != nil {
 			slog.Warn("abort retry relaunch", "process_id", processID, "error", err)
 		}
 	}
@@ -130,7 +129,7 @@ func (r *Runtime) redriveAfterFailure(processID string) bool {
 	} else {
 		proc.lastFailureLength = length
 	}
-	if _, err := r.relaunchLocked(context.Background(), proc); err != nil {
+	if _, err := r.relaunchLocked(proc); err != nil {
 		slog.Warn("re-drive after failure", "process_id", processID, "error", err)
 		return false
 	}

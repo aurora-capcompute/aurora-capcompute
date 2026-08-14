@@ -209,9 +209,6 @@ type ProcessContext struct {
 	Digest    direct.Digest
 }
 
-func (r ProcessContext) ArtifactDigest() string   { return r.Digest.ArtifactDigest }
-func (r ProcessContext) SourceCodeDigest() string { return r.Digest.SourceCodeDigest }
-
 func (r ProcessContext) PID() processKey {
 	return processKey{processID: r.ProcessID, revision: r.Revision}
 }

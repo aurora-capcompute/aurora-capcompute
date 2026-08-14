@@ -203,15 +203,19 @@ func NewRegistry[T ProgramID, P any](memoryPages uint32) Registry[T, P] {
 }
 
 func (a *registryImpl[T, P]) Add(ctx context.Context, data Data[T]) (Digest, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if existing, taken := a.programs[data.ID]; taken {
-		return Digest{}, fmt.Errorf("%w: program %q is already registered with identity %s; remove it first",
-			errs.Conflict, data.ID, existing.ArtifactDigest)
-	}
+	// Compiling is the slow part and touches nothing shared, so it happens before
+	// the lock: a registration must not hold every spawn for the length of a wasm
+	// compile. The id is claimed under the lock below, where it is decided.
 	art, err := load(ctx, a.compiler, data)
 	if err != nil {
 		return Digest{}, err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if existing, taken := a.programs[data.ID]; taken {
+		_ = art.Image.Close(ctx)
+		return Digest{}, fmt.Errorf("%w: program %q is already registered with identity %s; remove it first",
+			errs.Conflict, data.ID, existing.ArtifactDigest)
 	}
 	a.programs[data.ID] = art
 	return Digest{ArtifactDigest: art.ArtifactDigest, SourceCodeDigest: art.SourceCodeDigest}, nil
@@ -296,7 +300,7 @@ func (a *registryImpl[T, P]) Spawn(ctx context.Context, id T, digest Digest, pro
 	defer a.mu.Unlock()
 	if art, ok := a.programs[id]; ok {
 		if art.ArtifactDigest != digest.ArtifactDigest || art.SourceCodeDigest != digest.SourceCodeDigest {
-			return nil, fmt.Errorf("digest for program %s don't match", id.String())
+			return nil, fmt.Errorf("%w: digest for program %s don't match", errs.Conflict, id.String())
 		}
 		return process.Spawn[P](ctx, processEntry, art.Image, mkDispatcher)
 	}

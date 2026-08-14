@@ -54,7 +54,7 @@ func TestSpawnRefusalReachesTheCaller(t *testing.T) {
 		Revision:  1,
 	}
 	handle, err := runtime.scheduler.Spawn(
-		ProgramID("unloaded@1"), cred, 0, runtime.factory.NewDispatcher)
+		ProgramID("unloaded@1"), cred.Digest, cred, 0, runtime.factory.NewDispatcher)
 	if err != nil {
 		t.Fatalf("spawn: %v", err)
 	}

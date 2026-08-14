@@ -22,8 +22,9 @@ func (p programID) String() string { return string(p) }
 // cred is the credential direct needs; the scheduler reads nothing off it.
 type cred struct{}
 
-func (cred) ArtifactDigest() string   { return "artifact" }
-func (cred) SourceCodeDigest() string { return "source" }
+// bound is the program identity every submission below carries. The scheduler
+// reads nothing off it either — it only has to arrive at the registry intact.
+var bound = direct.Digest{ArtifactDigest: "artifact", SourceCodeDigest: "source"}
 
 // registry is a direct.Registry that records its spawns and hands back a handle
 // the test drives by hand. Only Spawn and Close carry behaviour; the rest exist
@@ -44,6 +45,7 @@ type registry struct {
 
 type spawn struct {
 	id       programID
+	digest   direct.Digest
 	deadline bool // the quantum context carried one
 	handle   *handle
 }
@@ -72,6 +74,7 @@ func (r *registry) Close(context.Context) []error {
 func (r *registry) Spawn(
 	ctx context.Context,
 	id programID,
+	digest direct.Digest,
 	_ cred,
 	_ func(context.Context, cred) (sys.Dispatcher[cred], error),
 ) (process.Handle, error) {
@@ -83,7 +86,7 @@ func (r *registry) Spawn(
 	}
 	_, bounded := ctx.Deadline()
 	h := &handle{results: make(chan process.Result, 1), ctx: ctx}
-	r.spawned = append(r.spawned, spawn{id: id, deadline: bounded, handle: h})
+	r.spawned = append(r.spawned, spawn{id: id, digest: digest, deadline: bounded, handle: h})
 	block, hold := r.block, r.hold
 	r.live++
 	if r.live > r.peak {
@@ -140,18 +143,18 @@ func (h *handle) settle(r process.Result) {
 	h.once.Do(func() { h.results <- r; close(h.results) })
 }
 
-func newScheduler(t *testing.T, inner *registry, maxConcurrent int) *agent.Scheduler[programID, cred] {
+func newScheduler(t *testing.T, inner *registry, maxConcurrent int) agent.Scheduler[programID, cred] {
 	t.Helper()
-	s, err := agent.New[programID, cred](inner, agent.Config{MaxConcurrent: maxConcurrent})
+	s, err := agent.New[programID, cred](inner, maxConcurrent, context.Background())
 	if err != nil {
 		t.Fatalf("new scheduler: %v", err)
 	}
 	return s
 }
 
-func spawn1(t *testing.T, s *agent.Scheduler[programID, cred], id programID, deadline time.Duration) agent.Handle {
+func spawn1(t *testing.T, s agent.Scheduler[programID, cred], id programID, deadline time.Duration) agent.Handle {
 	t.Helper()
-	h, err := s.Spawn(id, cred{}, deadline, nil)
+	h, err := s.Spawn(id, bound, cred{}, deadline, nil)
 	if err != nil {
 		t.Fatalf("spawn %s: %v", id, err)
 	}
@@ -185,7 +188,7 @@ func await(t *testing.T, h agent.Handle) process.Result {
 
 // A registry is required: the scheduler is an adapter, not a standalone queue.
 func TestRegistryRequired(t *testing.T) {
-	if _, err := agent.New[programID, cred](nil, agent.Config{}); err == nil {
+	if _, err := agent.New[programID, cred](nil, 1, context.Background()); err == nil {
 		t.Fatal("New(nil) = nil error, want a refusal")
 	}
 }
@@ -257,6 +260,21 @@ func TestEverySubmissionRuns(t *testing.T) {
 		if !ran[want] {
 			t.Fatalf("%s never ran: %v", want, inner.calls())
 		}
+	}
+}
+
+// The digest rides along with the submission. It is what binds a process to the
+// exact program identity it was created from, and the registry underneath is the
+// one place that check happens — a scheduler that dropped it would let a process
+// run under bytes that changed while it queued.
+func TestDigestReachesTheRegistry(t *testing.T) {
+	inner := &registry{}
+	s := newScheduler(t, inner, 1)
+	defer s.Close(context.Background())
+
+	await(t, spawn1(t, s, "a", 0))
+	if got := inner.calls()[0].digest; got != bound {
+		t.Fatalf("digest = %+v, want %+v", got, bound)
 	}
 }
 
@@ -333,7 +351,7 @@ func TestCloseSettlesQueuedWork(t *testing.T) {
 	if result.Status != process.Stopped || !errors.Is(result.Error, agent.ErrClosed) {
 		t.Fatalf("queued at close = %+v, want stopped/ErrClosed", result)
 	}
-	if _, err := s.Spawn("late", cred{}, 0, nil); !errors.Is(err, agent.ErrClosed) {
+	if _, err := s.Spawn("late", bound, cred{}, 0, nil); !errors.Is(err, agent.ErrClosed) {
 		t.Fatalf("spawn after close = %v, want ErrClosed", err)
 	}
 }

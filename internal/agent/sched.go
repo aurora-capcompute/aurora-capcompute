@@ -1,7 +1,3 @@
-// Package agent Package sched bounds how many guests run at once. It is a direct.Registry
-// wrapped around another: everything but Spawn passes straight through, and
-// Spawn waits for a worker, bounds the quantum's wall-clock, and hands back a
-// handle the caller cannot tell from an unqueued one.
 package agent
 
 import (
@@ -16,11 +12,11 @@ import (
 )
 
 var (
-	ErrClosed  = errors.New("sched: scheduler is closed")
-	ErrStopped = errors.New("sched: stopped before running")
+	ErrClosed  = errors.New("scheduler: closed")
+	ErrStopped = errors.New("scheduler: stopped before running")
 	// ErrDeadline is the cause a quantum's context carries when its wall-clock
 	// bound expires, so a caller can tell a timeout from a stop.
-	ErrDeadline = errors.New("sched: quantum deadline exceeded")
+	ErrDeadline = errors.New("scheduler: quantum deadline exceeded")
 )
 
 // Handle is a submission: its outcome, and the one lever that stops it. Closing
@@ -31,8 +27,8 @@ type Handle interface {
 	Close()
 }
 
-// schedulerImpl is direct.Registry with a bound on concurrent guests. The bound is
-// the worker count: MaxConcurrent goroutines each run one guest to completion
+// schedulerImpl is direct.Registry with a bound on concurrent guests. The bound
+// is the worker count: maxConcurrent goroutines each run one guest to completion
 // before taking the next, so nothing counts slots and nothing can overrun.
 type schedulerImpl[T direct.ProgramID, P any] struct {
 	inner    direct.Registry[T, P]
@@ -50,7 +46,7 @@ func New[T direct.ProgramID, P any](
 	parent context.Context,
 ) (Scheduler[T, P], error) {
 	if inner == nil {
-		return nil, errors.New("sched: a registry is required")
+		return nil, errors.New("scheduler: a registry is required")
 	}
 	if maxConcurrent <= 0 {
 		maxConcurrent = 1
@@ -91,8 +87,7 @@ func (s *schedulerImpl[T, P]) Remove(id T) (func(context.Context) error, bool) {
 // running, waits them out, and closes the registry underneath. Shutdown is the
 // root's cancellation, never the task channel's close, so a Spawn racing Close
 // settles its submission instead of panicking on a closed send. Safe to call
-// more than once, and a cancelled Config.Parent shuts the schedulerImpl down the
-// same way.
+// more than once, and a cancelled parent shuts the scheduler down the same way.
 func (s *schedulerImpl[T, P]) Close(ctx context.Context) []error {
 	s.stopRoot()
 	s.live.Wait()
@@ -105,7 +100,7 @@ func (s *schedulerImpl[T, P]) Close(ctx context.Context) []error {
 // bounds the quantum's wall-clock once it starts (0 = unbounded) — queue time
 // never counts against it.
 //
-// The quantum's lifetime originates here, hanging off the schedulerImpl's root: no
+// The quantum's lifetime originates here, hanging off the scheduler's root: no
 // caller's context reaches it, so one caller can never cancel work it did not
 // submit. The handle is the only lever.
 func (s *schedulerImpl[T, P]) Spawn(
@@ -156,7 +151,7 @@ func (s *schedulerImpl[T, P]) Spawn(
 	return submissionHandle{result: task.result, close: stop}, nil
 }
 
-// work runs one guest at a time, for as long as the schedulerImpl is open. The
+// work runs one guest at a time, for as long as the scheduler is open. The
 // number of these is the concurrency bound.
 func (s *schedulerImpl[T, P]) work() {
 	for {
@@ -180,7 +175,6 @@ func (s *schedulerImpl[T, P]) run(task submittedTask[T, P]) {
 	}
 	defer done()
 
-	// FIXME: there should come digest maybe
 	handle, err := s.inner.Spawn(quantum, task.id, task.digest, task.entry, task.mkDispatcher)
 	if err != nil {
 		task.settle(process.Result{Status: process.Failed, Error: err})
@@ -217,6 +211,10 @@ func (s submissionHandle) Result() <-chan process.Result { return s.result }
 // is still waiting and stopping the guest if it has started.
 func (s submissionHandle) Close() { s.close() }
 
+// Scheduler bounds how many guests run at once. It is a direct.Registry wrapped
+// around another: everything but Spawn passes straight through, and Spawn waits
+// for a worker, bounds the quantum's wall-clock, and hands back a handle the
+// caller cannot tell from an unqueued one.
 type Scheduler[T direct.ProgramID, P any] interface {
 	Add(ctx context.Context, data direct.Data[T]) (direct.Digest, error)
 	Exists(id T) bool
