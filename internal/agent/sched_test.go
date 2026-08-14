@@ -1,4 +1,4 @@
-package sched_test
+package agent_test
 
 import (
 	"context"
@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct/process"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/sched"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
@@ -140,16 +140,16 @@ func (h *handle) settle(r process.Result) {
 	h.once.Do(func() { h.results <- r; close(h.results) })
 }
 
-func newScheduler(t *testing.T, inner *registry, maxConcurrent int) *sched.Scheduler[programID, cred] {
+func newScheduler(t *testing.T, inner *registry, maxConcurrent int) *agent.Scheduler[programID, cred] {
 	t.Helper()
-	s, err := sched.New[programID, cred](inner, sched.Config{MaxConcurrent: maxConcurrent})
+	s, err := agent.New[programID, cred](inner, agent.Config{MaxConcurrent: maxConcurrent})
 	if err != nil {
 		t.Fatalf("new scheduler: %v", err)
 	}
 	return s
 }
 
-func spawn1(t *testing.T, s *sched.Scheduler[programID, cred], id programID, deadline time.Duration) sched.Handle {
+func spawn1(t *testing.T, s *agent.Scheduler[programID, cred], id programID, deadline time.Duration) agent.Handle {
 	t.Helper()
 	h, err := s.Spawn(id, cred{}, deadline, nil)
 	if err != nil {
@@ -172,7 +172,7 @@ func running(t *testing.T, inner *registry, n int) {
 	t.Fatalf("only %d of %d guests started", len(inner.calls()), n)
 }
 
-func await(t *testing.T, h sched.Handle) process.Result {
+func await(t *testing.T, h agent.Handle) process.Result {
 	t.Helper()
 	select {
 	case r := <-h.Result():
@@ -185,7 +185,7 @@ func await(t *testing.T, h sched.Handle) process.Result {
 
 // A registry is required: the scheduler is an adapter, not a standalone queue.
 func TestRegistryRequired(t *testing.T) {
-	if _, err := sched.New[programID, cred](nil, sched.Config{}); err == nil {
+	if _, err := agent.New[programID, cred](nil, agent.Config{}); err == nil {
 		t.Fatal("New(nil) = nil error, want a refusal")
 	}
 }
@@ -240,7 +240,7 @@ func TestEverySubmissionRuns(t *testing.T) {
 	s := newScheduler(t, inner, 1)
 	defer s.Close(context.Background())
 
-	handles := make([]sched.Handle, 0, 3)
+	handles := make([]agent.Handle, 0, 3)
 	for _, id := range []programID{"a", "b", "c"} {
 		handles = append(handles, spawn1(t, s, id, 0))
 	}
@@ -304,7 +304,7 @@ func TestCancelDropsAQueuedSubmission(t *testing.T) {
 
 	queued.Close()
 	result := await(t, queued)
-	if result.Status != process.Stopped || !errors.Is(result.Error, sched.ErrStopped) {
+	if result.Status != process.Stopped || !errors.Is(result.Error, agent.ErrStopped) {
 		t.Fatalf("cancelled submission = %+v, want stopped/ErrStopped", result)
 	}
 	for _, call := range inner.calls() {
@@ -330,10 +330,10 @@ func TestCloseSettlesQueuedWork(t *testing.T) {
 	close(inner.block)
 
 	result := await(t, queued)
-	if result.Status != process.Stopped || !errors.Is(result.Error, sched.ErrClosed) {
+	if result.Status != process.Stopped || !errors.Is(result.Error, agent.ErrClosed) {
 		t.Fatalf("queued at close = %+v, want stopped/ErrClosed", result)
 	}
-	if _, err := s.Spawn("late", cred{}, 0, nil); !errors.Is(err, sched.ErrClosed) {
+	if _, err := s.Spawn("late", cred{}, 0, nil); !errors.Is(err, agent.ErrClosed) {
 		t.Fatalf("spawn after close = %v, want ErrClosed", err)
 	}
 }
@@ -383,7 +383,7 @@ func TestConcurrencyNeverExceedsTheCap(t *testing.T) {
 	s := newScheduler(t, inner, maxConcurrent)
 	defer s.Close(context.Background())
 
-	handles := make([]sched.Handle, 0, 20)
+	handles := make([]agent.Handle, 0, 20)
 	for i := range 20 {
 		handles = append(handles, spawn1(t, s, programID(rune('a'+i)), 0))
 	}

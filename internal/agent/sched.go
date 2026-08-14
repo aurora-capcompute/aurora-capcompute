@@ -1,8 +1,8 @@
-// Package sched bounds how many guests run at once. It is a direct.Registry
+// Package agent Package sched bounds how many guests run at once. It is a direct.Registry
 // wrapped around another: everything but Spawn passes straight through, and
 // Spawn waits for a worker, bounds the quantum's wall-clock, and hands back a
 // handle the caller cannot tell from an unqueued one.
-package sched
+package agent
 
 import (
 	"context"
@@ -31,19 +31,10 @@ type Handle interface {
 	Close()
 }
 
-type Config struct {
-	// Parent is the lifetime every quantum derives from (nil = Background).
-	Parent context.Context
-	// MaxConcurrent bounds simultaneously running quanta. 0 = 1: uniprocessing
-	// is the default posture, concurrency is opt-in. This is a resource bound —
-	// each running quantum holds a live guest — not a fairness knob.
-	MaxConcurrent int
-}
-
-// Scheduler is direct.Registry with a bound on concurrent guests. The bound is
+// schedulerImpl is direct.Registry with a bound on concurrent guests. The bound is
 // the worker count: MaxConcurrent goroutines each run one guest to completion
 // before taking the next, so nothing counts slots and nothing can overrun.
-type Scheduler[T direct.ProgramID, P direct.ProcessEntry] struct {
+type schedulerImpl[T direct.ProgramID, P any] struct {
 	inner    direct.Registry[T, P]
 	tasks    chan submittedTask[T, P]
 	root     context.Context
@@ -53,39 +44,46 @@ type Scheduler[T direct.ProgramID, P direct.ProcessEntry] struct {
 	live sync.WaitGroup
 }
 
-func New[T direct.ProgramID, P direct.ProcessEntry](inner direct.Registry[T, P], config Config) (*Scheduler[T, P], error) {
+func New[T direct.ProgramID, P any](
+	inner direct.Registry[T, P],
+	maxConcurrent int,
+	parent context.Context,
+) (Scheduler[T, P], error) {
 	if inner == nil {
 		return nil, errors.New("sched: a registry is required")
 	}
-	if config.MaxConcurrent <= 0 {
-		config.MaxConcurrent = 1
+	if maxConcurrent <= 0 {
+		maxConcurrent = 1
 	}
-	if config.Parent == nil {
-		config.Parent = context.Background()
+	if parent == nil {
+		parent = context.Background()
 	}
-	root, stopRoot := context.WithCancel(config.Parent)
-	s := &Scheduler[T, P]{
+	root, stopRoot := context.WithCancel(parent)
+	s := &schedulerImpl[T, P]{
 		inner:    inner,
 		tasks:    make(chan submittedTask[T, P]),
 		root:     root,
 		stopRoot: stopRoot,
 	}
-	for range config.MaxConcurrent {
+	for range maxConcurrent {
 		s.live.Go(s.work)
 	}
 	return s, nil
 }
 
-func (s *Scheduler[T, P]) Add(ctx context.Context, data direct.Data[T]) (direct.Digest, error) {
+func (s *schedulerImpl[T, P]) Add(ctx context.Context, data direct.Data[T]) (direct.Digest, error) {
 	return s.inner.Add(ctx, data)
 }
-func (s *Scheduler[T, P]) Exists(id T) bool                    { return s.inner.Exists(id) }
-func (s *Scheduler[T, P]) Get(id T) (direct.View[T], bool)     { return s.inner.Get(id) }
-func (s *Scheduler[T, P]) List() []direct.View[T]              { return s.inner.List() }
-func (s *Scheduler[T, P]) ValidateInput(id T, in string) error { return s.inner.ValidateInput(id, in) }
-func (s *Scheduler[T, P]) ValidateOutput(id T, a string) error { return s.inner.ValidateOutput(id, a) }
-
-func (s *Scheduler[T, P]) Remove(id T) (func(context.Context) error, bool) {
+func (s *schedulerImpl[T, P]) Exists(id T) bool                { return s.inner.Exists(id) }
+func (s *schedulerImpl[T, P]) Get(id T) (direct.View[T], bool) { return s.inner.Get(id) }
+func (s *schedulerImpl[T, P]) List() []direct.View[T]          { return s.inner.List() }
+func (s *schedulerImpl[T, P]) ValidateInput(id T, in string) error {
+	return s.inner.ValidateInput(id, in)
+}
+func (s *schedulerImpl[T, P]) ValidateOutput(id T, a string) error {
+	return s.inner.ValidateOutput(id, a)
+}
+func (s *schedulerImpl[T, P]) Remove(id T) (func(context.Context) error, bool) {
 	return s.inner.Remove(id)
 }
 
@@ -93,9 +91,9 @@ func (s *Scheduler[T, P]) Remove(id T) (func(context.Context) error, bool) {
 // running, waits them out, and closes the registry underneath. Shutdown is the
 // root's cancellation, never the task channel's close, so a Spawn racing Close
 // settles its submission instead of panicking on a closed send. Safe to call
-// more than once, and a cancelled Config.Parent shuts the scheduler down the
+// more than once, and a cancelled Config.Parent shuts the schedulerImpl down the
 // same way.
-func (s *Scheduler[T, P]) Close(ctx context.Context) []error {
+func (s *schedulerImpl[T, P]) Close(ctx context.Context) []error {
 	s.stopRoot()
 	s.live.Wait()
 	return s.inner.Close(ctx)
@@ -107,11 +105,12 @@ func (s *Scheduler[T, P]) Close(ctx context.Context) []error {
 // bounds the quantum's wall-clock once it starts (0 = unbounded) — queue time
 // never counts against it.
 //
-// The quantum's lifetime originates here, hanging off the scheduler's root: no
+// The quantum's lifetime originates here, hanging off the schedulerImpl's root: no
 // caller's context reaches it, so one caller can never cancel work it did not
 // submit. The handle is the only lever.
-func (s *Scheduler[T, P]) Spawn(
+func (s *schedulerImpl[T, P]) Spawn(
 	id T,
+	digest direct.Digest,
 	entry P,
 	deadline time.Duration,
 	mkDispatcher func(context.Context, P) (sys.Dispatcher[P], error),
@@ -126,6 +125,7 @@ func (s *Scheduler[T, P]) Spawn(
 	task := submittedTask[T, P]{
 		ctx:          taskCtx,
 		id:           id,
+		digest:       digest,
 		entry:        entry,
 		deadline:     deadline,
 		mkDispatcher: mkDispatcher,
@@ -156,9 +156,9 @@ func (s *Scheduler[T, P]) Spawn(
 	return submissionHandle{result: task.result, close: stop}, nil
 }
 
-// work runs one guest at a time, for as long as the scheduler is open. The
+// work runs one guest at a time, for as long as the schedulerImpl is open. The
 // number of these is the concurrency bound.
-func (s *Scheduler[T, P]) work() {
+func (s *schedulerImpl[T, P]) work() {
 	for {
 		select {
 		case task := <-s.tasks:
@@ -169,7 +169,7 @@ func (s *Scheduler[T, P]) work() {
 	}
 }
 
-func (s *Scheduler[T, P]) run(task submittedTask[T, P]) {
+func (s *schedulerImpl[T, P]) run(task submittedTask[T, P]) {
 	// The worker is held, so the wall-clock bound starts now: queue time never
 	// counts against a guest's deadline. A zero deadline is the host's opt-out
 	// (Config.MaxQuantumDuration negative) and must stay unbounded — a zero
@@ -180,7 +180,8 @@ func (s *Scheduler[T, P]) run(task submittedTask[T, P]) {
 	}
 	defer done()
 
-	handle, err := s.inner.Spawn(quantum, task.id, task.entry, task.mkDispatcher)
+	// FIXME: there should come digest maybe
+	handle, err := s.inner.Spawn(quantum, task.id, task.digest, task.entry, task.mkDispatcher)
 	if err != nil {
 		task.settle(process.Result{Status: process.Failed, Error: err})
 		return
@@ -188,10 +189,11 @@ func (s *Scheduler[T, P]) run(task submittedTask[T, P]) {
 	task.settle(<-handle.Result())
 }
 
-type submittedTask[T direct.ProgramID, P direct.ProcessEntry] struct {
+type submittedTask[T direct.ProgramID, P any] struct {
 	ctx          context.Context
 	id           T
 	entry        P
+	digest       direct.Digest
 	deadline     time.Duration
 	mkDispatcher func(context.Context, P) (sys.Dispatcher[P], error)
 	result       chan process.Result
@@ -214,3 +216,21 @@ func (s submissionHandle) Result() <-chan process.Result { return s.result }
 // Close is idempotent: it cancels the submission's lifetime, dropping it if it
 // is still waiting and stopping the guest if it has started.
 func (s submissionHandle) Close() { s.close() }
+
+type Scheduler[T direct.ProgramID, P any] interface {
+	Add(ctx context.Context, data direct.Data[T]) (direct.Digest, error)
+	Exists(id T) bool
+	Get(id T) (direct.View[T], bool)
+	List() []direct.View[T]
+	ValidateInput(id T, in string) error
+	ValidateOutput(id T, a string) error
+	Remove(id T) (func(context.Context) error, bool)
+	Close(ctx context.Context) []error
+	Spawn(
+		id T,
+		digest direct.Digest,
+		entry P,
+		deadline time.Duration,
+		mkDispatcher func(context.Context, P) (sys.Dispatcher[P], error),
+	) (Handle, error)
+}

@@ -24,11 +24,6 @@ type ProgramID interface {
 	fmt.Stringer
 }
 
-type ProcessEntry interface {
-	ArtifactDigest() string
-	SourceCodeDigest() string
-}
-
 type Data[T ProgramID] struct {
 	ID          T
 	SourceCode  []byte
@@ -181,7 +176,7 @@ func compileDocument(what string, raw json.RawMessage) (*jsonschema.Schema, erro
 	return schema, nil
 }
 
-type Registry[T ProgramID, P ProcessEntry] interface {
+type Registry[T ProgramID, P any] interface {
 	Add(ctx context.Context, data Data[T]) (Digest, error)
 	Exists(id T) bool
 	Get(id T) (View[T], bool)
@@ -194,16 +189,16 @@ type Registry[T ProgramID, P ProcessEntry] interface {
 	ValidateInput(id T, input string) error
 	ValidateOutput(id T, answer string) error
 	Close(ctx context.Context) []error
-	Spawn(ctx context.Context, id T, processEntry P, mkDispatcher func(context.Context, P) (sys.Dispatcher[P], error)) (process.Handle, error)
+	Spawn(ctx context.Context, id T, digest Digest, processEntry P, mkDispatcher func(context.Context, P) (sys.Dispatcher[P], error)) (process.Handle, error)
 }
 
-type registryImpl[T ProgramID, P ProcessEntry] struct {
+type registryImpl[T ProgramID, P any] struct {
 	mu       sync.RWMutex
 	programs map[T]artifact[T]
 	compiler compiler.Compiler
 }
 
-func NewRegistry[T ProgramID, P ProcessEntry](memoryPages uint32) Registry[T, P] {
+func NewRegistry[T ProgramID, P any](memoryPages uint32) Registry[T, P] {
 	return &registryImpl[T, P]{programs: make(map[T]artifact[T]), compiler: compiler.New(memoryPages)}
 }
 
@@ -296,11 +291,11 @@ func (a *registryImpl[T, P]) Close(ctx context.Context) []error {
 	return errors
 }
 
-func (a *registryImpl[T, P]) Spawn(ctx context.Context, id T, processEntry P, mkDispatcher func(context.Context, P) (sys.Dispatcher[P], error)) (process.Handle, error) {
+func (a *registryImpl[T, P]) Spawn(ctx context.Context, id T, digest Digest, processEntry P, mkDispatcher func(context.Context, P) (sys.Dispatcher[P], error)) (process.Handle, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if art, ok := a.programs[id]; ok {
-		if art.ArtifactDigest != processEntry.ArtifactDigest() || art.SourceCodeDigest != processEntry.SourceCodeDigest() {
+		if art.ArtifactDigest != digest.ArtifactDigest || art.SourceCodeDigest != digest.SourceCodeDigest {
 			return nil, fmt.Errorf("digest for program %s don't match", id.String())
 		}
 		return process.Spawn[P](ctx, processEntry, art.Image, mkDispatcher)

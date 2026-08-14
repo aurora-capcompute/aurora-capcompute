@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/sched"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/aurora-capcompute/monitor"
 	"github.com/aurora-capcompute/aurora-capcompute/replay"
@@ -258,12 +257,11 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 	if maxConcurrent <= 0 {
 		maxConcurrent = defaultMaxConcurrentProcesses
 	}
-	runtime.images, err = sched.New(direct.NewRegistry[ProgramID, ProcessContext](memoryPages), sched.Config{
-		// Quanta hang off the runtime's own lifetime rather than a root the queue
-		// invents, so shutdown has one tree to cancel and not two.
-		Parent:        baseCtx,
-		MaxConcurrent: maxConcurrent,
-	})
+	runtime.scheduler, err = New(
+		direct.NewRegistry[ProgramID, ProcessContext](memoryPages),
+		maxConcurrent,
+		baseCtx,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -330,13 +328,13 @@ func (r *Runtime) wrapProtocol(cred ProcessContext, next sys.Dispatcher[ProcessC
 		spec,
 		attempt,
 		func(answer string) error {
-			return r.images.ValidateOutput(ProgramID(spec.Program), answer)
+			return r.scheduler.ValidateOutput(ProgramID(spec.Program), answer)
 		},
 	), nil
 }
 
 func (r *Runtime) programBinding(proc *processState) error {
-	program, ok := r.images.Get(ProgramID(proc.manifest.Program))
+	program, ok := r.scheduler.Get(ProgramID(proc.manifest.Program))
 	if !ok {
 		return fmt.Errorf("program %q is not loaded", proc.manifest.Program)
 	}
@@ -391,12 +389,12 @@ func (r *Runtime) Header(cred ProcessContext) journaled.Header {
 // live process, because processes are immutably bound to the (name, identity)
 // they were created from; the withdrawal is what settles them.
 func (r *Runtime) AddProgram(ctx context.Context, data ProgramData) error {
-	if r.images.Exists(data.ID) {
+	if r.scheduler.Exists(data.ID) {
 		if err := r.RemoveProgram(ctx, string(data.ID)); err != nil {
 			return err
 		}
 	}
-	if _, err := r.images.Add(ctx, data); err != nil {
+	if _, err := r.scheduler.Add(ctx, data); err != nil {
 		return err
 	}
 	// A Close that raced this registration has already drained the registry, so
@@ -406,7 +404,7 @@ func (r *Runtime) AddProgram(ctx context.Context, data ProgramData) error {
 	closed := r.closed
 	r.mu.Unlock()
 	if closed {
-		if release, ok := r.images.Remove(data.ID); ok {
+		if release, ok := r.scheduler.Remove(data.ID); ok {
 			_ = release(context.Background())
 		}
 		return fmt.Errorf("%w: runtime is closed", errs.Conflict)
@@ -426,7 +424,7 @@ func (r *Runtime) AddProgram(ctx context.Context, data ProgramData) error {
 // changed program.
 func (r *Runtime) RemoveProgram(ctx context.Context, id string) error {
 	id = strings.TrimSpace(id)
-	release, ok := r.images.Remove(ProgramID(id))
+	release, ok := r.scheduler.Remove(ProgramID(id))
 	if !ok {
 		return fmt.Errorf("%w: program %q is not registered", errs.NotFound, id)
 	}
@@ -585,7 +583,7 @@ func (r *Runtime) ListSessions() []SessionSummary {
 }
 
 func (r *Runtime) Programs() []Program {
-	return r.images.List()
+	return r.scheduler.List()
 }
 
 func (r *Runtime) GetSession(sessionID string) (SessionSnapshot, error) {
@@ -628,11 +626,11 @@ func (r *Runtime) CreateProcess(sessionID string, input string, spec manifest.Ma
 			spec.Syscalls[i].Hidden = true
 		}
 	}
-	program, ok := r.images.Get(ProgramID(spec.Program))
+	program, ok := r.scheduler.Get(ProgramID(spec.Program))
 	if !ok {
 		return ProcessSnapshot{}, fmt.Errorf("%w: program %q is not registered", errs.Invalid, spec.Program)
 	}
-	if err := r.images.ValidateInput(program.ID, input); err != nil {
+	if err := r.scheduler.ValidateInput(program.ID, input); err != nil {
 		return ProcessSnapshot{}, err
 	}
 	processID, err := r.idSource("proc_")
@@ -693,7 +691,7 @@ func (r *Runtime) CreateProcess(sessionID string, input string, spec manifest.Ma
 	r.mu.Unlock()
 
 	r.publish(sessionID, Event{Type: "process.updated", Data: snapshot})
-	go r.execute(context.Background(), processID)
+	go r.execute(processID)
 	return snapshot, nil
 }
 
@@ -954,7 +952,7 @@ func (r *Runtime) relaunchLocked(ctx context.Context, proc *processState) (Proce
 	r.mu.Unlock()
 
 	r.publish(sessionID, Event{Type: "process.updated", Data: snapshot})
-	go r.execute(ctx, processID)
+	go r.execute(processID)
 	return snapshot, nil
 }
 
@@ -1043,5 +1041,5 @@ func (r *Runtime) Close(ctx context.Context) error {
 
 	// Closing the registry drains the queue, waits out the running quanta, and
 	// releases every compiled image.
-	return errors.Join(r.images.Close(context.Background())...)
+	return errors.Join(r.scheduler.Close(context.Background())...)
 }

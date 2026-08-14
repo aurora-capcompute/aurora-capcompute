@@ -53,7 +53,7 @@ func TestSpawnRefusalReachesTheCaller(t *testing.T) {
 		ProcessID: "p1",
 		Revision:  1,
 	}
-	handle, err := runtime.images.Spawn(
+	handle, err := runtime.scheduler.Spawn(
 		ProgramID("unloaded@1"), cred, 0, runtime.factory.NewDispatcher)
 	if err != nil {
 		t.Fatalf("spawn: %v", err)

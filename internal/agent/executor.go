@@ -9,11 +9,10 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct/process"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/sched"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 )
 
-func (r *Runtime) execute(ctx context.Context, processID string) {
+func (r *Runtime) execute(processID string) {
 	defer r.wg.Done()
 
 	r.mu.Lock()
@@ -49,18 +48,9 @@ func (r *Runtime) execute(ctx context.Context, processID string) {
 	deadline := proc.deadline
 	r.mu.Unlock()
 
-	// A process is an audit target: it never runs under program bytes or an
-	// interface that changed underneath it. direct re-checks the same identity
-	// when it instantiates — after the slot is taken, which is what makes a
-	// program withdrawn while this sat in the queue fail rather than run.
-	if err := r.programBinding(proc); err != nil {
-		r.failProcess(processID, err)
-		return
-	}
-
-	handle, err := r.images.Spawn(program, cred, deadline, r.factory.NewDispatcher)
+	handle, err := r.scheduler.Spawn(program, cred.Digest, cred, deadline, r.factory.NewDispatcher)
 	if err != nil {
-		if errors.Is(err, sched.ErrClosed) {
+		if errors.Is(err, ErrClosed) {
 			r.finish(processID, durable.ProcessInterrupted, "", err)
 		} else {
 			r.failProcess(processID, err)

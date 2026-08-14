@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/sched"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/aurora-capcompute/monitor"
 	"github.com/aurora-capcompute/capcompute/sys"
@@ -110,7 +109,7 @@ type Runtime struct {
 	// complete on shutdown to persist final state.
 	baseCtx         context.Context
 	cancel          context.CancelFunc
-	images          *sched.Scheduler[ProgramID, ProcessContext]
+	scheduler       Scheduler[ProgramID, ProcessContext]
 	taints          *monitor.Taints[processKey]
 	log             eventlog.Log
 	leases          Leases
