@@ -50,10 +50,7 @@ func (d *Dispatcher[K]) Dispatch(ctx context.Context, cred K, syscall sys.Syscal
 	scope := d.Scope(cred)
 	// The replay layer appends the intent before delegating, so the syscall's
 	// journal position is the current tail.
-	position := d.Journal.Length() - 1
-	if position < 0 {
-		position = 0
-	}
+	position := max(d.Journal.Length()-1, 0)
 	callHash := HashCall(syscall)
 	record, found, err := d.Store.Find(ctx, scope, position, callHash)
 	if err != nil {
