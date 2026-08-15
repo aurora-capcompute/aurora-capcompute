@@ -254,3 +254,57 @@ func (f nextFuncDispatcher) Dispatch(ctx context.Context, _ testPID, syscall sys
 	return f(ctx, syscall)
 }
 func (nextFuncDispatcher) Capabilities() []sys.Capability { return flowCaps }
+
+// adtDriver serves one capability that declares an ADT, so the monitor has a
+// per-case policy to resolve.
+type adtDriver struct{ capability sys.Capability }
+
+func (d adtDriver) Dispatch(_ context.Context, _ testPID, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
+	return sys.Result(json.RawMessage(`{"from":"` + syscall.Name + `"}`)), nil
+}
+
+func (d adtDriver) Capabilities() []sys.Capability { return []sys.Capability{d.capability} }
+
+func adtCall(t *testing.T, d sys.Dispatcher[testPID], operation string) sys.SyscallResult {
+	t.Helper()
+	result, err := d.Dispatch(context.Background(), testPID{id: "p1"}, sys.Syscall{
+		Abi:  sys.ABIVersion,
+		Name: "core.filesystem",
+		Args: json.RawMessage(`{"operation":"` + operation + `"}`),
+	}, sys.Authorization{})
+	if err != nil {
+		t.Fatalf("dispatch %s: %v", operation, err)
+	}
+	return result
+}
+
+// Per-operation flow policy: a capability with an ADT carries its labels and its
+// sink guard per case, and the monitor resolves the case from the call's
+// arguments. This is where filesystem's own sink-guard and label tests moved to
+// when enforcement left the driver.
+func TestPerOperationFlowPolicy(t *testing.T) {
+	driver := adtDriver{capability: sys.Capability{
+		Name:          "core.filesystem",
+		Discriminator: "operation",
+		Operations: []sys.Operation{
+			{Name: "read", Labels: []string{"untrusted_file"}},
+			{Name: "write", Forbid: []string{"untrusted_file"}},
+		},
+	}}
+	chain := NewFlowMonitor(NewTaints[string](), NewLabeler[testPID](driver))
+
+	// A read stamps its own source class and taints the run.
+	result := adtCall(t, chain, "read")
+	if !slices.Contains(result.Labels(), "untrusted_file") {
+		t.Fatalf("labels = %v, want the read's own source class", result.Labels())
+	}
+
+	// The write forbids what the read produced, so it is refused — while the
+	// read, which forbids nothing, still is not.
+	if blocked := adtCall(t, chain, "write"); blocked.Errno() != sys.ErrnoDenied {
+		t.Fatalf("errno = %v, want denied by the write's sink guard", blocked.Errno())
+	}
+	if again := adtCall(t, chain, "read"); again.Status() != sys.StatusResult {
+		t.Fatalf("read after taint = %v, want it still permitted", again.Status())
+	}
+}

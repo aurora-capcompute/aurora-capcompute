@@ -37,6 +37,11 @@ func (l *Labeler[K]) Dispatch(ctx context.Context, cred K, syscall sys.Syscall, 
 	labels := []string{sys.SyscallLabelPrefix + syscall.Name}
 	if capability, ok := sys.FindCapability(l.next.Capabilities(), syscall.Name); ok {
 		labels = append(labels, capability.Labels...)
+		// A capability with an ADT declares its source classes per case: a
+		// filesystem read over a secrets root labels differently from a list.
+		if operation, ok := capability.FindOperation(syscall.Args); ok {
+			labels = append(labels, operation.Labels...)
+		}
 	}
 	return result.WithLabels(labels...), nil
 }
@@ -153,10 +158,20 @@ func (m *FlowMonitor[ID, K]) Dispatch(ctx context.Context, cred K, syscall sys.S
 	}
 
 	pid := cred.PID()
-	if capability, ok := sys.FindCapability(m.next.Capabilities(), syscall.Name); ok && len(capability.Forbid) > 0 {
-		if tainted := m.taints.intersection(pid, capability.Forbid); len(tainted) > 0 {
+	if capability, ok := sys.FindCapability(m.next.Capabilities(), syscall.Name); ok {
+		// The sink guard is per case where the capability has an ADT: a GET may
+		// carry what a POST to the same host may not. The capability-level set
+		// still applies to every case, so a family-wide bar cannot be escaped by
+		// declaring an operation that omits it.
+		forbid := capability.Forbid
+		sink := syscall.Name
+		if operation, ok := capability.FindOperation(syscall.Args); ok {
+			forbid = append(append([]string(nil), forbid...), operation.Forbid...)
+			sink = syscall.Name + "/" + operation.Name
+		}
+		if tainted := m.taints.intersection(pid, forbid); len(tainted) > 0 {
 			return sys.FailCode(sys.ErrnoDenied, fmt.Sprintf(
-				"flow policy: this run has observed %v, which may not flow into %q", tainted, syscall.Name)), nil
+				"flow policy: this run has observed %v, which may not flow into %q", tainted, sink)), nil
 		}
 	}
 
