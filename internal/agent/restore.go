@@ -29,7 +29,7 @@ func (r *Runtime) restore(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		journals, histories, err := foldJournals(events, r.log, scope, r.journalNow, r.journalAppendPublisher(scope.SessionID))
+		journals, histories, err := foldJournals(events, r.log, scope, r.journalNow)
 		if err != nil {
 			return err
 		}

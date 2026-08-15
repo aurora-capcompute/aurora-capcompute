@@ -80,7 +80,7 @@ func (r *Runtime) SessionGraph(sessionID string) (SessionGraph, error) {
 	// position's writing revision, so keeping only the entries a revision
 	// wrote itself unions to the all-revisions set with no duplicates —
 	// abandoned branches included.
-	journals, _, err := foldJournals(events, r.log, scope, r.journalNow, r.journalAppendPublisher(sessionID))
+	journals, _, err := foldJournals(events, r.log, scope, r.journalNow)
 	if err != nil {
 		return SessionGraph{}, err
 	}

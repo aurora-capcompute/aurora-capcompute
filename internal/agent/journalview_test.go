@@ -37,7 +37,7 @@ func TestLogJournalLinearRoundTrip(t *testing.T) {
 	log := newMemLog()
 	scope := eventlog.Scope{TenantID: "t", SessionID: "th"}
 	now := func() time.Time { return time.Unix(0, 0).UTC() }
-	j := newLogJournal(log, scope, "proc1", 1, newProcessHistory(), 0, now, nil)
+	j := newLogJournal(log, scope, "proc1", 1, newProcessHistory(), 0, now)
 
 	for _, n := range []string{"a", "b", "c"} {
 		syscall, result := pair(n, n)
@@ -53,7 +53,7 @@ func TestLogJournalLinearRoundTrip(t *testing.T) {
 
 	// Rebuild purely from the event stream and confirm identical records.
 	events, _ := log.Read(context.Background(), scope, 0)
-	journals, _, err := foldJournals(events, log, scope, now, nil)
+	journals, _, err := foldJournals(events, log, scope, now)
 	if err != nil {
 		t.Fatalf("fold journals: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestLogJournalRoundTripsHTMLCharactersVerbatim(t *testing.T) {
 	log := newMemLog()
 	scope := eventlog.Scope{TenantID: "t", SessionID: "th"}
 	now := func() time.Time { return time.Unix(0, 0).UTC() }
-	j := newLogJournal(log, scope, "proc1", 1, newProcessHistory(), 0, now, nil)
+	j := newLogJournal(log, scope, "proc1", 1, newProcessHistory(), 0, now)
 
 	args := []byte(`{"prompt":"reply with <exact tool name> & schema"}`)
 	syscall := sys.Syscall{Abi: sys.ABIVersion, Name: "core.openaiApi", Args: append([]byte(nil), args...)}
@@ -87,7 +87,7 @@ func TestLogJournalRoundTripsHTMLCharactersVerbatim(t *testing.T) {
 	appendPair(t, j, syscall, result)
 
 	events, _ := log.Read(context.Background(), scope, 0)
-	journals, _, err := foldJournals(events, log, scope, now, nil)
+	journals, _, err := foldJournals(events, log, scope, now)
 	if err != nil {
 		t.Fatalf("fold journals: %v", err)
 	}
@@ -117,14 +117,14 @@ func TestLogJournalForkSharesPrefixThenDiverges(t *testing.T) {
 	now := func() time.Time { return time.Unix(0, 0).UTC() }
 	history := newProcessHistory()
 
-	base := newLogJournal(log, scope, "proc1", 1, history, 0, now, nil)
+	base := newLogJournal(log, scope, "proc1", 1, history, 0, now)
 	for _, n := range []string{"a", "b", "c"} {
 		syscall, result := pair(n, n)
 		appendPair(t, base, syscall, result)
 	}
 	// Create rev 2 sharing the first two pairs [a, b] (forkOffset=4 records),
 	// then append a different third pair.
-	child := newLogJournal(log, scope, "proc1", 2, history, 4, now, nil)
+	child := newLogJournal(log, scope, "proc1", 2, history, 4, now)
 	if child.Length() != 4 {
 		t.Fatalf("forked length = %d, want 4 (shared prefix records)", child.Length())
 	}
@@ -149,7 +149,7 @@ func TestLogJournalForkSharesPrefixThenDiverges(t *testing.T) {
 
 	// Rebuild both revisions from the stream.
 	events, _ := log.Read(context.Background(), scope, 0)
-	journals, _, err := foldJournals(events, log, scope, now, nil)
+	journals, _, err := foldJournals(events, log, scope, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +167,7 @@ func TestLogJournalBacksTheKernelTape(t *testing.T) {
 	log := newMemLog()
 	scope := eventlog.Scope{TenantID: "t", SessionID: "th"}
 	now := func() time.Time { return time.Unix(0, 0).UTC() }
-	j := newLogJournal(log, scope, "proc1", 1, newProcessHistory(), 0, now, nil)
+	j := newLogJournal(log, scope, "proc1", 1, newProcessHistory(), 0, now)
 
 	tape, err := journaled.NewTape(j, testHeader())
 	if err != nil {
@@ -209,7 +209,7 @@ func TestLogJournalOpenIntentEntry(t *testing.T) {
 	log := newMemLog()
 	scope := eventlog.Scope{TenantID: "t", SessionID: "th"}
 	now := func() time.Time { return time.Unix(0, 0).UTC() }
-	j := newLogJournal(log, scope, "proc1", 1, newProcessHistory(), 0, now, nil)
+	j := newLogJournal(log, scope, "proc1", 1, newProcessHistory(), 0, now)
 
 	syscall, result := pair("a", "a")
 	appendPair(t, j, syscall, result)

@@ -184,12 +184,11 @@ func copyRecord(rec journaled.Record) journaled.Record {
 // Hash-chain integrity holds across the fork: a record appended at forkOffset
 // chains from the shared prefix's tail record, which Load serves verbatim.
 type logJournal struct {
-	log      eventlog.Log
-	scope    eventlog.Scope
-	proc     string
-	rev      uint64
-	now      func() time.Time
-	onAppend func(proc string, revision uint64, rec journaled.Record, syscallName string)
+	log   eventlog.Log
+	scope eventlog.Scope
+	proc  string
+	rev   uint64
+	now   func() time.Time
 
 	history    *processHistory
 	forkOffset int // positions [0, forkOffset) come from history
@@ -206,12 +205,11 @@ func newLogJournal(
 	history *processHistory,
 	forkOffset int,
 	now func() time.Time,
-	onAppend func(string, uint64, journaled.Record, string),
 ) *logJournal {
 	return &logJournal{
 		log: log, scope: scope, proc: proc, rev: rev,
 		history: history, forkOffset: forkOffset,
-		now: now, onAppend: onAppend,
+		now: now,
 	}
 }
 
@@ -298,11 +296,7 @@ func (j *logJournal) Append(rec journaled.Record) error {
 	}
 	j.records = append(j.records, stored)
 	j.history.add(rec.Position, j.rev, stored) // update shared history while still holding j.mu
-	name := j.syscallNameLocked(stored)
 	j.mu.Unlock()
-	if j.onAppend != nil {
-		j.onAppend(j.proc, j.rev, stored, name)
-	}
 	return nil
 }
 
@@ -436,7 +430,6 @@ func foldJournals(
 	log eventlog.Log,
 	scope eventlog.Scope,
 	now func() time.Time,
-	onAppend func(string, uint64, journaled.Record, string),
 ) (map[string]map[uint64]*logJournal, map[string]*processHistory, error) {
 	histories := map[string]*processHistory{}
 	revData := map[string]map[uint64][]journaled.Record{} // process → rev → records (in log order)
@@ -479,7 +472,7 @@ func foldJournals(
 			if len(records) > 0 {
 				forkOffset = records[0].Position
 			}
-			j := newLogJournal(log, scope, proc, rev, history, forkOffset, now, onAppend)
+			j := newLogJournal(log, scope, proc, rev, history, forkOffset, now)
 			j.records = append(j.records, records...)
 			result[proc][rev] = j
 		}

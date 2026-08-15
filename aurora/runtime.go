@@ -22,6 +22,8 @@ type Runtime interface {
 	ResolveTask(taskID string, token string, resolution Resolution) (TaskSnapshot, error)
 	Stop(processID string) (ProcessSnapshot, error)
 	Retry(processID string, mode RetryMode) (ProcessSnapshot, error)
-	Subscribe(sessionID string) (Event, <-chan Event, func(), error)
+	// Subscribe follows a session's durable stream from now on; the events are
+	// the log's own. The history before the call is read from the log itself.
+	Subscribe(sessionID string) (<-chan LogEvent, func(), error)
 	Close(ctx context.Context) error
 }

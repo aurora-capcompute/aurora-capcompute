@@ -11,6 +11,7 @@
 package durable
 
 import (
+	"maps"
 	"strings"
 	"time"
 
@@ -117,8 +118,6 @@ func CloneTags(tags map[string]string) map[string]string {
 		return nil
 	}
 	out := make(map[string]string, len(tags))
-	for k, v := range tags {
-		out[k] = v
-	}
+	maps.Copy(out, tags)
 	return out
 }

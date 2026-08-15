@@ -32,6 +32,7 @@ import (
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/errs"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
 	internalhost "github.com/aurora-capcompute/aurora-capcompute/internal/agent/host"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
@@ -188,7 +189,6 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		tenantID:        strings.TrimSpace(config.TenantID),
 		sessions:        make(map[string]*sessionState),
 		processes:       make(map[string]*processState),
-		subscribers:     make(map[string]map[uint64]chan Event),
 		idSource:        config.IDSource,
 		now:             config.Now,
 		eventSize:       config.EventSize,
@@ -209,10 +209,14 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 	if runtime.now == nil {
 		runtime.now = time.Now
 	}
-	runtime.tasks = newEventTaskStore(runtime.log, runtime.now)
 	if runtime.eventSize <= 0 {
 		runtime.eventSize = 32
 	}
+	// Everything below writes through the tap, so a subscription needs no wiring
+	// of its own: it sees a session's stream because that is where the writes go.
+	runtime.subs = newSubscriptions(runtime.eventSize)
+	runtime.log = &tappedLog{Log: runtime.log, subs: runtime.subs}
+	runtime.tasks = newEventTaskStore(runtime.log, runtime.now)
 	if runtime.taskTTL <= 0 {
 		runtime.taskTTL = 24 * time.Hour
 	}
@@ -242,12 +246,6 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		Wrap:        runtime.wrapProtocol,
 		OpenIntents: openIntentPolicy(config.NonIdempotentSyscalls),
 		Now:         runtime.now,
-		OnTaskCreated: func(record task.Record) {
-			runtime.publish(record.Scope.SessionID, Event{
-				Type: "task.created",
-				Data: runtime.taskSnapshot(record),
-			})
-		},
 	})
 	if err != nil {
 		return nil, err
@@ -294,7 +292,7 @@ func (r *Runtime) Drivers(resolveCtx context.Context, cred ProcessContext) (sys.
 		// yield becomes a durable timer task.
 		base = newTimerDispatcher(base, grant)
 	}
-	return newProgressDispatcher(base, r.publish, cred.SessionID, cred.ProcessID), nil
+	return newProgressDispatcher(base), nil
 }
 
 // wrapProtocol stacks the runtime's protocol layers above the task layer: the
@@ -693,7 +691,6 @@ func (r *Runtime) CreateProcess(sessionID string, input string, spec manifest.Ma
 	r.enrollLocked()
 	r.mu.Unlock()
 
-	r.publish(sessionID, Event{Type: "process.updated", Data: snapshot})
 	go r.execute(processID)
 	return snapshot, nil
 }
@@ -746,7 +743,7 @@ func (r *Runtime) JournalRevisions(processID string) (map[uint64][]JournalEntry,
 	result := make(map[uint64][]JournalEntry, len(revs))
 	for _, rev := range revs {
 		view := newLogJournal(journal.log, journal.scope, journal.proc, rev,
-			journal.history, journal.history.lengthAt(rev), journal.now, nil)
+			journal.history, journal.history.lengthAt(rev), journal.now)
 		entries, err := view.entries()
 		if err != nil {
 			return nil, err
@@ -802,7 +799,6 @@ func (r *Runtime) ResolveTask(taskID, token string, resolution task.Resolution) 
 	if err != nil {
 		return TaskSnapshot{}, err
 	}
-	r.publish(record.Scope.SessionID, Event{Type: "task.updated", Data: r.taskSnapshot(record)})
 
 	r.mu.Lock()
 	proc := r.processes[record.Scope.ProcessID]
@@ -841,10 +837,9 @@ func (r *Runtime) Stop(processID string) (ProcessSnapshot, error) {
 		r.mu.Unlock()
 		return ProcessSnapshot{}, fmt.Errorf("%w: process %s cannot be stopped from %s", errs.Conflict, processID, proc.status)
 	}
-	snapshot := r.processSnapshotLocked(proc)
 	_ = r.appendProcess(proc)
+	snapshot := r.processSnapshotLocked(proc)
 	r.mu.Unlock()
-	r.publish(proc.sessionID, Event{Type: "process.updated", Data: snapshot})
 	return snapshot, nil
 }
 
@@ -956,11 +951,10 @@ func (r *Runtime) relaunchLocked(proc *processState) (ProcessSnapshot, error) {
 		return ProcessSnapshot{}, err
 	}
 	snapshot := r.processSnapshotLocked(proc)
-	sessionID, processID := proc.sessionID, proc.id
+	processID := proc.id
 	r.enrollLocked()
 	r.mu.Unlock()
 
-	r.publish(sessionID, Event{Type: "process.updated", Data: snapshot})
 	go r.execute(processID)
 	return snapshot, nil
 }
@@ -982,36 +976,24 @@ func (r *Runtime) forkJournalLocked(proc *processState, forkOffset int) {
 	proc.journal = newLogJournal(
 		parent.log, parent.scope, parent.proc, proc.revision,
 		parent.history, forkOffset,
-		parent.now, parent.onAppend,
+		parent.now,
 	)
 }
 
-func (r *Runtime) Subscribe(sessionID string) (Event, <-chan Event, func(), error) {
+// Subscribe follows a session's durable stream from now on. The events are the
+// log's own — a subscriber that wants the history before it arrived reads the
+// stream, which is the same thing restore reads. Today the tap forwards only
+// the guest's sys.log reports; see subscriberVisible.
+func (r *Runtime) Subscribe(sessionID string) (<-chan eventlog.Event, func(), error) {
 	r.mu.Lock()
 	session := r.sessions[sessionID]
-	if session == nil {
-		r.mu.Unlock()
-		return Event{}, nil, nil, fmt.Errorf("%w: session %s", errs.NotFound, sessionID)
-	}
-	r.nextSubID++
-	id := r.nextSubID
-	ch := make(chan Event, r.eventSize)
-	if r.subscribers[sessionID] == nil {
-		r.subscribers[sessionID] = make(map[uint64]chan Event)
-	}
-	r.subscribers[sessionID][id] = ch
-	snapshot := Event{Type: "snapshot", Data: r.sessionSnapshotLocked(session)}
 	r.mu.Unlock()
-
-	var once sync.Once
-	unsubscribe := func() {
-		once.Do(func() {
-			r.mu.Lock()
-			delete(r.subscribers[sessionID], id)
-			r.mu.Unlock()
-		})
+	if session == nil {
+		return nil, nil, fmt.Errorf("%w: session %s", errs.NotFound, sessionID)
 	}
-	return snapshot, ch, unsubscribe, nil
+	id, ch := r.subs.add(sessionID)
+	var once sync.Once
+	return ch, func() { once.Do(func() { r.subs.remove(sessionID, id) }) }, nil
 }
 
 func (r *Runtime) Close(ctx context.Context) error {

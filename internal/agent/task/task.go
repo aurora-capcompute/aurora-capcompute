@@ -86,14 +86,13 @@ var (
 // task's identity within the process revision — a resumed process re-reaches the same
 // position and finds the same task.
 type Dispatcher[K any] struct {
-	Next          sys.Dispatcher[K]
-	Store         Store
-	Journal       journaled.Journal
-	Scope         func(K) Scope
-	Now           func() time.Time
-	TokenSecret   []byte
-	TaskTTL       time.Duration
-	OnTaskCreated func(Record)
+	Next        sys.Dispatcher[K]
+	Store       Store
+	Journal     journaled.Journal
+	Scope       func(K) Scope
+	Now         func() time.Time
+	TokenSecret []byte
+	TaskTTL     time.Duration
 }
 
 func (d *Dispatcher[K]) Dispatch(ctx context.Context, cred K, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
@@ -142,9 +141,6 @@ func (d *Dispatcher[K]) Dispatch(ctx context.Context, cred K, syscall sys.Syscal
 	StampToken(&record, d.TokenSecret)
 	if err := d.Store.Create(ctx, record); err != nil {
 		return sys.SyscallResult{}, err
-	}
-	if d.OnTaskCreated != nil {
-		d.OnTaskCreated(record)
 	}
 	return sys.Yield(record.ID), nil
 }

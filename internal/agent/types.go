@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct"
-	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/aurora-capcompute/monitor"
 	"github.com/aurora-capcompute/capcompute/sys"
 
@@ -117,8 +116,6 @@ type Runtime struct {
 	tenantID        string
 	sessions        map[string]*sessionState
 	processes       map[string]*processState
-	subscribers     map[string]map[uint64]chan Event
-	nextSubID       uint64
 	idSource        func(string) (string, error)
 	now             func() time.Time
 	eventSize       int
@@ -133,6 +130,11 @@ type Runtime struct {
 	factory         *internalhost.Factory[processKey, ProcessContext]
 	wg              sync.WaitGroup
 	closed          bool
+
+	// subs is the watcher side of the durable log: it holds no runtime state and
+	// takes no runtime lock, because a subscription is a tap on the stream
+	// rather than a second channel to keep in step with it.
+	subs *subscriptions
 }
 
 type sessionState struct {
@@ -349,19 +351,4 @@ type JournalOutcome struct {
 	Result  json.RawMessage   `json:"result,omitempty"`
 	Message string            `json:"message,omitempty"`
 	Labels  []string          `json:"labels,omitempty"`
-}
-
-type Event struct {
-	Type string
-	Data any
-}
-
-type JournalEvent struct {
-	ProcessID     string
-	Position      int
-	Revision      uint64
-	Kind          journaled.Kind
-	Syscall       string
-	OutcomeStatus sys.SyscallStatus
-	OutcomeSize   int
 }

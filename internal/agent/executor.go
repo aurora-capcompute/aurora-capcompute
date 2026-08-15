@@ -4,12 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct/process"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
-	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 )
 
 func (r *Runtime) execute(processID string) {
@@ -76,11 +73,8 @@ func (r *Runtime) execute(processID string) {
 	proc.startedAt = &now
 	proc.updatedAt = now
 	stopRequested := proc.stopRequested
-	snapshot := r.processSnapshotLocked(proc)
-	sessionID := proc.sessionID
 	_ = r.appendProcess(proc)
 	r.mu.Unlock()
-	r.publish(sessionID, Event{Type: "process.updated", Data: snapshot})
 	if stopRequested {
 		stop()
 	}
@@ -137,17 +131,13 @@ func (r *Runtime) execute(processID string) {
 
 func (r *Runtime) finish(processID string, status durable.ProcessStatus, answer string, err error) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	proc := r.processes[processID]
 	if proc == nil {
-		r.mu.Unlock()
 		return
 	}
 	r.finishLocked(proc, status, answer, err)
 	_ = r.appendProcess(proc)
-	snapshot := r.processSnapshotLocked(proc)
-	sessionID := proc.sessionID
-	r.mu.Unlock()
-	r.publish(sessionID, Event{Type: "process.updated", Data: snapshot})
 }
 
 func (r *Runtime) finishLocked(proc *processState, status durable.ProcessStatus, answer string, err error) {
@@ -183,81 +173,6 @@ func (r *Runtime) finishLocked(proc *processState, status durable.ProcessStatus,
 				HistoryMessage{Role: "user", Content: proc.input},
 				HistoryMessage{Role: "assistant", Content: answer, Labels: proc.labels},
 			)
-		}
-	}
-}
-
-// scope returns the event stream key for a session.
-func (r *Runtime) scope(sessionID string) eventlog.Scope {
-	return eventlog.Scope{TenantID: r.tenantID, SessionID: sessionID}
-}
-
-func (r *Runtime) journalNow() time.Time { return r.now().UTC() }
-
-// journalAppendPublisher publishes a journal.appended event for a session when a
-// record is appended to one of its processes' journals.
-func (r *Runtime) journalAppendPublisher(sessionID string) func(string, uint64, journaled.Record, string) {
-	return func(processID string, revision uint64, rec journaled.Record, syscallName string) {
-		event := JournalEvent{
-			ProcessID: processID,
-			Position:  rec.Position,
-			Revision:  revision,
-			Kind:      rec.Kind,
-			Syscall:   syscallName,
-		}
-		if rec.Result != nil {
-			event.OutcomeStatus = rec.Result.Status()
-			event.OutcomeSize = len(rec.Result.Result())
-		}
-		r.publish(sessionID, Event{Type: "journal.appended", Data: event})
-	}
-}
-
-// appendProcess records a process's current state to its session's event stream.
-//
-// CONTRACT: this runs while r.mu (the single lock guarding all session/process
-// maps) is held, and callers check its error to roll a partial mutation back —
-// so the append stays synchronous and under the lock by design. The injected
-// eventlog.Log.Append MUST therefore be non-blocking/local (an in-memory or fast
-// local sink): a log that blocks on remote I/O would stall every concurrent
-// reader and state transition for that duration. Moving the append off-lock is
-// not a safe local change — it would either reorder same-entity events in the
-// restore fold or force appends to become asynchronous (losing the
-// synchronous-failure rollback callers depend on); an async ordered-append
-// pipeline is the proper redesign if a blocking log is ever required. The
-// context is non-cancellable on purpose: a metadata append must complete on
-// shutdown to persist final state (unlike background work, which derives from
-// the cancellable baseCtx).
-func (r *Runtime) appendProcess(proc *processState) error {
-	ev, err := durable.ProcessStateEvent(r.now().UTC(), r.storedProcessLocked(proc))
-	if err != nil {
-		return err
-	}
-	_, err = r.log.Append(context.Background(), r.scope(proc.sessionID), ev)
-	return err
-}
-
-func (r *Runtime) appendSession(session *sessionState) error {
-	ev, err := durable.SessionStateEvent(r.now().UTC(), r.storedSessionLocked(session))
-	if err != nil {
-		return err
-	}
-	_, err = r.log.Append(context.Background(), r.scope(session.id), ev)
-	return err
-}
-
-func (r *Runtime) newJournal(proc *processState, history *processHistory, forkOffset int) *logJournal {
-	return newLogJournal(r.log, r.scope(proc.sessionID), proc.id, proc.revision,
-		history, forkOffset, r.journalNow, r.journalAppendPublisher(proc.sessionID))
-}
-
-func (r *Runtime) publish(sessionID string, event Event) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for _, ch := range r.subscribers[sessionID] {
-		select {
-		case ch <- event:
-		default:
 		}
 	}
 }

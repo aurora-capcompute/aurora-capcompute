@@ -70,8 +70,6 @@ type Config[ID comparable, K capcompute.PID[ID]] struct {
 	// nil defaults to the real clock and crypto/rand.
 	Now  func() time.Time
 	Rand io.Reader
-	// OnTaskCreated observes each durable task as it is created.
-	OnTaskCreated func(task.Record)
 }
 
 // Factory builds one process's complete dispatcher chain. The resulting chain,
@@ -133,13 +131,12 @@ func (f *Factory[ID, K]) NewDispatcher(ctx context.Context, cred K) (sys.Dispatc
 		return nil, err
 	}
 	var below sys.Dispatcher[K] = &task.Dispatcher[K]{
-		Next:          drivers,
-		Store:         f.config.Tasks,
-		Journal:       journal,
-		Scope:         f.config.Environment.TaskScope,
-		TokenSecret:   f.config.TaskSecret,
-		TaskTTL:       f.config.TaskTTL,
-		OnTaskCreated: f.config.OnTaskCreated,
+		Next:        drivers,
+		Store:       f.config.Tasks,
+		Journal:     journal,
+		Scope:       f.config.Environment.TaskScope,
+		TokenSecret: f.config.TaskSecret,
+		TaskTTL:     f.config.TaskTTL,
 	}
 	if f.config.Wrap != nil {
 		below, err = f.config.Wrap(cred, below)

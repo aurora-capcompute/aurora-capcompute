@@ -9,22 +9,20 @@ import (
 )
 
 // progressDispatcher serves the sys.log syscall: a side-effect-free progress
-// report published to live session subscribers. It sits below the replay layer
-// (reports are journaled like any syscall) and publishes its capability —
+// report. It sits below the replay layer, so the report is journalled like any
+// other syscall — and that is the whole of its delivery: a watcher reads it off
+// the durable stream, there is nothing to push. It publishes its capability —
 // hidden — so the Validator's grant set covers it.
 type progressDispatcher struct {
-	next      sys.Dispatcher[ProcessContext]
-	publish   func(sessionID string, event Event)
-	sessionID string
-	processID string
+	next sys.Dispatcher[ProcessContext]
 }
 
 type progressArgs struct {
 	Message string `json:"message"`
 }
 
-func newProgressDispatcher(next sys.Dispatcher[ProcessContext], publish func(string, Event), sessionID, processID string) *progressDispatcher {
-	return &progressDispatcher{next: next, publish: publish, sessionID: sessionID, processID: processID}
+func newProgressDispatcher(next sys.Dispatcher[ProcessContext]) *progressDispatcher {
+	return &progressDispatcher{next: next}
 }
 
 func (d *progressDispatcher) Dispatch(ctx context.Context, cred ProcessContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
@@ -33,10 +31,6 @@ func (d *progressDispatcher) Dispatch(ctx context.Context, cred ProcessContext, 
 		if err := json.Unmarshal(syscall.Args, &args); err != nil {
 			return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode sys.log: %v", err)), nil
 		}
-		d.publish(d.sessionID, Event{
-			Type: "progress",
-			Data: ProgressEvent{ProcessID: d.processID, Message: args.Message},
-		})
 		return sys.Result(json.RawMessage(`{}`)), nil
 	}
 	return d.next.Dispatch(ctx, cred, syscall, auth)
@@ -60,9 +54,4 @@ func appendMissing(capabilities []sys.Capability, extra ...sys.Capability) []sys
 		}
 	}
 	return capabilities
-}
-
-type ProgressEvent struct {
-	ProcessID string
-	Message   string
 }
