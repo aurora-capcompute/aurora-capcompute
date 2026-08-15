@@ -24,6 +24,7 @@ import (
 	"github.com/aurora-capcompute/capcompute"
 	"github.com/aurora-capcompute/capcompute/sys"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 )
 
@@ -41,7 +42,7 @@ type Environment[K any] interface {
 	// syscall ABI, the program it is bound to, and the process.
 	Header(cred K) journaled.Header
 	// TaskScope is the credential in the task store's scope shape.
-	TaskScope(cred K) task.Scope
+	TaskScope(cred K) durable.TaskScope
 }
 
 // Config wires a Factory. Environment, Taints, Tasks and TaskSecret are
@@ -54,7 +55,7 @@ type Config[ID comparable, K capcompute.PID[ID]] struct {
 	Taints *monitor.Taints[ID]
 	// Tasks is the durable approval store, and TaskSecret stamps the tokens
 	// that authorise resolving one.
-	Tasks      task.Store
+	Tasks      durable.TaskStore
 	TaskSecret []byte
 	TaskTTL    time.Duration
 
@@ -117,12 +118,11 @@ func (f *Factory[ID, K]) NewDispatcher(ctx context.Context, cred K) (sys.Dispatc
 	if err != nil {
 		return nil, err
 	}
-	// Tamper-evidence, enforced. The journal's hash chain is the audit trail's
-	// integrity guarantee; verifying it here — before any record is served to
-	// replay — turns "tamper-evident" from an available check into a fail-closed
-	// one: a journal whose chain does not verify (a compromised or buggy durable
-	// store rewrote a record) is refused rather than replayed as truth. Replay
-	// already walks the whole journal, so this is the same order of work.
+	// A malformed journal is refused before any record is served to replay
+	// rather than replayed as truth: records without a header, positions out of
+	// order, or intents and completions that do not alternate mean the store
+	// handed back something replay cannot reason about. Replay already walks the
+	// whole journal, so this is the same order of work.
 	if err := journaled.Verify(journal); err != nil {
 		return nil, fmt.Errorf("journal integrity check failed: %w", err)
 	}

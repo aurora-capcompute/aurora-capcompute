@@ -12,7 +12,6 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 )
 
 func (r *Runtime) sessionSummaryLocked(session *sessionState) SessionSummary {
@@ -79,7 +78,7 @@ func (r *Runtime) processSnapshotLocked(proc *processState) ProcessSnapshot {
 	}
 }
 
-func (r *Runtime) taskSnapshot(record task.Record) TaskSnapshot {
+func (r *Runtime) taskSnapshot(record durable.TaskRecord) TaskSnapshot {
 	return TaskSnapshot{
 		ID:              record.ID,
 		ProcessID:       record.Scope.ProcessID,
@@ -92,13 +91,13 @@ func (r *Runtime) taskSnapshot(record task.Record) TaskSnapshot {
 		CreatedAt:       record.CreatedAt,
 		ExpiresAt:       copyTime(record.ExpiresAt),
 		ResolvedAt:      copyTime(record.ResolvedAt),
-		ResolutionToken: task.Token(r.taskSecret, record.Scope.TenantID, record.ID),
+		ResolutionToken: durable.TaskToken(r.taskSecret, record.Scope.TenantID, record.ID),
 	}
 }
 
-func hasPendingTask(records []task.Record) bool {
+func hasPendingTask(records []durable.TaskRecord) bool {
 	for _, record := range records {
-		if record.State == task.StatePending {
+		if record.State == durable.TaskPending {
 			return true
 		}
 	}

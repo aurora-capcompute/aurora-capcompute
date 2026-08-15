@@ -70,7 +70,7 @@ assembly is [aurora-dist](https://github.com/aurora-capcompute/aurora-dist).
 | Feature | What it means |
 | --- | --- |
 | **Sessions & processes** | `CreateSession`, `CreateProcess`, `Stop`, `Retry`, `RenameSession`, list/read — the full agent lifecycle |
-| **Replay journal** | Every syscall is hash‑chained into the log as an *intent* then a *completion*, so a crashed process re‑drives deterministically |
+| **Replay journal** | Every syscall is written to the log as an *intent* then a *completion*, so a crashed process re‑drives deterministically |
 | **Tamper‑evidence** | A `journal.header` pins the program's identity per revision; replaying under changed code is refused |
 | **Retries** | Resume the same revision, or restart into a fresh copy‑on‑write revision; bounded abort‑retry budget |
 | **Savepoints** | `sys.begin`/`sys.commit` bracket a critical section; `sys.abort` — or a failure that leaves the bracket open — forks the journal there and re‑runs the whole section live |
@@ -165,7 +165,7 @@ how one syscall, one crash, and one approval each travel the chain — see
   `sys.log`, `sys.abort`, …) are granted explicitly but hidden
   from the program's menu.
 - **Journal** — each syscall is journaled as an intent before it runs and a
-  completion before the guest observes it, hash‑chained per session. Retries fork
+  completion before the guest observes it. Retries fork
   the journal copy‑on‑write; a failed process resumes right after its outermost
   open `sys.begin` savepoint.
 - **Savepoints** — a guest brackets a critical section with `sys.begin`/

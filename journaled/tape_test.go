@@ -4,9 +4,9 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/aurora-capcompute/capcompute/sys"
-	"github.com/aurora-capcompute/aurora-capcompute/replay"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
+	"github.com/aurora-capcompute/aurora-capcompute/replay"
+	"github.com/aurora-capcompute/capcompute/sys"
 )
 
 // fakeJournal is an in-memory journaled.Journal. The tape needs only the Journal
@@ -260,30 +260,6 @@ func TestCommitWithoutIntentRefused(t *testing.T) {
 	tape := newTestTape(t, &fakeJournal{})
 	if err := tape.Commit(sys.Result(nil)); err == nil {
 		t.Fatal("commit without an open intent did not error")
-	}
-}
-
-func TestVerifyDetectsTampering(t *testing.T) {
-	journal := &fakeJournal{}
-	tape := newTestTape(t, journal)
-	record(t, tape, sys.Syscall{Name: "step.one"}, sys.Result([]byte(`{"amount":10}`)))
-	record(t, tape, sys.Syscall{Name: "step.two"}, sys.Result(nil))
-
-	if err := journaled.Verify(journal); err != nil {
-		t.Fatalf("verify clean journal: %v", err)
-	}
-
-	tampered := *journal.records[1].Result
-	_ = tampered.UnmarshalJSON([]byte(`{"status":"result","result":{"amount":1000000}}`))
-	journal.records[1].Result = &tampered
-
-	err := journaled.Verify(journal)
-	var broken journaled.ChainBrokenError
-	if !errors.As(err, &broken) {
-		t.Fatalf("error = %v, want ChainBrokenError", err)
-	}
-	if broken.Position != 2 {
-		t.Fatalf("chain break at %d, want 2 (first record after the tampered one)", broken.Position)
 	}
 }
 

@@ -15,7 +15,6 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
 	internalhost "github.com/aurora-capcompute/aurora-capcompute/internal/agent/host"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 )
 
 const DefaultTenantID = "local"
@@ -216,8 +215,8 @@ func (r ProcessContext) PID() processKey {
 }
 
 // taskScope is the same credential in the task store's scope shape.
-func (r ProcessContext) taskScope() task.Scope {
-	return task.Scope{
+func (r ProcessContext) taskScope() durable.TaskScope {
+	return durable.TaskScope{
 		TenantID:  r.TenantID,
 		SessionID: r.SessionID,
 		ProcessID: r.ProcessID,
@@ -316,17 +315,17 @@ type ProcessSnapshot struct {
 }
 
 type TaskSnapshot struct {
-	ID              string          `json:"id"`
-	ProcessID       string          `json:"process_id"`
-	Revision        uint64          `json:"revision"`
-	JournalPosition int             `json:"journal_position"`
-	Syscall         sys.Syscall     `json:"syscall"`
-	Summary         string          `json:"summary"`
-	State           task.State      `json:"state"`
-	Resolution      task.Resolution `json:"resolution,omitempty"`
-	CreatedAt       time.Time       `json:"created_at"`
-	ExpiresAt       *time.Time      `json:"expires_at,omitempty"`
-	ResolvedAt      *time.Time      `json:"resolved_at,omitempty"`
+	ID              string                 `json:"id"`
+	ProcessID       string                 `json:"process_id"`
+	Revision        uint64                 `json:"revision"`
+	JournalPosition int                    `json:"journal_position"`
+	Syscall         sys.Syscall            `json:"syscall"`
+	Summary         string                 `json:"summary"`
+	State           durable.TaskState      `json:"state"`
+	Resolution      durable.TaskResolution `json:"resolution,omitempty"`
+	CreatedAt       time.Time              `json:"created_at"`
+	ExpiresAt       *time.Time             `json:"expires_at,omitempty"`
+	ResolvedAt      *time.Time             `json:"resolved_at,omitempty"`
 	// ResolutionToken is the bearer credential ResolveTask authenticates
 	// against — the runtime's only secret-derived task value. How it reaches
 	// the resolver (a webhook URL, a chat button callback, a CLI) is the

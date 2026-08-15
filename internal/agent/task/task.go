@@ -6,16 +6,16 @@
 // injection seam the processor deliberately does not own: the processor's syscall
 // host path always passes a zero Authorization, so promoting a human decision
 // into a dispatch is the runtime's job, keyed by the intent the replay layer
-// journaled. A task's token hash is the only secret-derived value the store
-// persists out of band; the record itself omits it from JSON.
+// journaled.
 //
-// It owns the task lifecycle and token scheme, not the capability behind the
-// task — the underlying dispatcher and the durable store are injected.
+// It owns the task lifecycle, not the capability behind the task and not what
+// the task is once written down: the underlying dispatcher and the durable
+// store are injected, and the record itself is durable vocabulary, defined in
+// internal/agent/durable.
 package task
 
 import (
 	"context"
-	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -23,61 +23,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/capcompute/sys"
-)
-
-type Scope struct {
-	TenantID  string
-	SessionID string
-	ProcessID string
-	Revision  uint64
-}
-
-type State = sys.Decision
-
-const (
-	StatePending   State = "pending"
-	StateApproved        = sys.Approved
-	StateCompleted       = sys.Completed
-	StateFailed          = sys.Failed
-	StateDenied          = sys.Denied
-	StateCancelled       = sys.Cancelled
-	StateExpired   State = "expired"
-	StateExecuted  State = "executed"
-)
-
-type Resolution = sys.Authorization
-
-type Record struct {
-	Scope           Scope       `json:"scope"`
-	ID              string      `json:"id"`
-	JournalPosition int         `json:"journal_position"`
-	CallHash        string      `json:"call_hash"`
-	Syscall         sys.Syscall `json:"syscall"`
-	Summary         string      `json:"summary"`
-	State           State       `json:"state"`
-	TokenHash       []byte      `json:"-"`
-	Resolution      Resolution  `json:"resolution,omitempty"`
-	CreatedAt       time.Time   `json:"created_at"`
-	ExpiresAt       *time.Time  `json:"expires_at,omitempty"`
-	ResolvedAt      *time.Time  `json:"resolved_at,omitempty"`
-}
-
-type Store interface {
-	Find(context.Context, Scope, int, string) (Record, bool, error)
-	Create(context.Context, Record) error
-	Get(context.Context, string, string) (Record, error)
-	List(context.Context, string, string) ([]Record, error)
-	Resolve(context.Context, string, string, []byte, Resolution, time.Time) (Record, error)
-	MarkExecuted(context.Context, string, string, time.Time) error
-}
-
-var (
-	ErrNotFound     = errors.New("task not found")
-	ErrConflict     = errors.New("task resolution conflict")
-	ErrGone         = errors.New("task is no longer resolvable")
-	ErrUnauthorized = errors.New("invalid task token")
 )
 
 // Dispatcher sits below the replay layer: by the time a syscall reaches it,
@@ -87,9 +35,9 @@ var (
 // position and finds the same task.
 type Dispatcher[K any] struct {
 	Next        sys.Dispatcher[K]
-	Store       Store
+	Store       durable.TaskStore
 	Journal     journaled.Journal
-	Scope       func(K) Scope
+	Scope       func(K) durable.TaskScope
 	Now         func() time.Time
 	TokenSecret []byte
 	TaskTTL     time.Duration
@@ -124,51 +72,51 @@ func (d *Dispatcher[K]) Dispatch(ctx context.Context, cred K, syscall sys.Syscal
 	if err != nil {
 		return sys.SyscallResult{}, err
 	}
-	record = Record{
+	record = durable.TaskRecord{
 		Scope:           scope,
 		ID:              taskID,
 		JournalPosition: position,
 		CallHash:        callHash,
 		Syscall:         syscall.Copy(),
 		Summary:         result.Message(),
-		State:           StatePending,
+		State:           durable.TaskPending,
 		CreatedAt:       now,
 	}
 	if d.TaskTTL > 0 {
 		expires := now.Add(d.TaskTTL)
 		record.ExpiresAt = &expires
 	}
-	StampToken(&record, d.TokenSecret)
+	durable.StampTaskToken(&record, d.TokenSecret)
 	if err := d.Store.Create(ctx, record); err != nil {
 		return sys.SyscallResult{}, err
 	}
 	return sys.Yield(record.ID), nil
 }
 
-func (d *Dispatcher[K]) resume(ctx context.Context, cred K, record Record) (sys.SyscallResult, error) {
-	if record.ExpiresAt != nil && !d.now().Before(*record.ExpiresAt) && record.State == StatePending {
+func (d *Dispatcher[K]) resume(ctx context.Context, cred K, record durable.TaskRecord) (sys.SyscallResult, error) {
+	if record.ExpiresAt != nil && !d.now().Before(*record.ExpiresAt) && record.State == durable.TaskPending {
 		return sys.FailCode(sys.ErrnoExpired, "external task expired"), nil
 	}
 	switch record.State {
-	case StatePending:
+	case durable.TaskPending:
 		return sys.Yield(record.ID), nil
-	case StateApproved:
+	case durable.TaskApproved:
 		result, err := d.Next.Dispatch(ctx, cred, record.Syscall, record.Resolution)
 		if err == nil && result.Status() != sys.StatusYield {
 			_ = d.Store.MarkExecuted(ctx, record.Scope.TenantID, record.ID, d.now())
 		}
 		return result, err
-	case StateCompleted:
+	case durable.TaskCompleted:
 		return sys.Result(record.Resolution.Data), nil
-	case StateDenied:
+	case durable.TaskDenied:
 		return sys.FailCode(sys.ErrnoDenied, nonempty(record.Resolution.Reason, "external task denied")), nil
-	case StateFailed:
+	case durable.TaskFailed:
 		return sys.FailCode(sys.ErrnoInternal, nonempty(record.Resolution.Reason, "external task failed")), nil
-	case StateCancelled:
+	case durable.TaskCancelled:
 		return sys.FailCode(sys.ErrnoDenied, "external task cancelled"), nil
-	case StateExpired:
+	case durable.TaskExpired:
 		return sys.FailCode(sys.ErrnoExpired, "external task expired"), nil
-	case StateExecuted:
+	case durable.TaskExecuted:
 		return d.Next.Dispatch(ctx, cred, record.Syscall, record.Resolution)
 	default:
 		return sys.SyscallResult{}, fmt.Errorf("unsupported task state %q", record.State)
@@ -179,34 +127,14 @@ func (d *Dispatcher[K]) Capabilities() []sys.Capability {
 	return d.Next.Capabilities()
 }
 
+// HashCall is a call's identity within one journal position: the same position
+// reached with different arguments is a different task.
 func HashCall(syscall sys.Syscall) string {
 	sum := sha256.New()
 	_, _ = sum.Write([]byte(syscall.Name))
 	_, _ = sum.Write([]byte{0})
 	_, _ = sum.Write(syscall.Args)
 	return hex.EncodeToString(sum.Sum(nil))
-}
-
-func Token(secret []byte, tenantID, taskID string) string {
-	mac := hmac.New(sha256.New, secret)
-	_, _ = mac.Write([]byte(tenantID))
-	_, _ = mac.Write([]byte{0})
-	_, _ = mac.Write([]byte(taskID))
-	return hex.EncodeToString(mac.Sum(nil))
-}
-
-// StampToken derives the record's resolution token from the secret and stores
-// its hash on the record — the one way a task is armed. Only the hash is ever
-// persisted; the bearer token itself is recomputed on demand from the same
-// inputs.
-func StampToken(record *Record, secret []byte) {
-	sum := sha256.Sum256([]byte(Token(secret, record.Scope.TenantID, record.ID)))
-	record.TokenHash = sum[:]
-}
-
-func VerifyToken(expectedHash []byte, token string) bool {
-	sum := sha256.Sum256([]byte(token))
-	return hmac.Equal(expectedHash, sum[:])
 }
 
 func (d *Dispatcher[K]) now() time.Time {

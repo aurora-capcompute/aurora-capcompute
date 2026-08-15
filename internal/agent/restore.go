@@ -11,7 +11,6 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 )
 
 // Restore: rebuild in-memory state by folding each session's event stream.
@@ -153,7 +152,7 @@ func (r *Runtime) restoreSession(proj durable.Projection, journals map[string]ma
 	// re-drivable status, so recovery resumes them like any cut-off process.
 	pending := map[string]bool{}
 	for _, record := range proj.TaskList() {
-		if record.State == task.StatePending {
+		if record.State == durable.TaskPending {
 			pending[record.Scope.ProcessID] = true
 		}
 	}

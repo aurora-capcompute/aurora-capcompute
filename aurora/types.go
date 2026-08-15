@@ -8,7 +8,6 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/errs"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 )
 
 // DTOs
@@ -70,19 +69,19 @@ type ProcessContext = agent.ProcessContext
 
 // Task types
 
-type TaskScope = task.Scope
+type TaskScope = durable.TaskScope
 type TaskState = sys.Decision
 type Resolution = sys.Authorization
 
 const (
-	TaskStatePending   = task.StatePending
-	TaskStateApproved  = task.StateApproved
-	TaskStateCompleted = task.StateCompleted
-	TaskStateFailed    = task.StateFailed
-	TaskStateDenied    = task.StateDenied
-	TaskStateCancelled = task.StateCancelled
-	TaskStateExpired   = task.StateExpired
-	TaskStateExecuted  = task.StateExecuted
+	TaskStatePending   = durable.TaskPending
+	TaskStateApproved  = durable.TaskApproved
+	TaskStateCompleted = durable.TaskCompleted
+	TaskStateFailed    = durable.TaskFailed
+	TaskStateDenied    = durable.TaskDenied
+	TaskStateCancelled = durable.TaskCancelled
+	TaskStateExpired   = durable.TaskExpired
+	TaskStateExecuted  = durable.TaskExecuted
 )
 
 // Error sentinels
@@ -92,10 +91,10 @@ var (
 	ErrConflict = errs.Conflict
 	ErrInvalid  = errs.Invalid
 
-	ErrTaskNotFound     = task.ErrNotFound
-	ErrTaskConflict     = task.ErrConflict
-	ErrTaskGone         = task.ErrGone
-	ErrTaskUnauthorized = task.ErrUnauthorized
+	ErrTaskNotFound     = durable.ErrTaskNotFound
+	ErrTaskConflict     = durable.ErrTaskConflict
+	ErrTaskGone         = durable.ErrTaskGone
+	ErrTaskUnauthorized = durable.ErrTaskUnauthorized
 )
 
 // Constants

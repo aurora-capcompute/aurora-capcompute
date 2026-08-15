@@ -6,7 +6,7 @@
 // Labeler → driver) while injecting a crash at any chosen journal append.
 // Tests run the crash across *every* position and assert the invariants:
 // replay convergence, exactly-once effects under idempotency keys, an intact
-// hash chain, and correct saga unwinding.
+// journal structure.
 package sim
 
 import (

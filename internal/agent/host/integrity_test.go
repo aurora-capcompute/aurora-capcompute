@@ -11,7 +11,7 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/monitor"
 	"github.com/aurora-capcompute/capcompute/sys"
 
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 )
 
 type integrityPID struct{ id string }
@@ -43,19 +43,21 @@ func (j *memJournal) Load(i int) (journaled.Record, error) {
 	return j.recs[i], nil
 }
 
-// stubStore satisfies task.Store; the integrity check returns before it is used.
+// stubStore satisfies durable.TaskStore; the integrity check returns before it is used.
 type stubStore struct{}
 
-func (stubStore) Find(context.Context, task.Scope, int, string) (task.Record, bool, error) {
-	return task.Record{}, false, nil
+func (stubStore) Find(context.Context, durable.TaskScope, int, string) (durable.TaskRecord, bool, error) {
+	return durable.TaskRecord{}, false, nil
 }
-func (stubStore) Create(context.Context, task.Record) error                { return nil }
-func (stubStore) Get(context.Context, string, string) (task.Record, error) { return task.Record{}, nil }
-func (stubStore) List(context.Context, string, string) ([]task.Record, error) {
+func (stubStore) Create(context.Context, durable.TaskRecord) error { return nil }
+func (stubStore) Get(context.Context, string, string) (durable.TaskRecord, error) {
+	return durable.TaskRecord{}, nil
+}
+func (stubStore) List(context.Context, string, string) ([]durable.TaskRecord, error) {
 	return nil, nil
 }
-func (stubStore) Resolve(context.Context, string, string, []byte, task.Resolution, time.Time) (task.Record, error) {
-	return task.Record{}, nil
+func (stubStore) Resolve(context.Context, string, string, []byte, durable.TaskResolution, time.Time) (durable.TaskRecord, error) {
+	return durable.TaskRecord{}, nil
 }
 func (stubStore) MarkExecuted(context.Context, string, string, time.Time) error { return nil }
 
@@ -76,7 +78,7 @@ func (e integrityEnv) ProcessJournal(context.Context, integrityPID) (journaled.J
 
 func (e integrityEnv) Header(integrityPID) journaled.Header { return e.header }
 
-func (integrityEnv) TaskScope(integrityPID) task.Scope { return task.Scope{} }
+func (integrityEnv) TaskScope(integrityPID) durable.TaskScope { return durable.TaskScope{} }
 
 func integrityFactory(t *testing.T, journal journaled.Journal, header journaled.Header) *Factory[string, integrityPID] {
 	t.Helper()
@@ -92,34 +94,32 @@ func integrityFactory(t *testing.T, journal journaled.Journal, header journaled.
 	return factory
 }
 
-// A journal whose hash chain does not verify must be refused before replay: the
-// Factory fails closed rather than serve a record a compromised or buggy durable
-// store could have rewritten. This makes "tamper-evident" an enforced property,
-// not merely an available check.
-func TestNewDispatcherRefusesTamperedJournal(t *testing.T) {
+// A journal replay cannot reason about must be refused before replay: the
+// Factory fails closed rather than serve records the store handed back in a
+// shape the tape never writes.
+func TestNewDispatcherRefusesMalformedJournal(t *testing.T) {
 	header := journaled.Header{ABI: sys.ABIVersion, Program: "prog", Process: "run"}
-	tampered := &memJournal{}
-	_ = tampered.SetHeader(header)
-	sc := sys.Syscall{Abi: sys.ABIVersion, Name: "noop"}
-	// A record whose PrevHash does not chain to the header digest — the exact
-	// signature of a rewritten journal.
-	_ = tampered.Append(journaled.Record{
-		Position: 0, Kind: journaled.KindIntent, Syscall: &sc, PrevHash: "not-the-header-digest",
+	malformed := &memJournal{}
+	_ = malformed.SetHeader(header)
+	result := sys.Result(nil)
+	// A completion with no intent before it — the tape never writes this.
+	_ = malformed.Append(journaled.Record{
+		Position: 0, Kind: journaled.KindCompletion, Result: &result,
 	})
 
-	factory := integrityFactory(t, tampered, header)
+	factory := integrityFactory(t, malformed, header)
 	_, err := factory.NewDispatcher(context.Background(), integrityPID{id: "run"})
 	if err == nil || !strings.Contains(err.Error(), "integrity") {
 		t.Fatalf("err = %v, want a journal integrity rejection", err)
 	}
 }
 
-// A well-formed journal is admitted — the check is specific to a broken chain,
-// not a blanket refusal.
+// A well-formed journal is admitted — the check is specific to damage, not a
+// blanket refusal.
 func TestNewDispatcherAdmitsIntactJournal(t *testing.T) {
 	header := journaled.Header{ABI: sys.ABIVersion, Program: "prog", Process: "run"}
 	intact := &memJournal{}
-	_ = intact.SetHeader(header) // an empty journal is a trivially intact chain
+	_ = intact.SetHeader(header) // an empty journal is trivially well-formed
 	factory := integrityFactory(t, intact, header)
 	if _, err := factory.NewDispatcher(context.Background(), integrityPID{id: "run"}); err != nil {
 		t.Fatalf("intact journal rejected: %v", err)

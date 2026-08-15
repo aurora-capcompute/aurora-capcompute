@@ -49,9 +49,8 @@ type Header struct {
 // store that owns the Journal, keyed by Header.Process.
 type Record struct {
 	// Envelope.
-	Position int    `json:"position"`
-	Kind     Kind   `json:"kind"`
-	PrevHash string `json:"prev_hash"`
+	Position int  `json:"position"`
+	Kind     Kind `json:"kind"`
 	// Revision is the attempt that first wrote this record, stamped by the
 	// Journal implementation at append (zero when the journal has no attempt
 	// notion). It scopes the intent identity: a record in a fork's shared
@@ -108,16 +107,6 @@ type CorruptJournalError struct {
 
 func (e CorruptJournalError) Error() string {
 	return fmt.Sprintf("journal corrupt at position %d: %s", e.Position, e.Reason)
-}
-
-// ChainBrokenError means a record's prev_hash does not match the digest of
-// its predecessor: the journal was altered after the fact.
-type ChainBrokenError struct {
-	Position int
-}
-
-func (e ChainBrokenError) Error() string {
-	return fmt.Sprintf("journal hash chain broken at position %d", e.Position)
 }
 
 // Tape is a journal-backed replay tape.
@@ -228,7 +217,7 @@ func (t *Tape) Begin(syscall sys.Syscall) (string, error) {
 	}
 
 	recorded := syscall.Copy()
-	stored, err := appendChained(t.journal, t.header, Record{Kind: KindIntent, Syscall: &recorded})
+	stored, err := appendRecord(t.journal, Record{Kind: KindIntent, Syscall: &recorded})
 	if err != nil {
 		return "", err
 	}
@@ -248,7 +237,7 @@ func (t *Tape) Commit(result sys.SyscallResult) error {
 	}
 
 	recorded := result.Copy()
-	if _, err := appendChained(t.journal, t.header, Record{Kind: KindCompletion, Result: &recorded}); err != nil {
+	if _, err := appendRecord(t.journal, Record{Kind: KindCompletion, Result: &recorded}); err != nil {
 		return err
 	}
 	t.cursor++
@@ -271,12 +260,12 @@ func (t *Tape) Remaining() int {
 	return t.journal.Length() - t.cursor
 }
 
-// Verify walks the whole journal and checks structure (alternating
-// intent/completion, positions in order, at most one open intent at the tail)
-// and the hash chain. It returns ChainBrokenError or CorruptJournalError at
+// Verify walks the whole journal and checks its structure: a header where
+// there are records, positions in order, and alternating intent/completion
+// with at most one open intent at the tail. It returns CorruptJournalError at
 // the first damage found.
 func Verify(journal Journal) error {
-	header, ok, err := journal.Header()
+	_, ok, err := journal.Header()
 	if err != nil {
 		return err
 	}
@@ -287,10 +276,6 @@ func Verify(journal Journal) error {
 		return nil
 	}
 
-	prev, err := digest(header)
-	if err != nil {
-		return err
-	}
 	// Structure: intent/completion pairs, with at most one trailing open
 	// intent — an abandoned revision may leave its last intent open forever
 	// (the failing dispatch never completed), and that is legal history.
@@ -319,13 +304,6 @@ func Verify(journal Journal) error {
 			}
 			expect = wantIntent
 		}
-		if record.PrevHash != prev {
-			return ChainBrokenError{Position: position}
-		}
-		prev, err = digest(record)
-		if err != nil {
-			return err
-		}
 	}
 	return nil
 }
@@ -349,30 +327,12 @@ func intentKey(header Header, record Record) (string, error) {
 	}{header, record.Revision, record.Position, *record.Syscall})
 }
 
-func prevHash(journal Journal, header Header, position int) (string, error) {
-	if position == 0 {
-		return digest(header)
-	}
-	prev, err := journal.Load(position - 1)
-	if err != nil {
-		return "", err
-	}
-	return digest(prev)
-}
-
-// appendChained appends one record at the journal tail, stamped with its
-// position and the chain hash of its predecessor (or of the header for the
-// first record), and returns the record as stored — the Journal may stamp its
-// attempt scope (Revision) on the way in. Every appender — execution and
-// goes through here, so the chain semantics cannot drift
-// between them.
-func appendChained(journal Journal, header Header, record Record) (Record, error) {
+// appendRecord appends one record at the journal tail, stamped with its
+// position, and returns the record as stored — the Journal may stamp its
+// attempt scope (Revision) on the way in. Every appender goes through here, so
+// positioning cannot drift between them.
+func appendRecord(journal Journal, record Record) (Record, error) {
 	record.Position = journal.Length()
-	prev, err := prevHash(journal, header, record.Position)
-	if err != nil {
-		return Record{}, err
-	}
-	record.PrevHash = prev
 	if err := journal.Append(record); err != nil {
 		return Record{}, err
 	}

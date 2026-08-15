@@ -10,7 +10,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -96,8 +95,8 @@ func (m *memLog) Streams(_ context.Context, tenantID string) ([]eventlog.Scope, 
 	return out, nil
 }
 
-// Journal-building helpers: append records directly with the same hash chain
-// the tape computes, so journals built here satisfy journaled.Verify.
+// Journal-building helpers: append records directly in the same shape the tape
+// writes, so journals built here satisfy journaled.Verify.
 
 type testingT interface {
 	Helper()
@@ -151,34 +150,9 @@ func appendCompletion(t testingT, journal journaled.Journal, result sys.SyscallR
 
 func appendRecord(t testingT, journal journaled.Journal, rec journaled.Record) {
 	t.Helper()
-	prev, err := prevDigest(journal, rec.Position)
-	if err != nil {
-		t.Fatalf("prev hash at %d: %v", rec.Position, err)
-	}
-	rec.PrevHash = prev
 	if err := journal.Append(rec); err != nil {
 		t.Fatalf("append record %d: %v", rec.Position, err)
 	}
-}
-
-// prevDigest mirrors the tape's chain computation: the digest of the previous
-// record, or of the header at position 0.
-func prevDigest(journal journaled.Journal, position int) (string, error) {
-	if position == 0 {
-		header, ok, err := journal.Header()
-		if err != nil {
-			return "", err
-		}
-		if !ok {
-			return "", errors.New("journal has no header")
-		}
-		return jsonDigest(header)
-	}
-	prev, err := journal.Load(position - 1)
-	if err != nil {
-		return "", err
-	}
-	return jsonDigest(prev)
 }
 
 func jsonDigest(v any) (string, error) {

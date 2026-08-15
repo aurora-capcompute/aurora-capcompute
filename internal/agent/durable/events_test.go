@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 )
 
 func TestFoldReconstructsLatestRunAndSessionState(t *testing.T) {
@@ -44,17 +43,17 @@ func TestFoldReconstructsLatestRunAndSessionState(t *testing.T) {
 
 func TestFoldTaskLifecycle(t *testing.T) {
 	now := time.Unix(0, 0).UTC()
-	rec := task.Record{
-		Scope:     task.Scope{TenantID: "t", SessionID: "th1", ProcessID: "proc1", Revision: 1},
+	rec := TaskRecord{
+		Scope:     TaskScope{TenantID: "t", SessionID: "th1", ProcessID: "proc1", Revision: 1},
 		ID:        "task1",
-		State:     task.StatePending,
+		State:     TaskPending,
 		TokenHash: []byte{1, 2, 3},
 		CreatedAt: now,
 	}
 	created, _ := TaskCreatedEvent(now, rec)
 
 	resolved := rec
-	resolved.State = task.StateApproved
+	resolved.State = TaskApproved
 	resolvedEv, _ := TaskResolvedEvent(now.Add(time.Second), resolved)
 
 	executed, _ := TaskExecutedEvent(now.Add(2*time.Second), "proc1", 1, "task1")
@@ -63,10 +62,10 @@ func TestFoldTaskLifecycle(t *testing.T) {
 		t.Fatalf("fold: %v", err)
 	}
 	got := proj.Tasks["task1"]
-	if got.State != task.StateExecuted {
+	if got.State != TaskExecuted {
 		t.Fatalf("task state = %q, want executed", got.State)
 	}
-	// TokenHash must survive the round-trip even though task.Record omits it from JSON.
+	// TokenHash must survive the round-trip even though TaskRecord omits it from JSON.
 	if len(got.TokenHash) != 3 || got.TokenHash[0] != 1 {
 		t.Fatalf("token hash not preserved: %v", got.TokenHash)
 	}

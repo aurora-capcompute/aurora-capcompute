@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 )
 
 // Domain event kinds appended to a session's eventlog stream. Lifecycle payloads
@@ -27,12 +26,12 @@ const (
 	evTaskExecuted = "task.executed"
 )
 
-// taskEventData carries a task record plus its token hash, which task.Record
+// taskEventData carries a task record plus its token hash, which TaskRecord
 // deliberately omits from JSON (json:"-") since it is a secret-derived value the
 // store must persist out of band.
 type taskEventData struct {
-	Record    task.Record `json:"record"`
-	TokenHash []byte      `json:"token_hash,omitempty"`
+	Record    TaskRecord `json:"record"`
+	TokenHash []byte     `json:"token_hash,omitempty"`
 }
 
 type taskExecutedData struct {
@@ -50,12 +49,12 @@ func SessionStateEvent(now time.Time, s Session) (eventlog.Event, error) {
 	return EncodeEvent(evSessionState, "", 0, now, s)
 }
 
-func TaskCreatedEvent(now time.Time, record task.Record) (eventlog.Event, error) {
+func TaskCreatedEvent(now time.Time, record TaskRecord) (eventlog.Event, error) {
 	return EncodeEvent(evTaskCreated, record.Scope.ProcessID, record.Scope.Revision, now,
 		taskEventData{Record: record, TokenHash: record.TokenHash})
 }
 
-func TaskResolvedEvent(now time.Time, record task.Record) (eventlog.Event, error) {
+func TaskResolvedEvent(now time.Time, record TaskRecord) (eventlog.Event, error) {
 	return EncodeEvent(evTaskResolved, record.Scope.ProcessID, record.Scope.Revision, now,
 		taskEventData{Record: record, TokenHash: record.TokenHash})
 }
@@ -94,7 +93,7 @@ func marshalVerbatim(payload any) (json.RawMessage, error) {
 type Projection struct {
 	Session   Session
 	Processes map[string]Process
-	Tasks     map[string]task.Record
+	Tasks     map[string]TaskRecord
 }
 
 // Fold reconstructs a session's durable projection from its event stream. Events
@@ -105,7 +104,7 @@ type Projection struct {
 func Fold(events []eventlog.Event) (Projection, error) {
 	proj := Projection{
 		Processes: make(map[string]Process),
-		Tasks:     make(map[string]task.Record),
+		Tasks:     make(map[string]TaskRecord),
 	}
 	var sessionEvent *Session
 	for _, ev := range events {
@@ -135,7 +134,7 @@ func Fold(events []eventlog.Event) (Projection, error) {
 				return Projection{}, fmt.Errorf("decode task.executed: %w", err)
 			}
 			if rec, ok := proj.Tasks[x.TaskID]; ok {
-				rec.State = task.StateExecuted
+				rec.State = TaskExecuted
 				proj.Tasks[x.TaskID] = rec
 			}
 		}
@@ -223,8 +222,8 @@ func isActiveStatus(status ProcessStatus) bool {
 
 // TaskList returns the projection's task records sorted by creation time, the
 // order callers expect from the old TaskStore.List.
-func (p Projection) TaskList() []task.Record {
-	out := make([]task.Record, 0, len(p.Tasks))
+func (p Projection) TaskList() []TaskRecord {
+	out := make([]TaskRecord, 0, len(p.Tasks))
 	for _, rec := range p.Tasks {
 		out = append(out, rec)
 	}

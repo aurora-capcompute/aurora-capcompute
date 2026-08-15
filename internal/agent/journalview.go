@@ -17,8 +17,8 @@ import (
 )
 
 // Capability-journal events. Each journal record (an intent, a completion, or
-// the processor's envelope+payload shape, hash chain
-// included) is a syscall.recorded event carrying the record verbatim plus the
+// the processor's envelope+payload shape) is a syscall.recorded event carrying
+// the record verbatim plus the
 // revision that produced it. The fork structure (which revision shared which
 // prefix) is fully derivable from the flat set of (position, revision) pairs —
 // no separate fork event is needed. A journal.header event pins the writer
@@ -181,8 +181,8 @@ func copyRecord(rec journaled.Record) journaled.Record {
 // logJournal implements journaled.Journal over an event stream. Positions
 // [0, forkOffset) are served from the shared processHistory (written by prior
 // revisions); positions [forkOffset, ...) are from this revision's own records.
-// Hash-chain integrity holds across the fork: a record appended at forkOffset
-// chains from the shared prefix's tail record, which Load serves verbatim.
+// A record appended at forkOffset continues the shared prefix, whose tail Load
+// serves verbatim.
 type logJournal struct {
 	log   eventlog.Log
 	scope eventlog.Scope

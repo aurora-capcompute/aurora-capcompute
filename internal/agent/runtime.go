@@ -35,7 +35,6 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
 	internalhost "github.com/aurora-capcompute/aurora-capcompute/internal/agent/host"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 )
 
 const (
@@ -368,7 +367,7 @@ func (r *Runtime) ProcessJournal(_ context.Context, cred ProcessContext) (journa
 // half of host.Environment — everything one process's dispatcher chain needs
 // that only the runtime can know. They are exported for that seam, not for
 // callers: aurora.Runtime is a closed interface and does not list them.
-func (r *Runtime) TaskScope(cred ProcessContext) task.Scope { return cred.taskScope() }
+func (r *Runtime) TaskScope(cred ProcessContext) durable.TaskScope { return cred.taskScope() }
 
 // Header is the journal writer identity for one process revision: the
 // syscall ABI, the program digest as the program, and the process id. The
@@ -771,13 +770,13 @@ func (r *Runtime) Tasks(processID string) ([]TaskSnapshot, error) {
 	return out, nil
 }
 
-func (r *Runtime) ResolveTask(taskID, token string, resolution task.Resolution) (TaskSnapshot, error) {
+func (r *Runtime) ResolveTask(taskID, token string, resolution durable.TaskResolution) (TaskSnapshot, error) {
 	switch resolution.Decision {
-	case task.StateApproved, task.StateCompleted, task.StateFailed, task.StateDenied, task.StateCancelled:
+	case durable.TaskApproved, durable.TaskCompleted, durable.TaskFailed, durable.TaskDenied, durable.TaskCancelled:
 	default:
 		return TaskSnapshot{}, fmt.Errorf("%w: unsupported task decision %q", errs.Invalid, resolution.Decision)
 	}
-	if resolution.Decision == task.StateCompleted && !json.Valid(resolution.Data) {
+	if resolution.Decision == durable.TaskCompleted && !json.Valid(resolution.Data) {
 		return TaskSnapshot{}, fmt.Errorf("%w: completed task data must be valid JSON", errs.Invalid)
 	}
 	acquired, err := r.leases.Acquire(

@@ -20,7 +20,6 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/errs"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 )
 
 type runtimeDispatchers struct {
@@ -741,8 +740,8 @@ func TestRuntimeApprovalCycle(t *testing.T) {
 		t.Fatalf("task summary = %q", pending.Summary)
 	}
 
-	if _, err := runtime.ResolveTask(pending.ID, pending.ResolutionToken, task.Resolution{
-		Decision: task.StateApproved,
+	if _, err := runtime.ResolveTask(pending.ID, pending.ResolutionToken, durable.TaskResolution{
+		Decision: durable.TaskApproved,
 		Actor:    "tester",
 	}); err != nil {
 		t.Fatalf("resolve: %v", err)

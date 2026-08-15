@@ -63,7 +63,7 @@ func TestCrashMatrixConverges(t *testing.T) {
 		}
 
 		if err := journaled.Verify(world.Journal); err != nil {
-			t.Fatalf("crashAt=%d: chain verify: %v", crashAt, err)
+			t.Fatalf("crashAt=%d: journal verify: %v", crashAt, err)
 		}
 		if world.Journal.Length() != total {
 			t.Fatalf("crashAt=%d: journal length %d, want %d", crashAt, world.Journal.Length(), total)
