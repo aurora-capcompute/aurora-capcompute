@@ -46,7 +46,7 @@ func TestLogJournalLinearRoundTrip(t *testing.T) {
 	if got := loadEntries(t, j); len(got) != 3 || got[2] != "c=\"c\"" {
 		t.Fatalf("live journal = %v", got)
 	}
-	// The stored chain is a valid hash-chained journal.
+	// The stored records are a well-formed journal.
 	if err := journaled.Verify(j); err != nil {
 		t.Fatalf("verify: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestLogJournalForkSharesPrefixThenDiverges(t *testing.T) {
 }
 
 // A journal driven by the real tape (Begin/Commit) and one built by the test
-// helpers must be indistinguishable: both hash-chained, both verifiable.
+// helpers must be indistinguishable: both well-formed, both verifiable.
 func TestLogJournalBacksTheKernelTape(t *testing.T) {
 	log := newMemLog()
 	scope := eventlog.Scope{TenantID: "t", SessionID: "th"}

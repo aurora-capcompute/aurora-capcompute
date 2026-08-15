@@ -333,7 +333,7 @@ func (j *logJournal) outermostOpenBegin() (int, bool) {
 	length := j.Length()
 	depth := 0
 	start := -1 // position of the outermost open begin's completion record
-	for i := 0; i < length; i++ {
+	for i := range length {
 		rec, err := j.Load(i)
 		if err != nil {
 			return 0, false
@@ -376,7 +376,7 @@ func (j *logJournal) outermostOpenBegin() (int, bool) {
 func (j *logJournal) entries() ([]JournalEntry, error) {
 	length := j.Length()
 	entries := make([]JournalEntry, 0, length/2+1)
-	for i := 0; i < length; i++ {
+	for i := range length {
 		rec, err := j.Load(i)
 		if err != nil {
 			return nil, err

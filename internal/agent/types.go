@@ -333,9 +333,9 @@ type TaskSnapshot struct {
 	ResolutionToken string `json:"resolution_token"`
 }
 
-// JournalEntry is one syscall of a process's journal: the intent (its position in
-// the hash-chained record sequence and the syscall itself) folded together
-// with its completion. An entry whose completion has not been journaled yet —
+// JournalEntry is one syscall of a process's journal: the intent (its position
+// in the record sequence and the syscall itself) folded together with its
+// completion. An entry whose completion has not been journaled yet —
 // an in-flight syscall or a pending external task — carries a yield outcome.
 type JournalEntry struct {
 	Position int            `json:"position"`

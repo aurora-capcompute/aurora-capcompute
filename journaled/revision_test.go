@@ -4,9 +4,9 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/aurora-capcompute/capcompute/sys"
-	"github.com/aurora-capcompute/aurora-capcompute/replay"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
+	"github.com/aurora-capcompute/aurora-capcompute/replay"
+	"github.com/aurora-capcompute/capcompute/sys"
 )
 
 // stampingJournal is a fakeJournal whose Append stamps the current attempt on
