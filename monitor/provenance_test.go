@@ -285,7 +285,7 @@ func adtCall(t *testing.T, d sys.Dispatcher[testPID], operation string) sys.Sysc
 func TestPerOperationFlowPolicy(t *testing.T) {
 	driver := adtDriver{capability: sys.Capability{
 		Name:          "core.filesystem",
-		Discriminator: "operation",
+		Discriminator: []string{"operation"},
 		Operations: []sys.Operation{
 			{Name: "read", Labels: []string{"untrusted_file"}},
 			{Name: "write", Forbid: []string{"untrusted_file"}},
