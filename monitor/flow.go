@@ -34,10 +34,14 @@ type Flow[ID comparable, K capcompute.PID[ID]] struct {
 	table  *capability.Table
 }
 
-// NewFlow binds the shared taint state to one process's grant table. A nil
-// table means no operation declares any policy — the flow rules are then inert,
-// not absent: taint still accumulates and still crosses into later runs.
+// NewFlow binds the shared taint state to one process's grant table. Both are
+// required: a flow layer with no index would answer every sink guard with "no
+// policy", which is the one wrong answer a reference monitor can give. Passing
+// nil panics here rather than failing open at the first tainted call.
 func NewFlow[ID comparable, K capcompute.PID[ID]](taints *Taints[ID], table *capability.Table) *Flow[ID, K] {
+	if taints == nil || table == nil {
+		panic("monitor: a flow layer needs both taint state and a grant table")
+	}
 	return &Flow[ID, K]{taints: taints, table: table}
 }
 
@@ -53,19 +57,24 @@ func (f *Flow[ID, K]) Stamp(next sys.Dispatcher[K]) sys.Dispatcher[K] {
 	return &flowStamp[ID, K]{flow: f, next: next}
 }
 
-// forbidden reports the labels this call may not carry and the name to blame.
-func (f *Flow[ID, K]) forbidden(call sys.Syscall) ([]string, string) {
-	if f.table == nil {
-		return nil, call.Name
+// Permitted is the run's remaining reach: every indexed operation whose forbid
+// set the accumulated taint does not intersect. It is the "what can this process
+// still do" question the taint answers only indirectly, and it shrinks as the run
+// observes labels — a declassification grows it back.
+//
+// It is derived on demand rather than maintained alongside the taint. A cached
+// permitted-set would be a second source of truth for a security decision, and
+// the moment it went stale it would go stale open; computing it from the index
+// and the taint means it cannot disagree with what Guard actually enforces.
+func (f *Flow[ID, K]) Permitted(pid ID) []capability.Key {
+	entries := f.table.Entries()
+	permitted := make([]capability.Key, 0, len(entries))
+	for _, entry := range entries {
+		if len(f.taints.intersection(pid, entry.Forbid)) == 0 {
+			permitted = append(permitted, entry.Key)
+		}
 	}
-	return f.table.Forbidden(call)
-}
-
-func (f *Flow[ID, K]) labels(call sys.Syscall) []string {
-	if f.table == nil {
-		return nil
-	}
-	return f.table.Labels(call)
+	return permitted
 }
 
 type flowGuard[ID comparable, K capcompute.PID[ID]] struct {
@@ -80,7 +89,7 @@ func (g *flowGuard[ID, K]) Dispatch(ctx context.Context, cred K, syscall sys.Sys
 	}
 
 	pid := cred.PID()
-	forbid, sink := g.flow.forbidden(syscall)
+	forbid, sink := g.flow.table.Forbidden(syscall)
 	if tainted := g.flow.taints.intersection(pid, forbid); len(tainted) > 0 {
 		return sys.FailCode(sys.ErrnoDenied, fmt.Sprintf(
 			"flow policy: this run has observed %v, which may not flow into %q", tainted, sink)), nil
@@ -124,6 +133,6 @@ func (s *flowStamp[ID, K]) Dispatch(ctx context.Context, cred K, syscall sys.Sys
 	// The deriving syscall, plus the source classes the resolved operation
 	// declares: a filesystem read over a secrets root labels differently from a
 	// list of the same root.
-	labels := append([]string{sys.SyscallLabelPrefix + syscall.Name}, s.flow.labels(syscall)...)
+	labels := append([]string{sys.SyscallLabelPrefix + syscall.Name}, s.flow.table.Labels(syscall)...)
 	return result.WithLabels(labels...), nil
 }

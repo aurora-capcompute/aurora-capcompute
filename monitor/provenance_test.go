@@ -384,3 +384,49 @@ func TestUnresolvableCaseFallsBackToFamilyBar(t *testing.T) {
 		t.Fatalf("errno = %v, want the family bar to deny a call whose case cannot be read", result.Errno())
 	}
 }
+
+// The permitted set is the index minus what the run's taint bars, and it must
+// track Guard exactly: anything it still lists must actually dispatch, and
+// anything it drops must actually be denied. Deriving it rather than caching it
+// is what makes that hold.
+func TestPermittedSetTracksTheGuard(t *testing.T) {
+	table := adtTable(t, nil)
+	flow, below := stamped(t, table, NewTaints[string]())
+	chain := flow.Guard(below)
+
+	permitted := flow.Permitted("p1")
+	if len(permitted) != 2 {
+		t.Fatalf("permitted = %v, want both cases reachable before any taint", permitted)
+	}
+
+	adtCall(t, chain, "read") // taints the run with untrusted_file
+
+	permitted = flow.Permitted("p1")
+	if len(permitted) != 1 || permitted[0].Operation != "read" {
+		t.Fatalf("permitted = %v, want the write dropped and the read kept", permitted)
+	}
+	// What the set claims is what the guard does, in both directions.
+	if blocked := adtCall(t, chain, "write"); blocked.Errno() != sys.ErrnoDenied {
+		t.Fatalf("write = %v, want denied — the permitted set dropped it", blocked.Errno())
+	}
+	if allowed := adtCall(t, chain, "read"); allowed.Status() != sys.StatusResult {
+		t.Fatalf("read = %v, want served — the permitted set kept it", allowed.Status())
+	}
+
+	// A declassification grows the set back.
+	flow.taints.Declassify("p1", "untrusted_file")
+	if permitted = flow.Permitted("p1"); len(permitted) != 2 {
+		t.Fatalf("permitted after declassify = %v, want both cases reachable again", permitted)
+	}
+}
+
+// A flow layer with no index would answer every sink guard with "no policy" —
+// the one wrong answer a reference monitor can give. It refuses to exist.
+func TestFlowRefusesToBeBuiltWithoutAnIndex(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("a flow layer with no grant table was built instead of panicking")
+		}
+	}()
+	NewFlow[string, testPID](NewTaints[string](), nil)
+}
