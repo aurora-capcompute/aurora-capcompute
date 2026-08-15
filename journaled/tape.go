@@ -5,9 +5,11 @@
 // pairs in order, raises ReplayDivergedError when a re-run guest issues a
 // syscall that does not match the recorded sequence, and surfaces an intent
 // without completion as replay.OpenIntentError. It owns the on-tape record
-// format — a fixed envelope (position, kind, prev_hash) plus an opaque
-// syscall/result payload, hash-chained for tamper evidence; the Journal
-// itself — where records durably live — is supplied by the caller.
+// format — a fixed envelope (position, kind, revision) plus an opaque
+// syscall/result payload; the Journal itself — where records durably live — is
+// supplied by the caller. Verify checks a journal's structure, not its
+// authenticity: the records are not chained, so a store that rewrites one is
+// not detected.
 package journaled
 
 import (

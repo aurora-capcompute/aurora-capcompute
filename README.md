@@ -23,8 +23,8 @@ sensitive action, delegate to sub‑agents, and keep a full audit trail — all 
 you writing that plumbing yourself.
 
 `aurora-capcompute` is that plumbing. It owns **sessions and processes**, the
-**replay journal**, **retries**, **rollback (sagas)**, **durable approval tasks**,
-**delegation to child agents**, **scheduling**, and **event subscriptions**. Its
+**replay journal**, **retries**, **savepoints**, **durable approval tasks**,
+**scheduling**, and **event subscriptions**. Its
 trick: there is **no database of mutable rows**. All durable state is a *fold of a
 single append‑only event log per session* (event sourcing) — so the state is always
 reconstructible, auditable, and replayable.
@@ -56,8 +56,7 @@ assembly is [aurora-dist](https://github.com/aurora-capcompute/aurora-dist).
 - **[capcompute](https://github.com/aurora-capcompute/capcompute)** — the processor
   below this: sandboxing, the syscall gate, deterministic execution, resource caps.
 - **aurora-capcompute (this repo)** — the orchestration runtime *on top* of the
-  processor: the journal and replay, sessions, retries, approvals, delegation,
-  scheduling.
+  processor: the journal and replay, sessions, retries, approvals, scheduling.
 - **[aurora-dispatchers](https://github.com/aurora-capcompute/aurora-dispatchers)** —
   the concrete drivers you inject (`core.internet`, `core.openaiApi`, …).
 - **[aurora-brains](https://github.com/aurora-capcompute/aurora-brains)** — the
@@ -71,13 +70,12 @@ assembly is [aurora-dist](https://github.com/aurora-capcompute/aurora-dist).
 | --- | --- |
 | **Sessions & processes** | `CreateSession`, `CreateProcess`, `Stop`, `Retry`, `RenameSession`, list/read — the full agent lifecycle |
 | **Replay journal** | Every syscall is written to the log as an *intent* then a *completion*, so a crashed process re‑drives deterministically |
-| **Tamper‑evidence** | A `journal.header` pins the program's identity per revision; replaying under changed code is refused |
+| **Versioned replay** | A `journal.header` pins the program's identity per revision; replaying under changed code is refused |
 | **Retries** | Resume the same revision, or restart into a fresh copy‑on‑write revision; bounded abort‑retry budget |
 | **Savepoints** | `sys.begin`/`sys.commit` bracket a critical section; `sys.abort` — or a failure that leaves the bracket open — forks the journal there and re‑runs the whole section live |
 | **Human‑in‑the‑loop** | A yielded syscall becomes a durable **task** with a secret resolution token; `ResolveTask` re‑drives the original intent |
-| **Delegation** | `sys.spawn` starts granted sub‑programs as tracked child processes, with attenuated authority |
-| **Fair scheduling** | Per‑tenant round‑robin quanta, quotas, virtual‑actor residency (reactivated by replay) |
-| **Subscriptions** | `Subscribe(sessionID)` streams live events (snapshots, process/task updates, journal, progress) |
+| **Bounded concurrency** | A fixed worker pool caps how many guests run at once; each quantum carries its own wall‑clock deadline |
+| **Subscriptions** | `Subscribe(sessionID)` taps the session's durable log; today it forwards the guest's `sys.log` reports |
 | **Capability security** | Only granted, schema‑checked syscalls are admitted; the runtime fails closed if a driver over‑advertises what it can do |
 | **Program contracts** | Each program ships a manifest (description + input/output JSON Schemas), validated at registration and on every call |
 | **Hot‑swap** | `AddProgram` / `RemoveProgram` change the loaded Wasm set at runtime; in‑flight processes stay bound to their original code identity, and removing a program stops and ejects the ones running under it |
@@ -153,7 +151,7 @@ repo's `monitor.Stack.ForProcess`, never by hand):
 
 ```
 Validator → FlowMonitor → [replay over the journal] → Labeler → Declassifier →
-savepoints → world → lifecycle → delegation → tasks → progress → timer → drivers
+savepoints → world → lifecycle → tasks → progress → timer → drivers
 ```
 
 For the layer-by-layer tour — why the replay boundary sits where it does, and
@@ -175,8 +173,8 @@ how one syscall, one crash, and one approval each travel the chain — see
   the program's own contract.
 - **Approval** — a yielded syscall becomes a durable task with its intent left
   open; resolving it re‑drives the intent under its original idempotency key.
-- **Scheduling** — root processes are quanta of a fair‑share scheduler; delegated
-  children run inside their parent's quantum so delegation can't deadlock.
+- **Scheduling** — a process runs as a quantum on a fixed worker pool; the pool
+  size is the concurrency bound, and a quantum's deadline bounds its wall‑clock.
 
 ## Configuration (the injected `Config`)
 
@@ -208,7 +206,6 @@ internal/agent/         the runtime engine (Go's internal/ rule hides it)
   manifest.go           the grant model + ValidateManifest
   direct/               the only door to capcompute: compile, spawn, quantum
   lifecycle.go          sys.input/output/log/abort
-  delegation.go         sys.spawn (child agents)
   abort.go              abort/failure re-drive and section refork
   restore.go            rebuild state by replaying event streams
   eventlog/             the append-only Log interface (no concrete store)

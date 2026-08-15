@@ -11,7 +11,7 @@ whole system; this is the one vertical slice.
 |---|---|
 | `capcompute` | the processor: the sandbox, the single host function |
 | `aurora-capcompute` | the runtime: manifests, the monitor chain, the journal |
-| `aurora-dispatchers` | the drivers: `internet`, `httptemplate`, `memory`, `command`, `filesystem`, `openaillm` — plus `builtin`, the router they plug into |
+| `aurora-dispatchers` | the drivers: `internet`, `httptemplate`, `scratch`, `command`, `filesystem`, `openaillm` — plus `builtin`, the index they plug into |
 | `aurora-dist` | the assembly: which drivers are compiled in at all |
 
 ---
@@ -73,7 +73,7 @@ A `Registration` is three methods:
 ```go
 Matches(syscall string) bool
 Normalize(syscall string, config json.RawMessage) (json.RawMessage, error)
-Configure(ctx, config, services Services, out *builtin.Config) error
+Configure(ctx, config, services Services) (builtin.Contribution, error)
 ```
 
 `InternetRegistration.Matches` is literally `syscall == internet.Capability`
@@ -106,9 +106,12 @@ runs every matching registration and wraps the result:
 return builtin.New[aurora.ProcessContext](config), nil
 ```
 
-`builtin.Dispatcher.Dispatch` (`aurora-dispatchers/builtin/dispatcher.go:44`)
-is a linear scan over handlers, and its fallthrough is `ErrnoNotFound`. This is
-the **bottom** of the chain: there is nothing below it.
+`Configure` returns a `Contribution` — the discriminator property, one `Entry`
+per case of the ADT, and the capability they add up to. It never sees the table;
+`Registry.Build` folds every family's contribution into one
+`map[Key]Entry`, refusing a duplicate `(syscall, operation)` rather than letting
+the first one win. That is the **bottom** of the chain: there is nothing below
+it.
 
 One detail worth pausing on: the provider overwrites `services.SessionID`,
 `ProcessID` and `Tenant` from the *credential*, never from the manifest
@@ -174,7 +177,7 @@ wrapProtocol         sys.input / sys.output / sys.abort
 task.Dispatcher      durable approval — yields, resumes on resolution
 progressDispatcher   sys.log
 timerDispatcher      sys.timer, if granted
-builtin.Dispatcher   routes by name to internet.Handler, memory.Handler, … ← the bottom
+builtin.Dispatcher   (syscall, operation) → entry; approval, then handler ← the bottom
 ```
 
 Everything from `savepointDispatcher` down is below replay, so its outcomes are
@@ -218,7 +221,10 @@ The guest calls the host function with `{"abi":4,"name":"core.internet","args":{
    intent is journaled **before** the call (journal-before-execute).
 5. **Labeler / Declassifier / task.Dispatcher** — below replay, so their outcomes are
    journaled once. An approval-gated call yields here and returns as a durable task.
-6. **`builtin.Dispatcher`** finds the handler whose `Handles(call.Name)` is true.
+6. **`builtin.Dispatcher`** reads the discriminator (`method` for `core.internet`)
+   out of the args and indexes `(core.internet, "GET")`. A miss is a denial naming
+   the granted operations; a hit whose entry requires approval yields here, below
+   the tape, so the yield is journaled once.
 7. **`internet.Handler.DispatchCall`** (`aurora-dispatchers/internet/handler.go:78`)
    resolves the per-method policy, attaches host-held credentials if the (method,
    host) matches an injection, and calls the client.
@@ -295,13 +301,22 @@ Note the two exemptions at [validate.go:47](../monitor/validate.go:47): `sys.beg
 and `sys.commit` bypass the grant lookup. They are savepoint markers that reach no
 driver and perform no effect.
 
-### 4.4 The driver is the last word on its own policy
+### 4.4 The grant is narrower than the capability
 
-Being granted `core.internet` does not grant *the internet*. The allowlist lives in
-the driver and is re-checked per call at `aurora-dispatchers/internet/internet.go:364`,
-after the Validator has already said yes. A driver may narrow, never widen — the
-`Capability` it publishes at build time is what the Validator will admit, and the
-policy it holds is what it will actually do.
+Being granted `core.internet` does not grant *the internet*. Two things narrow it,
+both after the Validator has said yes:
+
+- **The entry.** Only the `(syscall, operation)` pairs the manifest granted are in
+  the table, so a method outside the grant is denied by absence.
+- **The driver.** `internet.Client.Do` re-checks the (method, domain) allowlist at
+  `aurora-dispatchers/internet/internet.go:364` and applies the SSRF guard at dial
+  time. A driver may narrow, never widen.
+
+Flow policy and approval are *not* the driver's: they ride the entry, are
+published on the capability, and are enforced by the monitor above the tape and
+by `builtin.Dispatch` below it. What a driver still stamps is provenance that is
+not a property of the case — a stored value's own labels, or which credential
+injection matched.
 
 ### What this does *not* guarantee
 
