@@ -120,10 +120,6 @@ func (d *Dispatcher[K]) resume(ctx context.Context, cred K, record durable.TaskR
 	}
 }
 
-func (d *Dispatcher[K]) Capabilities() []sys.Capability {
-	return d.Next.Capabilities()
-}
-
 // HashCall is a call's identity within one journal position: the same position
 // reached with different arguments is a different task.
 func HashCall(syscall sys.Syscall) string {

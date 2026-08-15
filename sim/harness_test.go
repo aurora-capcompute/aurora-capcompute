@@ -168,7 +168,6 @@ func Chain(world *World, process string) (sys.Dispatcher[PID], error) {
 	}
 	table := Table(world.Effects)
 	stack := monitor.Stack[string, PID]{
-		Grants: func(PID) []sys.Capability { return table.Capabilities() },
 		Taints: monitor.NewTaints[string](), // fresh per boot: a crash loses host memory
 	}
 	return stack.ForProcess(tape, table, capability.NewDispatcher[PID](table))

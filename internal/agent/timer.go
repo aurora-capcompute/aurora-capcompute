@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
@@ -34,7 +35,7 @@ type timerDispatcher struct {
 	hidden      bool
 }
 
-func newTimerDispatcher(next sys.Dispatcher[ProcessContext], grant manifest.Syscall) *timerDispatcher {
+func newTimerDispatcher(next sys.Dispatcher[ProcessContext], grant manifest.Syscall, table *capability.Table) (*timerDispatcher, error) {
 	var settings manifest.TimerSettings
 	if len(grant.Config) > 0 {
 		// Validated at the manifest door; a decode failure here leaves the
@@ -45,7 +46,21 @@ func newTimerDispatcher(next sys.Dispatcher[ProcessContext], grant manifest.Sysc
 	if maxDuration <= 0 {
 		maxDuration = defaultMaxTimer
 	}
-	return &timerDispatcher{next: next, maxDuration: maxDuration, hidden: grant.Hidden}
+	// Declared where it is built, so the bound the guest is told about is the
+	// bound this dispatcher enforces.
+	err := table.Reserve(capability.Descriptor{
+		Name: manifest.TimerSyscall,
+		Description: fmt.Sprintf(
+			"Set a relative timer and be replayed when it fires. The process pauses until the duration elapses, then continues. Maximum %s.",
+			maxDuration,
+		),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"duration_seconds":{"type":"integer","minimum":1},"label":{"type":"string"}},"required":["duration_seconds"],"additionalProperties":false}`),
+		Hidden:      grant.Hidden,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &timerDispatcher{next: next, maxDuration: maxDuration, hidden: grant.Hidden}, nil
 }
 
 // Dispatch validates the request and yields a durable task. A valid call
@@ -73,16 +88,4 @@ func (t *timerDispatcher) Dispatch(ctx context.Context, cred ProcessContext, sys
 		return sys.Yield(fmt.Sprintf("Timer for %s: %s", duration, request.Label)), nil
 	}
 	return sys.Yield(fmt.Sprintf("Timer for %s", duration)), nil
-}
-
-func (t *timerDispatcher) Capabilities() []sys.Capability {
-	return append(t.next.Capabilities(), sys.Capability{
-		Name: manifest.TimerSyscall,
-		Description: fmt.Sprintf(
-			"Set a relative timer and be replayed when it fires. The process pauses until the duration elapses, then continues. Maximum %s.",
-			t.maxDuration,
-		),
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"duration_seconds":{"type":"integer","minimum":1},"label":{"type":"string"}},"required":["duration_seconds"],"additionalProperties":false}`),
-		Hidden:      t.hidden,
-	})
 }

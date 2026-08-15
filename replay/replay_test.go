@@ -49,8 +49,6 @@ func (f nextFunc[K]) Dispatch(ctx context.Context, cred K, syscall sys.Syscall, 
 	return f(ctx, cred, syscall, auth)
 }
 
-func (nextFunc[K]) Capabilities() []sys.Capability { return nil }
-
 func dispatchWith(t *testing.T, tape *fakeTape, next nextFunc[string]) (sys.SyscallResult, error) {
 	t.Helper()
 	return NewDispatcher[string](tape, next).Dispatch(

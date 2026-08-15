@@ -208,9 +208,9 @@ func waitForTerminal(t *testing.T, runtime *Runtime, processID string) ProcessSn
 // back the grant table rather than a dispatcher: the routing, the grant set and
 // the flow policy all read from one index, so a test that wants a fake driver
 // has to say what that index contains.
-func tableOf(d sys.Dispatcher[ProcessContext]) *capability.Table {
+func tableOf(d sys.Dispatcher[ProcessContext], publish ...capability.Descriptor) *capability.Table {
 	table := capability.NewTable()
-	for _, published := range d.Capabilities() {
+	for _, published := range publish {
 		family := capability.Family{
 			Description: published.Description,
 			Input:       published.InputSchema,

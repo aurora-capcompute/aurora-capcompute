@@ -39,19 +39,17 @@ func (p *runtimeDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, 
 	p.mu.Lock()
 	p.manifests = append(p.manifests, manifest.Clone())
 	p.mu.Unlock()
-	return tableOf(finalDispatcher{}), nil
+	return tableOf(finalDispatcher{}, llmCapability()), nil
 }
 
 // llmCapability publishes the fake cognition tool the way a real assembly
 // does: dispatchable, hidden from the discoverable menu, and — because the
 // processor's Validator enforces complete mediation — granted explicitly.
-func llmCapability() sys.Capability {
-	return sys.Capability{Name: "core.openaiApi", Description: "LLM chat", Hidden: true}
+func llmCapability() capability.Descriptor {
+	return capability.Descriptor{Name: "core.openaiApi", Description: "LLM chat", Hidden: true}
 }
 
 type finalDispatcher struct{}
-
-func (finalDispatcher) Capabilities() []sys.Capability { return []sys.Capability{llmCapability()} }
 
 func (finalDispatcher) Dispatch(_ context.Context, _ ProcessContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
 	if syscall.Name != "core.openaiApi" {
@@ -652,17 +650,11 @@ func (approvalDispatchers) Normalize(_ string, settings json.RawMessage) (json.R
 }
 
 func (approvalDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ manifest.Manifest) (*capability.Table, error) {
-	return tableOf(approvalToolDispatcher{}), nil
+	return tableOf(approvalToolDispatcher{}, llmCapability(),
+		capability.Descriptor{Name: "tool.y", Description: "guarded tool", InputSchema: json.RawMessage(`{"type":"object"}`)}), nil
 }
 
 type approvalToolDispatcher struct{}
-
-func (approvalToolDispatcher) Capabilities() []sys.Capability {
-	return []sys.Capability{
-		llmCapability(),
-		{Name: "tool.y", Description: "guarded tool", InputSchema: json.RawMessage(`{"type":"object"}`)},
-	}
-}
 
 func (approvalToolDispatcher) Dispatch(_ context.Context, _ ProcessContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	switch syscall.Name {
@@ -776,21 +768,11 @@ func (*failThenSucceedDispatchers) Normalize(_ string, settings json.RawMessage)
 }
 
 func (d *failThenSucceedDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ manifest.Manifest) (*capability.Table, error) {
-	return tableOf(&failThenSucceedDispatcher{parent: d}), nil
+	return tableOf(&failThenSucceedDispatcher{parent: d}, llmCapability(),
+		capability.Descriptor{Name: "tool.x", Description: "test tool", InputSchema: json.RawMessage(`{"type":"object"}`)}), nil
 }
 
 type failThenSucceedDispatcher struct{ parent *failThenSucceedDispatchers }
-
-func (d *failThenSucceedDispatcher) Capabilities() []sys.Capability {
-	return []sys.Capability{
-		llmCapability(),
-		{
-			Name:        "tool.x",
-			Description: "test tool",
-			InputSchema: json.RawMessage(`{"type":"object"}`),
-		},
-	}
-}
 
 func (d *failThenSucceedDispatcher) Dispatch(_ context.Context, _ ProcessContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
 	switch syscall.Name {
@@ -940,19 +922,13 @@ func (effectsDispatchers) Normalize(_ string, settings json.RawMessage) (json.Ra
 }
 
 func (p effectsDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ manifest.Manifest) (*capability.Table, error) {
-	return tableOf(p.d), nil
+	return tableOf(p.d, llmCapability(),
+		capability.Descriptor{Name: "billing.charge", Description: "charge a card", InputSchema: json.RawMessage(`{"type":"object"}`)}), nil
 }
 
 type effectsDispatcher struct {
 	mu      sync.Mutex
 	charges int
-}
-
-func (d *effectsDispatcher) Capabilities() []sys.Capability {
-	return []sys.Capability{
-		llmCapability(),
-		{Name: "billing.charge", Description: "charge a card", InputSchema: json.RawMessage(`{"type":"object"}`)},
-	}
 }
 
 func (d *effectsDispatcher) Dispatch(_ context.Context, _ ProcessContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {

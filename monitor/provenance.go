@@ -158,14 +158,3 @@ func (d *Declassifier[K]) Dispatch(ctx context.Context, cred K, syscall sys.Sysc
 	}
 	return sys.Result(result), nil
 }
-
-// Capabilities publishes sys.declassify (schema'd) alongside the chain's own
-// capabilities; whether a given run may call it is the manifest's decision,
-// enforced by the Validator's grant set like any capability.
-func (d *Declassifier[K]) Capabilities() []sys.Capability {
-	return append(d.next.Capabilities(), sys.Capability{
-		Name:        sys.SyscallDeclassify,
-		Description: "lift labels from this run's taint after human approval; the crossing is journaled with its reason",
-		InputSchema: declassifyInputSchema,
-	})
-}

@@ -5,18 +5,18 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
 // nopNext is a minimal downstream dispatcher for the lifecycle dispatcher, which
 // serves sys.input itself and only reads next's capability menu.
-type nopNext struct{ caps []sys.Capability }
+type nopNext struct{ caps []capability.Descriptor }
 
 func (n nopNext) Dispatch(context.Context, ProcessContext, sys.Syscall, sys.Authorization) (sys.SyscallResult, error) {
 	return sys.Result(nil), nil
 }
-func (n nopNext) Capabilities() []sys.Capability { return n.caps }
 
 // historyLabels unions the provenance across history entries — the taint the
 // run-to-run loopback carries.
@@ -41,7 +41,7 @@ func TestSysInputStampsHistoryLabels(t *testing.T) {
 		{Role: "user", Content: "what is Hwaas"},
 		{Role: "assistant", Content: "HwaaS is …", Labels: []string{"onyx_data"}},
 	}
-	l := newLifecycleDispatcher(nopNext{}, "next task", history, manifest.Manifest{}, 1, nil)
+	l, _ := mustLifecycle(t, nopNext{}, "next task", history, manifest.Manifest{}, 1, nil)
 
 	result, err := l.Dispatch(context.Background(), ProcessContext{},
 		sys.Syscall{Name: callSysInput}, sys.Authorization{})
@@ -59,7 +59,7 @@ func TestSysInputStampsHistoryLabels(t *testing.T) {
 // History with no labels stamps nothing — a fresh session doesn't spuriously
 // taint the run.
 func TestSysInputUnlabeledHistoryTaintsNothing(t *testing.T) {
-	l := newLifecycleDispatcher(nopNext{}, "task", []HistoryMessage{{Role: "assistant", Content: "clean"}}, manifest.Manifest{}, 1, nil)
+	l, _ := mustLifecycle(t, nopNext{}, "task", []HistoryMessage{{Role: "assistant", Content: "clean"}}, manifest.Manifest{}, 1, nil)
 	result, err := l.Dispatch(context.Background(), ProcessContext{},
 		sys.Syscall{Name: callSysInput}, sys.Authorization{})
 	if err != nil {

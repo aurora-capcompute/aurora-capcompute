@@ -23,8 +23,6 @@ func (d *stackDriver) Dispatch(ctx context.Context, _ testPID, syscall sys.Sysca
 	return sys.Result(json.RawMessage(`{"from":"` + syscall.Name + `"}`)), nil
 }
 
-func (d *stackDriver) Capabilities() []sys.Capability { return stackTable.Capabilities() }
-
 // stackTable is the grant index this chain is assembled around: the same one the
 // flow layer reads its policy from and the Validator admits against.
 var stackTable = func() *capability.Table {
@@ -48,12 +46,6 @@ func TestStackEnforcesCanonicalOrder(t *testing.T) {
 	header := journaled.Header{ABI: sys.ABIVersion, Program: "sha256:test", Process: "p1"}
 	driver := &stackDriver{}
 
-	// Everything the chain publishes is granted, plus the reserved syscalls.
-	grants := func(cred testPID) []sys.Capability {
-		return append(stackTable.Capabilities(),
-			sys.Capability{Name: sys.SyscallDeclassify},
-		)
-	}
 	boot := func(t *testing.T) sys.Dispatcher[testPID] {
 		t.Helper()
 		tape, err := journaled.NewTape(journal, header)
@@ -61,7 +53,6 @@ func TestStackEnforcesCanonicalOrder(t *testing.T) {
 			t.Fatalf("new tape: %v", err)
 		}
 		chain, err := Stack[string, testPID]{
-			Grants: grants,
 			Taints: NewTaints[string](), // fresh per boot: a crash loses host memory
 		}.ForProcess(tape, stackTable, driver)
 		if err != nil {
@@ -121,13 +112,38 @@ func TestStackEnforcesCanonicalOrder(t *testing.T) {
 
 func TestStackRequiresItsPieces(t *testing.T) {
 	tape, _ := journaled.NewTape(newMemJournal(), journaled.Header{ABI: sys.ABIVersion, Program: "p", Process: "r"})
-	if _, err := (Stack[string, testPID]{Taints: NewTaints[string]()}).ForProcess(tape, stackTable, &recordingDispatcher{}); err == nil {
-		t.Fatal("stack without Grants accepted")
+	if _, err := (Stack[string, testPID]{Taints: NewTaints[string]()}).ForProcess(tape, nil, &recordingDispatcher{}); err == nil {
+		t.Fatal("stack without a grant table accepted")
 	}
-	if _, err := (Stack[string, testPID]{Grants: grantsFixture()}).ForProcess(tape, stackTable, &recordingDispatcher{}); err == nil {
+	if _, err := (Stack[string, testPID]{}).ForProcess(tape, stackTable, &recordingDispatcher{}); err == nil {
 		t.Fatal("stack without Taints accepted")
 	}
-	if _, err := (Stack[string, testPID]{Grants: grantsFixture(), Taints: NewTaints[string]()}).ForProcess(tape, stackTable, nil); err == nil {
+	if _, err := (Stack[string, testPID]{Taints: NewTaints[string]()}).ForProcess(tape, stackTable, nil); err == nil {
 		t.Fatal("stack without drivers accepted")
+	}
+}
+
+// A syscall a decorator above the routing dispatcher serves is reserved, not
+// indexed: the Validator admits it, but it resolves to no entry. So a layer that
+// stops intercepting its own syscall falls through to the leaf and is denied,
+// rather than reaching a handler it never had. This is the property that makes
+// declaring-where-you-build safe.
+func TestReservedSyscallIsAdmittedButNotRoutable(t *testing.T) {
+	table := capability.NewTable()
+	if err := table.Reserve(capability.Descriptor{Name: "sys.served.above"}); err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	if _, admitted := table.Descriptor("sys.served.above"); !admitted {
+		t.Fatal("a reserved syscall must be in the grant set")
+	}
+	// The leaf is the routing dispatcher alone — nothing intercepts above it.
+	leaf := capability.NewDispatcher[testPID](table)
+	result, err := leaf.Dispatch(context.Background(), testPID{id: "p1"},
+		sys.Syscall{Abi: sys.ABIVersion, Name: "sys.served.above"}, sys.Authorization{})
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if result.Errno() != sys.ErrnoDenied {
+		t.Fatalf("errno = %v, want a reserved syscall reaching the leaf to be denied", result.Errno())
 	}
 }

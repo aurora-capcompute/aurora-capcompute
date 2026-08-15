@@ -18,10 +18,6 @@ func (d *recordingDispatcher) Dispatch(_ context.Context, _ struct{}, syscall sy
 	return sys.Result([]byte(`"passed"`)), nil
 }
 
-func (d *recordingDispatcher) Capabilities() []sys.Capability {
-	return []sys.Capability{{Name: "base.cap"}}
-}
-
 func TestSavepointDispatcherInterceptsMarkers(t *testing.T) {
 	next := &recordingDispatcher{}
 	d := &savepointDispatcher[struct{}]{next: next}
@@ -53,13 +49,5 @@ func TestSavepointDispatcherPassesThroughOtherCalls(t *testing.T) {
 	}
 	if len(next.seen) != 1 || next.seen[0] != "k8s.apply" {
 		t.Fatalf("passthrough calls = %v, want [k8s.apply]", next.seen)
-	}
-}
-
-func TestSavepointDispatcherDelegatesCapabilities(t *testing.T) {
-	d := &savepointDispatcher[struct{}]{next: &recordingDispatcher{}}
-	caps := d.Capabilities()
-	if len(caps) != 1 || caps[0].Name != "base.cap" {
-		t.Fatalf("capabilities = %v, want [base.cap]", caps)
 	}
 }

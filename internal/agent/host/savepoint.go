@@ -27,7 +27,3 @@ func (d *savepointDispatcher[K]) Dispatch(ctx context.Context, cred K, syscall s
 	}
 	return d.next.Dispatch(ctx, cred, syscall, auth)
 }
-
-func (d *savepointDispatcher[K]) Capabilities() []sys.Capability {
-	return d.next.Capabilities()
-}

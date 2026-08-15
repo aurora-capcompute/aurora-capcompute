@@ -21,7 +21,7 @@ func TestSysInputOmitsHistoryLabelsFromGuestPayload(t *testing.T) {
 		{Role: "user", Content: "q"},
 		{Role: "assistant", Content: "a", Labels: []string{"untrusted_web", "credential:ONYX@abc"}},
 	}
-	l := newLifecycleDispatcher(nopNext{}, "task", history, manifest.Manifest{}, 1, nil)
+	l, _ := mustLifecycle(t, nopNext{}, "task", history, manifest.Manifest{}, 1, nil)
 	result, err := l.Dispatch(context.Background(), ProcessContext{},
 		sys.Syscall{Abi: sys.ABIVersion, Name: callSysInput}, sys.Authorization{})
 	if err != nil {
@@ -76,9 +76,9 @@ func TestValidateManifestDeclassifyGrant(t *testing.T) {
 // still gates every crossing on human approval, so this only makes the governed
 // path reachable; it does not let the guest self-lift.
 func TestLifecyclePublishesDeclassifyWhenGranted(t *testing.T) {
-	granted := newLifecycleDispatcher(nopNext{}, "msg", nil,
+	_, grantedTable := mustLifecycle(t, nopNext{}, "msg", nil,
 		manifest.Manifest{Syscalls: []manifest.Syscall{{Syscall: manifest.DeclassifySyscall}}}, 1, nil)
-	cap, ok := sys.FindCapability(granted.Capabilities(), manifest.DeclassifySyscall)
+	cap, ok := grantedTable.Descriptor(manifest.DeclassifySyscall)
 	if !ok {
 		t.Fatal("a manifest granting sys.declassify must advertise it in the grant set")
 	}
@@ -88,8 +88,8 @@ func TestLifecyclePublishesDeclassifyWhenGranted(t *testing.T) {
 	if len(cap.InputSchema) == 0 {
 		t.Fatal("sys.declassify must carry an input schema for the Validator")
 	}
-	ungranted := newLifecycleDispatcher(nopNext{}, "msg", nil, manifest.Manifest{}, 1, nil)
-	if _, ok := sys.FindCapability(ungranted.Capabilities(), manifest.DeclassifySyscall); ok {
+	_, ungrantedTable := mustLifecycle(t, nopNext{}, "msg", nil, manifest.Manifest{}, 1, nil)
+	if _, ok := ungrantedTable.Descriptor(manifest.DeclassifySyscall); ok {
 		t.Fatal("sys.declassify must not appear unless the manifest grants it (opt-in)")
 	}
 }

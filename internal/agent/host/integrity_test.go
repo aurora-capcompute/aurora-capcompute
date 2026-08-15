@@ -24,7 +24,6 @@ type noopDispatcher struct{}
 func (noopDispatcher) Dispatch(context.Context, integrityPID, sys.Syscall, sys.Authorization) (sys.SyscallResult, error) {
 	return sys.Result(nil), nil
 }
-func (noopDispatcher) Capabilities() []sys.Capability { return nil }
 
 // memJournal is an in-memory journaled.Journal for these tests.
 type memJournal struct {

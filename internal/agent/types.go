@@ -250,8 +250,8 @@ type agentInput struct {
 	// property of the guest's struct shape (an untrusted guest could read a label
 	// field if we sent one — the taint taxonomy and credential fingerprints stay
 	// host-only).
-	History      []guestHistoryMessage `json:"history,omitempty"`
-	Capabilities []sys.Capability      `json:"capabilities,omitempty"`
+	History      []guestHistoryMessage   `json:"history,omitempty"`
+	Capabilities []capability.Descriptor `json:"capabilities,omitempty"`
 	// Attempt is which run of this process the guest is on (1 = first). A
 	// retried process — including an abort-retry — sees a higher attempt, so a
 	// program can back off or change strategy.

@@ -11,26 +11,37 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-func leafCap(name string) sys.Capability { return sys.Capability{Name: name} }
+func leafCap(name string) capability.Descriptor { return capability.Descriptor{Name: name} }
 
 // capsDispatcher advertises a fixed capability set; it never serves calls.
-type capsDispatcher struct{ caps []sys.Capability }
+type capsDispatcher struct{ caps []capability.Descriptor }
 
 func (capsDispatcher) Dispatch(context.Context, ProcessContext, sys.Syscall, sys.Authorization) (sys.SyscallResult, error) {
 	return sys.Fail("unused"), nil
 }
-func (d capsDispatcher) Capabilities() []sys.Capability { return d.caps }
 
 // fixedProvider is a DispatcherProvider whose driver advertises a fixed
 // capability set regardless of the manifest — the shape of an unfaithful
 // (over-advertising) provider, the confused-deputy the guard defends against.
-type fixedProvider struct{ caps []sys.Capability }
+type fixedProvider struct{ caps []capability.Descriptor }
 
 func (fixedProvider) Normalize(_ string, settings json.RawMessage) (json.RawMessage, error) {
 	return settings, nil
 }
 func (p fixedProvider) NewDispatcher(context.Context, ProcessContext, manifest.Manifest) (*capability.Table, error) {
-	return tableOf(capsDispatcher{caps: p.caps}), nil
+	return reservedTable(p.caps...), nil
+}
+
+// reservedTable advertises names with nothing behind them — the shape of a
+// provider that publishes more than it serves.
+func reservedTable(descriptors ...capability.Descriptor) *capability.Table {
+	table := capability.NewTable()
+	for _, descriptor := range descriptors {
+		if err := table.Reserve(descriptor); err != nil {
+			panic(err)
+		}
+	}
+	return table
 }
 
 // The reconciliation guard makes the manifest authoritative over what the
@@ -44,19 +55,19 @@ func TestReconcileGrants(t *testing.T) {
 	}}
 
 	t.Run("faithful advertisement is admitted", func(t *testing.T) {
-		if err := reconcileGrants([]sys.Capability{leafCap("core.openaiApi"), leafCap("core.internet")}, spec); err != nil {
+		if err := reconcileGrants([]capability.Descriptor{leafCap("core.openaiApi"), leafCap("core.internet")}, spec); err != nil {
 			t.Fatalf("faithful provider rejected: %v", err)
 		}
 	})
 
 	t.Run("under-advertisement is admitted (not a leak)", func(t *testing.T) {
-		if err := reconcileGrants([]sys.Capability{leafCap("core.internet")}, spec); err != nil {
+		if err := reconcileGrants([]capability.Descriptor{leafCap("core.internet")}, spec); err != nil {
 			t.Fatalf("under-advertising provider rejected: %v", err)
 		}
 	})
 
 	t.Run("over-advertisement is rejected and names the leak", func(t *testing.T) {
-		err := reconcileGrants([]sys.Capability{leafCap("core.internet"), leafCap("core.filesystem")}, spec)
+		err := reconcileGrants([]capability.Descriptor{leafCap("core.internet"), leafCap("core.filesystem")}, spec)
 		if err == nil || !strings.Contains(err.Error(), "core.filesystem") {
 			t.Fatalf("err = %v, want a rejection naming core.filesystem", err)
 		}
@@ -68,7 +79,7 @@ func TestReconcileGrants(t *testing.T) {
 		timerManifest := manifest.Manifest{Version: manifest.Version, Syscalls: []manifest.Syscall{
 			{Syscall: manifest.TimerSyscall},
 		}}
-		err := reconcileGrants([]sys.Capability{leafCap(manifest.TimerSyscall)}, timerManifest)
+		err := reconcileGrants([]capability.Descriptor{leafCap(manifest.TimerSyscall)}, timerManifest)
 		if err == nil || !strings.Contains(err.Error(), manifest.TimerSyscall) {
 			t.Fatalf("err = %v, want a driver advertising %s to be rejected", err, manifest.TimerSyscall)
 		}
@@ -80,7 +91,7 @@ func TestReconcileGrants(t *testing.T) {
 // (fail-closed), so the leaked capability never becomes callable.
 func TestProcessDriversRejectsOverAdvertisingProvider(t *testing.T) {
 	r := &Runtime{
-		dispatchers: fixedProvider{caps: []sys.Capability{leafCap("core.openaiApi"), leafCap("core.leak")}},
+		dispatchers: fixedProvider{caps: []capability.Descriptor{leafCap("core.openaiApi"), leafCap("core.leak")}},
 		processes: map[string]*processState{
 			"p1": {id: "p1", manifest: manifest.Manifest{Version: manifest.Version, Syscalls: []manifest.Syscall{
 				{Syscall: "core.openaiApi", Hidden: true},
@@ -95,7 +106,7 @@ func TestProcessDriversRejectsOverAdvertisingProvider(t *testing.T) {
 
 func TestProcessDriversAdmitsFaithfulProvider(t *testing.T) {
 	r := &Runtime{
-		dispatchers: fixedProvider{caps: []sys.Capability{leafCap("core.openaiApi")}},
+		dispatchers: fixedProvider{caps: []capability.Descriptor{leafCap("core.openaiApi")}},
 		processes: map[string]*processState{
 			"p1": {id: "p1", manifest: manifest.Manifest{Version: manifest.Version, Syscalls: []manifest.Syscall{
 				{Syscall: "core.openaiApi", Hidden: true},

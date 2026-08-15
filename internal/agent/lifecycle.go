@@ -7,7 +7,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
+	manifestpkg "github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
@@ -39,9 +40,10 @@ type abortArgs struct {
 
 type lifecycleDispatcher struct {
 	next           sys.Dispatcher[ProcessContext]
+	table          *capability.Table
 	input          string
 	history        []HistoryMessage
-	manifest       manifest.Manifest
+	manifest       manifestpkg.Manifest
 	attempt        int
 	validateAnswer func(string) error
 }
@@ -50,18 +52,47 @@ func newLifecycleDispatcher(
 	next sys.Dispatcher[ProcessContext],
 	input string,
 	history []HistoryMessage,
-	manifest manifest.Manifest,
+	manifest manifestpkg.Manifest,
 	attempt int,
 	validateAnswer func(string) error,
-) *lifecycleDispatcher {
+	table *capability.Table,
+) (*lifecycleDispatcher, error) {
+	// The agent protocol, declared by the layer that serves it.
+	for _, descriptor := range []capability.Descriptor{
+		{Name: sys.SyscallInput, Description: "fetch this process's input, prior history, and the visible capability menu", Hidden: true},
+		{Name: sys.SyscallOutput, Description: "record this process's final answer on the journal", Hidden: true},
+		{Name: sys.SyscallAbort, Description: "abandon the open section and re-run it from its sys.begin", Hidden: true},
+	} {
+		if err := table.ReserveMissing(descriptor); err != nil {
+			return nil, err
+		}
+	}
+	// sys.declassify is served by the Declassifier below the flow guard (which
+	// performs the actual taint lift on the approved result). It must be in the
+	// grant set HERE so the Validator admits the call — but only when the
+	// manifest granted it: declassification is opt-in per program. It is
+	// advertised (not hidden) so the model can discover and request it; every
+	// crossing still yields for human approval, so the guest can propose a lift
+	// but never perform one itself.
+	if _, ok := manifest.Grant(manifestpkg.DeclassifySyscall); ok {
+		err := table.ReserveMissing(capability.Descriptor{
+			Name:        manifestpkg.DeclassifySyscall,
+			Description: "request lifting labels from this run's taint; each crossing requires human approval and is journaled with its reason",
+			InputSchema: declassifyInputSchema,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
 	return &lifecycleDispatcher{
 		next:           next,
+		table:          table,
 		input:          input,
 		history:        history,
 		manifest:       manifest,
 		attempt:        attempt,
 		validateAnswer: validateAnswer,
-	}
+	}, nil
 }
 
 func (l *lifecycleDispatcher) Dispatch(ctx context.Context, cred ProcessContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
@@ -70,7 +101,7 @@ func (l *lifecycleDispatcher) Dispatch(ctx context.Context, cred ProcessContext,
 		payload, err := json.Marshal(agentInput{
 			Input:        l.input,
 			History:      guestHistory(l.history),
-			Capabilities: visibleCapabilities(l.next.Capabilities()),
+			Capabilities: visibleCapabilities(l.table.Descriptors()),
 			Attempt:      l.attempt,
 		})
 		if err != nil {
@@ -111,41 +142,6 @@ func (l *lifecycleDispatcher) Dispatch(ctx context.Context, cred ProcessContext,
 	default:
 		return l.next.Dispatch(ctx, cred, syscall, auth)
 	}
-}
-
-func (l *lifecycleDispatcher) Capabilities() []sys.Capability {
-	caps := appendMissing(l.next.Capabilities(),
-		sys.Capability{
-			Name:        sys.SyscallInput,
-			Description: "fetch this process's input, prior history, and the visible capability menu",
-			Hidden:      true,
-		},
-		sys.Capability{
-			Name:        sys.SyscallOutput,
-			Description: "record this process's final answer on the journal",
-			Hidden:      true,
-		},
-		sys.Capability{
-			Name:        sys.SyscallAbort,
-			Description: "abandon the open section and re-run it from its sys.begin",
-			Hidden:      true,
-		},
-	)
-	// sys.declassify is served by the processor Declassifier below the FlowMonitor
-	// (which performs the actual taint lift on the approved result). Its
-	// capability must appear in the grant set HERE so the Validator admits the
-	// call — but only when the manifest granted it (declassification is opt-in
-	// per program). It is advertised (not hidden) so the model can discover and
-	// request it; every crossing still yields for human approval, so the guest
-	// can propose a lift but never perform one itself.
-	if _, ok := l.manifest.Grant(manifest.DeclassifySyscall); ok {
-		caps = appendMissing(caps, sys.Capability{
-			Name:        manifest.DeclassifySyscall,
-			Description: "request lifting labels from this run's taint; each crossing requires human approval and is journaled with its reason",
-			InputSchema: declassifyInputSchema,
-		})
-	}
-	return caps
 }
 
 // declassifyInputSchema mirrors the processor Declassifier's sys.declassify input

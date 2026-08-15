@@ -56,7 +56,6 @@ interface between the two repos:
 ```go
 type Dispatcher[K any] interface {
     Dispatch(ctx context.Context, cred K, syscall Syscall, auth Authorization) (SyscallResult, error)
-    Capabilities() []Capability
 }
 ```
 

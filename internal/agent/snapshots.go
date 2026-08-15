@@ -9,7 +9,7 @@ import (
 	"encoding/hex"
 	"time"
 
-	"github.com/aurora-capcompute/capcompute/sys"
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 )
@@ -116,8 +116,8 @@ func copyTime(value *time.Time) *time.Time {
 // syscall and the runtime's protocol calls) from the program's discoverable
 // menu. Hidden is set at build time on each published capability, so it works
 // even when a driver's published operation names differ from its local name.
-func visibleCapabilities(caps []sys.Capability) []sys.Capability {
-	visible := make([]sys.Capability, 0, len(caps))
+func visibleCapabilities(caps []capability.Descriptor) []capability.Descriptor {
+	visible := make([]capability.Descriptor, 0, len(caps))
 	for _, c := range caps {
 		if !c.Hidden {
 			visible = append(visible, c)

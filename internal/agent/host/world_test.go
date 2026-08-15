@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
@@ -16,14 +17,14 @@ func (sink) Dispatch(context.Context, struct{}, sys.Syscall, sys.Authorization) 
 	return sys.Fail("unexpected passthrough"), nil
 }
 
-func (sink) Capabilities() []sys.Capability { return nil }
-
 func TestWorldDispatcherServesJournaledSources(t *testing.T) {
 	calls := 0
-	world := &worldDispatcher[struct{}]{
-		next: sink{},
-		now:  func() time.Time { calls++; return time.UnixMilli(1_234_567) },
-		rand: bytes.NewReader([]byte{0xde, 0xad, 0xbe, 0xef}),
+	table := capability.NewTable()
+	world, buildErr := newWorldDispatcher[struct{}](sink{},
+		func() time.Time { calls++; return time.UnixMilli(1_234_567) },
+		bytes.NewReader([]byte{0xde, 0xad, 0xbe, 0xef}), table)
+	if buildErr != nil {
+		t.Fatalf("new world dispatcher: %v", buildErr)
 	}
 
 	result, err := world.Dispatch(context.Background(), struct{}{}, sys.Syscall{Abi: sys.ABIVersion, Name: sys.SyscallNow}, sys.Authorization{})
@@ -57,16 +58,10 @@ func TestWorldDispatcherServesJournaledSources(t *testing.T) {
 	if result.Status() != sys.StatusFailed {
 		t.Fatalf("oversized draw = %v, want failed", result)
 	}
-	var sawNow, sawRandom bool
-	for _, capability := range world.Capabilities() {
-		if capability.Name == sys.SyscallNow && capability.Hidden {
-			sawNow = true
+	for _, name := range []string{sys.SyscallNow, sys.SyscallRandom} {
+		descriptor, ok := table.Descriptor(name)
+		if !ok || !descriptor.Hidden {
+			t.Fatalf("%s is not declared as a hidden capability in the grant table", name)
 		}
-		if capability.Name == sys.SyscallRandom && capability.Hidden {
-			sawRandom = true
-		}
-	}
-	if !sawNow || !sawRandom {
-		t.Fatal("world sources are not published as hidden capabilities")
 	}
 }

@@ -141,8 +141,6 @@ type approvalDispatcher struct {
 	executions int
 }
 
-func (*approvalDispatcher) Capabilities() []sys.Capability { return nil }
-
 func (d *approvalDispatcher) Dispatch(_ context.Context, _ proc, _ sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	if auth.Decision == "" {
 		return sys.Yield("approve test operation"), nil

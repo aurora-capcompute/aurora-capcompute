@@ -105,20 +105,19 @@ func (r *Runtime) clampDeadline(requested time.Duration) time.Duration {
 
 // reconcileGrants fails closed when the dispatcher provider advertises a
 // capability the manifest did not grant. The grant set the processor Validator
-// enforces is the assembled chain's advertised capabilities (Stack.Grants, wired
-// in the host factory to the chain's own Capabilities()), so a provider that
-// publishes more than the manifest declared would silently widen a process's
-// authority beyond its manifest — the confused-deputy gap. Reconciling the
+// enforces is the process's grant table, so a provider that publishes more than
+// the manifest declared would silently widen a process's authority beyond its
+// manifest — the confused-deputy gap. Reconciling the
 // provider's leaf output against the manifest here makes the manifest the
 // enforced source of truth rather than a trusted input.
 //
-// Only the provider's own leaf capabilities are checked: the runtime layers its
-// protocol capabilities (sys.input/output/log/abort/now/random and
-// the manifest-gated sys.timer) on top afterwards, so they never
-// appear in `advertised` and need no exception here. Under-advertising (a leaf
+// Only the provider's own leaf capabilities are checked: the runtime reserves
+// its protocol syscalls (sys.input/output/log/abort/now/random and the
+// manifest-gated sys.timer) into the table afterwards, so they are not yet in
+// `advertised` when this runs and need no exception here. Under-advertising (a leaf
 // grant the provider chose not to serve) is not a leak — the guest simply cannot
 // call it — so only over-advertising fails the check.
-func reconcileGrants(advertised []sys.Capability, manifest manifest.Manifest) error {
+func reconcileGrants(advertised []capability.Descriptor, manifest manifest.Manifest) error {
 	granted := make(map[string]struct{}, len(manifest.Syscalls))
 	for _, leaf := range manifest.LeafSyscalls() {
 		granted[leaf.Syscall] = struct{}{}
@@ -284,7 +283,7 @@ func (r *Runtime) Drivers(resolveCtx context.Context, cred ProcessContext) (sys.
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := reconcileGrants(table.Capabilities(), spec); err != nil {
+	if err := reconcileGrants(table.Descriptors(), spec); err != nil {
 		return nil, nil, err
 	}
 	// The routing dispatcher is built here, from the table the provider returned,
@@ -294,15 +293,22 @@ func (r *Runtime) Drivers(resolveCtx context.Context, cred ProcessContext) (sys.
 	if grant, ok := spec.Grant(manifest.TimerSyscall); ok {
 		// sys.timer is the runtime's own, served below the task layer so its
 		// yield becomes a durable timer task.
-		base = newTimerDispatcher(base, grant)
+		base, err = newTimerDispatcher(base, grant, table)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
-	return newProgressDispatcher(base), table, nil
+	progress, err := newProgressDispatcher(base, table)
+	if err != nil {
+		return nil, nil, err
+	}
+	return progress, table, nil
 }
 
 // wrapProtocol stacks the runtime's protocol layers above the task layer: the
 // agent lifecycle outermost, whose sys.input payload advertises every capability
 // beneath it.
-func (r *Runtime) wrapProtocol(cred ProcessContext, next sys.Dispatcher[ProcessContext]) (sys.Dispatcher[ProcessContext], error) {
+func (r *Runtime) wrapProtocol(cred ProcessContext, next sys.Dispatcher[ProcessContext], table *capability.Table) (sys.Dispatcher[ProcessContext], error) {
 	r.mu.Lock()
 	proc := r.processes[cred.ProcessID]
 	var spec manifest.Manifest
@@ -332,7 +338,8 @@ func (r *Runtime) wrapProtocol(cred ProcessContext, next sys.Dispatcher[ProcessC
 		func(answer string) error {
 			return r.scheduler.ValidateOutput(ProgramID(spec.Program), answer)
 		},
-	), nil
+		table,
+	)
 }
 
 // programBinding refuses a relaunch under program bytes or an interface that

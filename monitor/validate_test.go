@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
@@ -18,12 +19,16 @@ func (d *recordingDispatcher) Dispatch(_ context.Context, _ testPID, syscall sys
 	return sys.Result(json.RawMessage(`{"ok":true}`)), nil
 }
 
-func (d *recordingDispatcher) Capabilities() []sys.Capability {
-	return []sys.Capability{{Name: "listed.by.next"}}
-}
-
-func grantsFixture(grants ...sys.Capability) GrantSource[testPID] {
-	return func(testPID) []sys.Capability { return grants }
+// grantsFixture is a table that admits names without routing them — the
+// Validator only ever asks what a name means, never who serves it.
+func grantsFixture(grants ...capability.Descriptor) *capability.Table {
+	table := capability.NewTable()
+	for _, grant := range grants {
+		if err := table.Reserve(grant); err != nil {
+			panic(err)
+		}
+	}
+	return table
 }
 
 func callValidator(t *testing.T, v *Validator[testPID], name string, args string) (sys.SyscallResult, error) {
@@ -35,25 +40,9 @@ func callValidator(t *testing.T, v *Validator[testPID], name string, args string
 	return v.Dispatch(context.Background(), testPID{id: "p1"}, sys.Syscall{Abi: sys.ABIVersion, Name: name, Args: raw}, sys.Authorization{})
 }
 
-func TestValidatorDeniesUngrantedCapability(t *testing.T) {
-	next := &recordingDispatcher{}
-	v := NewValidator(grantsFixture(sys.Capability{Name: "mail.send"}), next)
-
-	result, err := callValidator(t, v, "k8s.delete", `{}`)
-	if err != nil {
-		t.Fatalf("dispatch: %v", err)
-	}
-	if result.Status() != sys.StatusFailed || result.Errno() != sys.ErrnoDenied {
-		t.Fatalf("status/errno = %v/%v, want failed/denied", result.Status(), result.Errno())
-	}
-	if len(next.calls) != 0 {
-		t.Fatalf("ungranted syscall reached the next dispatcher: %v", next.calls)
-	}
-}
-
 func TestValidatorRejectsArgsFailingInputSchema(t *testing.T) {
 	next := &recordingDispatcher{}
-	v := NewValidator(grantsFixture(sys.Capability{
+	v := NewValidator(grantsFixture(capability.Descriptor{
 		Name:        "mail.send",
 		InputSchema: json.RawMessage(`{"type":"object","required":["to"],"properties":{"to":{"type":"string"}}}`),
 	}), next)
@@ -74,7 +63,7 @@ func TestValidatorRejectsArgsFailingInputSchema(t *testing.T) {
 
 func TestValidatorPassesValidCallUnchanged(t *testing.T) {
 	next := &recordingDispatcher{}
-	v := NewValidator(grantsFixture(sys.Capability{
+	v := NewValidator(grantsFixture(capability.Descriptor{
 		Name:        "mail.send",
 		InputSchema: json.RawMessage(`{"type":"object","required":["to"],"properties":{"to":{"type":"string"}}}`),
 	}), next)
@@ -88,19 +77,6 @@ func TestValidatorPassesValidCallUnchanged(t *testing.T) {
 	}
 	if len(next.calls) != 1 || next.calls[0].Name != "mail.send" || string(next.calls[0].Args) != `{"to":"ops@example.com"}` {
 		t.Fatalf("next dispatcher saw %v, want the original syscall", next.calls)
-	}
-}
-
-func TestValidatorAllowsCapabilityWithoutSchema(t *testing.T) {
-	next := &recordingDispatcher{}
-	v := NewValidator(grantsFixture(sys.Capability{Name: "clock.now"}), next)
-
-	result, err := callValidator(t, v, "clock.now", "")
-	if err != nil {
-		t.Fatalf("dispatch: %v", err)
-	}
-	if result.Status() != sys.StatusResult {
-		t.Fatalf("status = %v, want result", result.Status())
 	}
 }
 
@@ -124,7 +100,7 @@ func TestValidatorPassesReservedSyscallsWithoutGrant(t *testing.T) {
 
 func TestValidatorSurfacesBrokenSchemaAsHostError(t *testing.T) {
 	next := &recordingDispatcher{}
-	v := NewValidator(grantsFixture(sys.Capability{
+	v := NewValidator(grantsFixture(capability.Descriptor{
 		Name:        "mail.send",
 		InputSchema: json.RawMessage(`{"type":`),
 	}), next)
@@ -135,13 +111,5 @@ func TestValidatorSurfacesBrokenSchemaAsHostError(t *testing.T) {
 	}
 	if len(next.calls) != 0 {
 		t.Fatalf("call with broken schema reached the next dispatcher")
-	}
-}
-
-func TestValidatorCapabilitiesDelegates(t *testing.T) {
-	v := NewValidator(grantsFixture(), &recordingDispatcher{})
-	capabilities := v.Capabilities()
-	if len(capabilities) != 1 || capabilities[0].Name != "listed.by.next" {
-		t.Fatalf("capabilities = %v, want next's list", capabilities)
 	}
 }

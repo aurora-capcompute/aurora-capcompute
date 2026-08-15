@@ -8,13 +8,9 @@ import (
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
-
-// GrantSource reports the capabilities granted to a cred. The app supplies
-// where grants live (the manifest, a policy store); the Validator supplies
-// the enforcement.
-type GrantSource[K any] func(cred K) []sys.Capability
 
 // Validator is the reference-monitor decorator: complete mediation for the
 // dispatcher chain behind it (law #4). Before delegating it checks
@@ -26,18 +22,20 @@ type GrantSource[K any] func(cred K) []sys.Capability
 // Policy refusals are results (StatusFailed), not Go errors: the guest sees a
 // classified errno and can react; the process does not crash.
 type Validator[K any] struct {
-	grants GrantSource[K]
-	next   sys.Dispatcher[K]
+	table *capability.Table
+	next  sys.Dispatcher[K]
 
 	mu      sync.Mutex
 	schemas map[string]*jsonschema.Schema // keyed by raw schema bytes
 }
 
-// NewValidator wraps next so every dispatch is checked against the cred's
-// grant set and the capability's input schema.
-func NewValidator[K any](grants GrantSource[K], next sys.Dispatcher[K]) *Validator[K] {
+// NewValidator wraps next so every dispatch is checked against the process's
+// grant table and the named syscall's input schema. The table is the grant set:
+// there is no separate source to keep in step with what the chain was built
+// from, because it is what the chain was built from.
+func NewValidator[K any](table *capability.Table, next sys.Dispatcher[K]) *Validator[K] {
 	return &Validator[K]{
-		grants:  grants,
+		table:   table,
 		next:    next,
 		schemas: make(map[string]*jsonschema.Schema),
 	}
@@ -49,7 +47,7 @@ func (v *Validator[K]) Dispatch(ctx context.Context, cred K, syscall sys.Syscall
 		return v.next.Dispatch(ctx, cred, syscall, auth)
 	}
 
-	granted, ok := sys.FindCapability(v.grants(cred), syscall.Name)
+	granted, ok := v.table.Descriptor(syscall.Name)
 	if !ok {
 		return sys.FailCode(sys.ErrnoDenied, fmt.Sprintf("capability %q is not granted", syscall.Name)), nil
 	}
@@ -75,10 +73,6 @@ func (v *Validator[K]) Dispatch(ctx context.Context, cred K, syscall sys.Syscall
 	}
 
 	return v.next.Dispatch(ctx, cred, syscall, auth)
-}
-
-func (v *Validator[K]) Capabilities() []sys.Capability {
-	return v.next.Capabilities()
 }
 
 func (v *Validator[K]) compiled(raw []byte) (*jsonschema.Schema, error) {

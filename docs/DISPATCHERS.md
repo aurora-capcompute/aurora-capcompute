@@ -87,10 +87,12 @@ allowlist — builds a client bound to that policy, and appends **two** things t
 the output:
 
 - an `internet.Handler` — the thing that can actually make requests,
-- one `sys.Capability{Name: "core.internet", InputSchema: …}` — the thing that
-  *declares* it can.
+- a `capability.Family` — one `capability.Entry` per (method, domain) case,
+  each carrying its own schema, labels, forbid set and approval flag.
 
-That pairing is the whole trick, and §4.3 is where it pays off.
+The family is what gets indexed. A handler is never reached except through an
+entry that resolved to it, so what a call is permitted to do is a property of
+the index rather than of the code that runs. §4.3 is where that pays off.
 
 Note what happens at build time, not call time: host-held credentials are
 resolved here (`buildInjections`), so a grant referencing a missing secret fails
@@ -133,7 +135,7 @@ provider for the leaf chain, then does the check that keeps the manifest
 authoritative:
 
 ```go
-if err := reconcileGrants(base.Capabilities(), spec); err != nil {
+if err := reconcileGrants(table.Descriptors(), spec); err != nil {
     return nil, err
 }
 ```
@@ -190,16 +192,23 @@ This is the line that makes §4.3 airtight
 ([host.go:160](../internal/agent/host/host.go:160)):
 
 ```go
-stack := monitor.Stack[ID, K]{
-    Grants: func(K) []sys.Capability { return withSavepoints.Capabilities() },
-    ...
-}
+return stack.ForProcess(tape, table, withSavepoints)
 ```
 
-The Validator's grant set is **the assembled chain's own `Capabilities()`** — not a
-list parsed from the manifest, not a config file. The set of what is permitted is
-derived from the set of what was built. They cannot drift, because they are the
-same value.
+The Validator's grant set is **the process's grant table** — not a list parsed
+from the manifest, not a config file, and not a second advertisement the chain
+maintains alongside itself. The table is what the routing dispatcher was built
+from; every layer stacked above it that serves a syscall of its own declares
+that syscall into the same table as it is constructed (`sys.now` and
+`sys.random` in `newWorldDispatcher`, `sys.log` in `newProgressDispatcher`,
+`sys.timer` in `newTimerDispatcher`, the agent protocol in
+`newLifecycleDispatcher`). The set of what is permitted and the set of what was
+built are one object, so they cannot drift.
+
+A syscall a decorator serves is *reserved* rather than indexed: it is admissible
+and appears on the menu, but resolves to no entry. A decorator that forgot to
+intercept its own syscall therefore falls through to the leaf and is denied,
+rather than reaching a handler that was never there.
 
 ---
 
@@ -285,10 +294,10 @@ failed syscall.
 
 Three properties make that hold:
 
-- **The grant set is derived, not declared.** `Grants` returns
-  `withSavepoints.Capabilities()` — the assembled chain's own advertisement
-  ([host.go:160](../internal/agent/host/host.go:160)). Nothing can be in the grant
-  set that is not in the chain.
+- **The grant set is the table, not a copy of it.** The Validator reads the same
+  `capability.Table` the routing dispatcher was built from and every protocol
+  layer declared into ([host.go](../internal/agent/host/host.go)). Nothing can be
+  in the grant set that is not in the chain.
 - **The chain cannot exceed the manifest.** `reconcileGrants`
   ([runtime.go:120](../internal/agent/runtime.go:120)) refuses to build a process
   whose provider advertised more than the manifest granted.

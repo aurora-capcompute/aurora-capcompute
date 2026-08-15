@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/capcompute/sys"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
@@ -17,7 +18,7 @@ import (
 // TestLifecycleAbortArgs: sys.abort carries the guest's reason; malformed args
 // are rejected at dispatch and empty args are a bare "give up".
 func TestLifecycleAbortArgs(t *testing.T) {
-	l := newLifecycleDispatcher(stubNext{}, "msg", nil, manifest.Manifest{}, 1, nil)
+	l, _ := mustLifecycle(t, stubNext{}, "msg", nil, manifest.Manifest{}, 1, nil)
 	dispatch := func(args string) sys.SyscallResult {
 		t.Helper()
 		result, err := l.Dispatch(context.Background(), ProcessContext{},
@@ -50,7 +51,7 @@ func TestLifecycleValidatesAnswer(t *testing.T) {
 		}
 		return nil
 	}
-	l := newLifecycleDispatcher(stubNext{}, "msg", nil, manifest.Manifest{}, 1, reject)
+	l, _ := mustLifecycle(t, stubNext{}, "msg", nil, manifest.Manifest{}, 1, reject)
 	output := func(args string) sys.SyscallResult {
 		t.Helper()
 		result, err := l.Dispatch(context.Background(), ProcessContext{},
@@ -71,8 +72,19 @@ func TestLifecycleValidatesAnswer(t *testing.T) {
 
 type stubNext struct{}
 
+// mustLifecycle builds the lifecycle layer over a fresh grant table — the table
+// is where it declares sys.input/output/abort, so every test needs one.
+func mustLifecycle(t *testing.T, next sys.Dispatcher[ProcessContext], input string, history []HistoryMessage,
+	spec manifest.Manifest, attempt int, validate func(string) error) (*lifecycleDispatcher, *capability.Table) {
+	t.Helper()
+	table := capability.NewTable()
+	l, err := newLifecycleDispatcher(next, input, history, spec, attempt, validate, table)
+	if err != nil {
+		t.Fatalf("new lifecycle: %v", err)
+	}
+	return l, table
+}
+
 func (stubNext) Dispatch(context.Context, ProcessContext, sys.Syscall, sys.Authorization) (sys.SyscallResult, error) {
 	return sys.Fail("unexpected"), nil
 }
-
-func (stubNext) Capabilities() []sys.Capability { return nil }

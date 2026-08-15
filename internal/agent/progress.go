@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
@@ -21,8 +22,18 @@ type progressArgs struct {
 	Message string `json:"message"`
 }
 
-func newProgressDispatcher(next sys.Dispatcher[ProcessContext]) *progressDispatcher {
-	return &progressDispatcher{next: next}
+func newProgressDispatcher(next sys.Dispatcher[ProcessContext], table *capability.Table) (*progressDispatcher, error) {
+	// Declared where it is built: the layer that serves sys.log is the layer that
+	// puts it in the grant set, so the two cannot come apart.
+	err := table.ReserveMissing(capability.Descriptor{
+		Name:        callSysLog,
+		Description: "report a short progress message to the user while working",
+		Hidden:      true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &progressDispatcher{next: next}, nil
 }
 
 func (d *progressDispatcher) Dispatch(ctx context.Context, cred ProcessContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
@@ -34,24 +45,4 @@ func (d *progressDispatcher) Dispatch(ctx context.Context, cred ProcessContext, 
 		return sys.Result(json.RawMessage(`{}`)), nil
 	}
 	return d.next.Dispatch(ctx, cred, syscall, auth)
-}
-
-func (d *progressDispatcher) Capabilities() []sys.Capability {
-	return appendMissing(d.next.Capabilities(), sys.Capability{
-		Name:        callSysLog,
-		Description: "report a short progress message to the user while working",
-		Hidden:      true,
-	})
-}
-
-// appendMissing adds capabilities the set does not already name — assemblies
-// may register a capability (e.g. sys.log) themselves, and the grant set
-// must stay duplicate-free.
-func appendMissing(capabilities []sys.Capability, extra ...sys.Capability) []sys.Capability {
-	for _, candidate := range extra {
-		if _, exists := sys.FindCapability(capabilities, candidate.Name); !exists {
-			capabilities = append(capabilities, candidate)
-		}
-	}
-	return capabilities
 }

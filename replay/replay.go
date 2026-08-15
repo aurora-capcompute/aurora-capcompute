@@ -160,10 +160,6 @@ func (d *Dispatcher[K]) CheckCompleted() error {
 	return nil
 }
 
-func (d *Dispatcher[K]) Capabilities() []sys.Capability {
-	return d.next.Capabilities()
-}
-
 // IncompleteError means the guest completed before replaying all recorded syscalls.
 type IncompleteError struct {
 	Remaining int

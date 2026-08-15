@@ -43,11 +43,7 @@ func (*blockingDispatchers) Normalize(_ string, settings json.RawMessage) (json.
 }
 
 func (d *blockingDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ manifest.Manifest) (*capability.Table, error) {
-	return tableOf(d), nil
-}
-
-func (d *blockingDispatchers) Capabilities() []sys.Capability {
-	return []sys.Capability{llmCapability()}
+	return tableOf(d, llmCapability()), nil
 }
 
 func (d *blockingDispatchers) Dispatch(ctx context.Context, _ ProcessContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {

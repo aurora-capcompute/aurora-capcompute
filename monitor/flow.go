@@ -107,8 +107,6 @@ func (g *flowGuard[ID, K]) Dispatch(ctx context.Context, cred K, syscall sys.Sys
 	return result, nil
 }
 
-func (g *flowGuard[ID, K]) Capabilities() []sys.Capability { return g.next.Capabilities() }
-
 type flowStamp[ID comparable, K capcompute.PID[ID]] struct {
 	flow *Flow[ID, K]
 	next sys.Dispatcher[K]
@@ -129,5 +127,3 @@ func (s *flowStamp[ID, K]) Dispatch(ctx context.Context, cred K, syscall sys.Sys
 	labels := append([]string{sys.SyscallLabelPrefix + syscall.Name}, s.flow.labels(syscall)...)
 	return result.WithLabels(labels...), nil
 }
-
-func (s *flowStamp[ID, K]) Capabilities() []sys.Capability { return s.next.Capabilities() }

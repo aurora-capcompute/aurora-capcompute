@@ -8,6 +8,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
@@ -20,6 +21,30 @@ type worldDispatcher[K any] struct {
 	next sys.Dispatcher[K]
 	now  func() time.Time
 	rand io.Reader
+}
+
+// newWorldDispatcher declares sys.now and sys.random as it builds the layer that
+// serves them: the grant set can then only ever name what this layer answers.
+func newWorldDispatcher[K any](next sys.Dispatcher[K], now func() time.Time, rand io.Reader, table *capability.Table) (*worldDispatcher[K], error) {
+	for _, descriptor := range []capability.Descriptor{
+		{
+			Name:        sys.SyscallNow,
+			Description: "read the wall clock (journaled: replay returns the recorded time)",
+			InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false}`),
+			Hidden:      true,
+		},
+		{
+			Name:        sys.SyscallRandom,
+			Description: "draw random bytes (journaled: replay returns the recorded bytes)",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"bytes":{"type":"integer","minimum":1,"maximum":64}},"additionalProperties":false}`),
+			Hidden:      true,
+		},
+	} {
+		if err := table.Reserve(descriptor); err != nil {
+			return nil, err
+		}
+	}
+	return &worldDispatcher[K]{next: next, now: now, rand: rand}, nil
 }
 
 type randomArgs struct {
@@ -60,21 +85,4 @@ func (d *worldDispatcher[K]) Dispatch(ctx context.Context, cred K, syscall sys.S
 	default:
 		return d.next.Dispatch(ctx, cred, syscall, auth)
 	}
-}
-
-func (d *worldDispatcher[K]) Capabilities() []sys.Capability {
-	return append(d.next.Capabilities(),
-		sys.Capability{
-			Name:        sys.SyscallNow,
-			Description: "read the wall clock (journaled: replay returns the recorded time)",
-			InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false}`),
-			Hidden:      true,
-		},
-		sys.Capability{
-			Name:        sys.SyscallRandom,
-			Description: "draw random bytes (journaled: replay returns the recorded bytes)",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"bytes":{"type":"integer","minimum":1,"maximum":64}},"additionalProperties":false}`),
-			Hidden:      true,
-		},
-	)
 }

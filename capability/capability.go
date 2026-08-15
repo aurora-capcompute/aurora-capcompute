@@ -1,4 +1,4 @@
-// Package grant is the runtime's capability vocabulary: a flat index of every
+// Package capability is the runtime's capability vocabulary: a flat index of every
 // operation a process may reach, keyed by (syscall, operation).
 //
 // The kernel deliberately owns none of this. capcompute/sys says what a syscall
@@ -145,11 +145,20 @@ func (f Family) caseName(args json.RawMessage) (string, error) {
 type Table struct {
 	entries  map[Key]Entry
 	families map[string]Family
-	order    []string // families in the order they were added, so the menu is stable
+	// reserved holds syscalls this table admits but does not route — served by a
+	// decorator above the routing dispatcher. They are deliberately a separate
+	// map: resolve never sees them, so a reserved name cannot be dispatched to a
+	// handler it does not have.
+	reserved map[string]Descriptor
+	order    []string // added order, so the grant set and the menu are stable
 }
 
 func NewTable() *Table {
-	return &Table{entries: make(map[Key]Entry), families: make(map[string]Family)}
+	return &Table{
+		entries:  make(map[Key]Entry),
+		families: make(map[string]Family),
+		reserved: make(map[string]Descriptor),
+	}
 }
 
 // Add indexes one family's entries. A duplicate key is an error rather than a
@@ -163,6 +172,9 @@ func (t *Table) Add(family Family) error {
 	}
 	if _, taken := t.families[syscall]; taken {
 		return fmt.Errorf("syscall %q is served twice", syscall)
+	}
+	if _, taken := t.reserved[syscall]; taken {
+		return fmt.Errorf("syscall %q is already reserved by a layer above", syscall)
 	}
 	indexed := make([]Entry, 0, len(family.Entries))
 	for _, entry := range family.Entries {
@@ -283,21 +295,67 @@ func (t *Table) Operations(syscall string) []string {
 	return out
 }
 
-// Capabilities is what the operations add up to: one per served syscall, in the
-// order the families were added — the descriptive projection the runtime's
-// Validator admits and the guest sees.
-func (t *Table) Capabilities() []sys.Capability {
-	out := make([]sys.Capability, 0, len(t.order))
+// Descriptor is one syscall seen descriptively: what a guest is told it can
+// call, and what the reference monitor admits it against. It is a projection of
+// a Family (or of a Reserve), never a thing anyone declares twice — which is
+// why nothing constructs one outside this package.
+type Descriptor struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	InputSchema json.RawMessage `json:"input_schema"`
+	// Hidden keeps a syscall dispatchable but excluded from the guest's
+	// discoverable menu (e.g. the cognition tool a program calls by a name it
+	// already knows).
+	Hidden bool `json:"hidden,omitempty"`
+}
+
+// Reserve records a syscall this table admits but does not route: one served by
+// a decorator stacked above the routing dispatcher (sys.now, sys.log,
+// sys.declassify — the runtime's own protocol). Reserved names never resolve to
+// an entry, so a decorator that forgets to intercept its own syscall fails
+// closed at the leaf rather than reaching a handler that was never there.
+func (t *Table) Reserve(descriptor Descriptor) error {
+	if descriptor.Name == "" {
+		return fmt.Errorf("a reserved syscall must be named")
+	}
+	if _, taken := t.families[descriptor.Name]; taken {
+		return fmt.Errorf("syscall %q is already served by a handler", descriptor.Name)
+	}
+	if _, taken := t.reserved[descriptor.Name]; taken {
+		return fmt.Errorf("syscall %q is reserved twice", descriptor.Name)
+	}
+	t.reserved[descriptor.Name] = descriptor
+	t.order = append(t.order, descriptor.Name)
+	return nil
+}
+
+// Descriptors is the process's whole admissible surface — routed families and
+// reserved syscalls alike — in the order they were added. It is both the grant
+// set the Validator enforces and, filtered to the visible ones, the menu the
+// guest is handed.
+func (t *Table) Descriptors() []Descriptor {
+	out := make([]Descriptor, 0, len(t.order))
 	for _, syscall := range t.order {
-		family := t.families[syscall]
-		out = append(out, sys.Capability{
+		if descriptor, ok := t.Descriptor(syscall); ok {
+			out = append(out, descriptor)
+		}
+	}
+	return out
+}
+
+// Descriptor answers what one name means in this table — the question every
+// monitor layer asks.
+func (t *Table) Descriptor(syscall string) (Descriptor, bool) {
+	if family, served := t.families[syscall]; served {
+		return Descriptor{
 			Name:        syscall,
 			Description: family.Description,
 			InputSchema: family.Input,
 			Hidden:      family.Hidden,
-		})
+		}, true
 	}
-	return out
+	descriptor, reserved := t.reserved[syscall]
+	return descriptor, reserved
 }
 
 // Entries returns every indexed operation, ordered — the enumerable surface a
@@ -343,8 +401,6 @@ func NewDispatcher[K any](table *Table) *Dispatcher[K] {
 	return &Dispatcher[K]{table: table}
 }
 
-func (d *Dispatcher[K]) Capabilities() []sys.Capability { return d.table.Capabilities() }
-
 // Dispatch resolves a call to exactly one entry and hands it over. A miss is a
 // denial rather than a routing failure — the table is the grant.
 func (d *Dispatcher[K]) Dispatch(ctx context.Context, _ K, call sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
@@ -370,4 +426,15 @@ func approvalPrompt(entry Entry) string {
 		return fmt.Sprintf("Approve %s: %s", entry.Key, entry.Description)
 	}
 	return fmt.Sprintf("Approve %s", entry.Key)
+}
+
+// ReserveMissing reserves a descriptor unless the name is already known. It
+// exists because an assembly may serve one of the runtime's protocol syscalls
+// itself (sys.log is the case in practice); the runtime's own reservation must
+// then defer rather than collide.
+func (t *Table) ReserveMissing(descriptor Descriptor) error {
+	if _, known := t.Descriptor(descriptor.Name); known {
+		return nil
+	}
+	return t.Reserve(descriptor)
 }

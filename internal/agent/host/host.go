@@ -1,8 +1,8 @@
 // Package host owns the per-process dispatcher stack. It takes the caller-supplied
 // driver chain and completes it, for one process, with durable task approval and
 // savepoint markers, then hands the whole thing to monitor.Stack.ForProcess so
-// the processor's canonical monitor chain (Validator → FlowMonitor → replay →
-// Labeler → Declassifier → drivers) is assembled in the one correct order —
+// the processor's canonical monitor chain (Validator → Flow.Guard → replay →
+// Flow.Stamp → Declassifier → drivers) is assembled in the one correct order —
 // never by hand. The per-process piece is the tape: a journaled.Tape over the
 // process's journal, stamped with the process's header (ABI, program digest, PID).
 //
@@ -66,7 +66,7 @@ type Config[ID comparable, K capcompute.PID[ID]] struct {
 	// Wrap stacks the runtime's protocol layers above the task layer and below
 	// the savepoint markers — the agent lifecycle, whose input payload
 	// advertises the whole capability surface beneath it. Nil adds no layer.
-	Wrap func(K, sys.Dispatcher[K]) (sys.Dispatcher[K], error)
+	Wrap func(K, sys.Dispatcher[K], *capability.Table) (sys.Dispatcher[K], error)
 	// OpenIntents overrides the replay open-intent policy — what to do with an
 	// effect journaled without a recorded completion, met on crash-resume. Nil
 	// retries every open intent under its original idempotency key.
@@ -80,7 +80,7 @@ type Config[ID comparable, K capcompute.PID[ID]] struct {
 // Factory builds one process's complete dispatcher chain. The resulting chain,
 // innermost first:
 //
-//	Drivers ← task ← Wrap ← savepoints ← [Stack: Labeler/Declassifier ← replay ← FlowMonitor ← Validator]
+//	Drivers ← task ← Wrap ← world ← savepoints ← [Stack: Flow.Stamp/Declassifier ← replay ← Flow.Guard ← Validator]
 type Factory[ID comparable, K capcompute.PID[ID]] struct {
 	config Config[ID, K]
 }
@@ -143,25 +143,28 @@ func (f *Factory[ID, K]) NewDispatcher(ctx context.Context, cred K) (sys.Dispatc
 		TaskTTL:     f.config.TaskTTL,
 	}
 	if f.config.Wrap != nil {
-		below, err = f.config.Wrap(cred, below)
+		below, err = f.config.Wrap(cred, below, table)
 		if err != nil {
 			return nil, err
 		}
 	}
 	// The world sources sit below replay (so their values are journaled and
 	// replay verbatim) and above the task and routing layers.
-	withWorld := &worldDispatcher[K]{next: below, now: f.config.Now, rand: f.config.Rand}
+	withWorld, err := newWorldDispatcher[K](below, f.config.Now, f.config.Rand, table)
+	if err != nil {
+		return nil, err
+	}
 	// Savepoint markers sit below replay (so they are journaled) and above the
 	// task and routing layers (so they never become durable tasks or dispatch
 	// a child).
 	withSavepoints := &savepointDispatcher[K]{next: withWorld}
 
-	// The grant set is the complete mediation surface: everything this process's
-	// chain can serve — drivers and the runtime's own
-	// protocol capabilities — is granted explicitly; anything else is denied
-	// by the Validator before it reaches a driver.
+	// The table is the complete mediation surface: everything this process's
+	// chain can serve — the drivers it routes to and the runtime's own protocol
+	// syscalls, each declared by the layer that serves it — is granted
+	// explicitly; anything else is denied by the Validator before it reaches a
+	// handler.
 	stack := monitor.Stack[ID, K]{
-		Grants:      func(K) []sys.Capability { return withSavepoints.Capabilities() },
 		Taints:      f.config.Taints,
 		OpenIntents: f.config.OpenIntents,
 	}

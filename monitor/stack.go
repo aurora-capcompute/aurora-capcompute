@@ -29,9 +29,6 @@ import (
 // state); ForProcess completes it with the two per-process pieces — the tape
 // and the process's grant table — and the drivers built from that table.
 type Stack[ID comparable, K capcompute.PID[ID]] struct {
-	// Grants is the manifest seam: the capability set granted to a cred.
-	// Required — a stack without a grant source is not a reference monitor.
-	Grants GrantSource[K]
 	// Taints is the shared cross-process taint state. Required — flow policy
 	// is not optional in the canonical chain; grant nothing with Forbid sets
 	// and it is inert.
@@ -46,8 +43,8 @@ type Stack[ID comparable, K capcompute.PID[ID]] struct {
 // its policy from; passing the same one the drivers were built from is what
 // keeps the monitor's view of an operation and the handler's identical.
 func (s Stack[ID, K]) ForProcess(tape replay.Tape, table *capability.Table, drivers sys.Dispatcher[K]) (sys.Dispatcher[K], error) {
-	if s.Grants == nil {
-		return nil, errors.New("stack: Grants is required")
+	if table == nil {
+		return nil, errors.New("stack: the grant table is required")
 	}
 	if s.Taints == nil {
 		return nil, errors.New("stack: Taints is required (share one across processes)")
@@ -67,5 +64,5 @@ func (s Stack[ID, K]) ForProcess(tape replay.Tape, table *capability.Table, driv
 	}
 
 	// Above the replay layer: re-derived on every pass, never journaled.
-	return NewValidator(s.Grants, flow.Guard(journaled)), nil
+	return NewValidator(table, flow.Guard(journaled)), nil
 }
