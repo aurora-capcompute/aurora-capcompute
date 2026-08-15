@@ -8,47 +8,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/aurora-capcompute/capcompute"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
-
-// Labeler stamps provenance onto every result: the deriving capability
-// ("syscall:<name>") plus the capability's declared source classes
-// (Capability.Labels). It sits *below* the replay layer so stamped labels are
-// journaled with the completion record — provenance becomes part of the audit
-// trail for free.
-type Labeler[K any] struct {
-	next sys.Dispatcher[K]
-}
-
-func NewLabeler[K any](next sys.Dispatcher[K]) *Labeler[K] {
-	return &Labeler[K]{next: next}
-}
-
-func (l *Labeler[K]) Dispatch(ctx context.Context, cred K, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
-	result, err := l.next.Dispatch(ctx, cred, syscall, auth)
-	if err != nil {
-		return result, err
-	}
-	switch syscall.Name {
-	case sys.SyscallBegin, sys.SyscallCommit, sys.SyscallDeclassify:
-		return result, nil // processor control syscalls carry no data provenance
-	}
-	labels := []string{sys.SyscallLabelPrefix + syscall.Name}
-	if capability, ok := sys.FindCapability(l.next.Capabilities(), syscall.Name); ok {
-		labels = append(labels, capability.Labels...)
-		// A capability with an ADT declares its source classes per case: a
-		// filesystem read over a secrets root labels differently from a list.
-		if operation, ok := capability.FindOperation(syscall.Args); ok {
-			labels = append(labels, operation.Labels...)
-		}
-	}
-	return result.WithLabels(labels...), nil
-}
-
-func (l *Labeler[K]) Capabilities() []sys.Capability {
-	return l.next.Capabilities()
-}
 
 // Taints is the cross-process taint state: every label each process has
 // observed. It is shared by all of a host's per-process monitor chains (Stack
@@ -130,74 +91,6 @@ func (t *Taints[ID]) snapshot(pid ID) []string {
 	}
 	sort.Strings(labels)
 	return labels
-}
-
-// FlowMonitor enforces information-flow policy at the reference monitor
-// (the CaMeL architecture as a processor primitive). The guest is opaque, so
-// flow is judged conservatively: every label a process observes taints everything
-// it later emits. A syscall to a capability whose Forbid set intersects the
-// process's accumulated taint is refused with ErrnoDenied before any driver runs.
-//
-// It sits *above* the replay layer: replayed results flow through it, so a
-// crash-restarted host rebuilds the run's taint from the journal exactly.
-// Taint state is the shared Taints; the monitor itself is per-run wiring
-// (see Stack for the canonical chain).
-type FlowMonitor[ID comparable, K capcompute.PID[ID]] struct {
-	taints *Taints[ID]
-	next   sys.Dispatcher[K]
-}
-
-func NewFlowMonitor[ID comparable, K capcompute.PID[ID]](taints *Taints[ID], next sys.Dispatcher[K]) *FlowMonitor[ID, K] {
-	return &FlowMonitor[ID, K]{taints: taints, next: next}
-}
-
-func (m *FlowMonitor[ID, K]) Dispatch(ctx context.Context, cred K, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
-	switch syscall.Name {
-	case sys.SyscallBegin, sys.SyscallCommit:
-		return m.next.Dispatch(ctx, cred, syscall, auth)
-	}
-
-	pid := cred.PID()
-	if capability, ok := sys.FindCapability(m.next.Capabilities(), syscall.Name); ok {
-		// The sink guard is per case where the capability has an ADT: a GET may
-		// carry what a POST to the same host may not. The capability-level set
-		// still applies to every case, so a family-wide bar cannot be escaped by
-		// declaring an operation that omits it.
-		forbid := capability.Forbid
-		sink := syscall.Name
-		if operation, ok := capability.FindOperation(syscall.Args); ok {
-			forbid = append(append([]string(nil), forbid...), operation.Forbid...)
-			sink = syscall.Name + "/" + operation.Name
-		}
-		if tainted := m.taints.intersection(pid, forbid); len(tainted) > 0 {
-			return sys.FailCode(sys.ErrnoDenied, fmt.Sprintf(
-				"flow policy: this run has observed %v, which may not flow into %q", tainted, sink)), nil
-		}
-	}
-
-	// Hand the run's taint downstream: drivers that store guest-derived data
-	// (tenant memory) persist it with the value, so provenance survives into
-	// later sessions instead of being laundered.
-	result, err := m.next.Dispatch(sys.WithTaint(ctx, m.taints.snapshot(pid)), cred, syscall, auth)
-	if err != nil {
-		return result, err
-	}
-	if syscall.Name == sys.SyscallDeclassify && result.Status() == sys.StatusResult {
-		// The approved, journaled crossing — fresh or replayed — lifts the
-		// labels instead of accumulating them.
-		var crossed DeclassifyResult
-		if err := json.Unmarshal(result.Result(), &crossed); err != nil {
-			return sys.SyscallResult{}, fmt.Errorf("decode declassify result: %w", err)
-		}
-		m.taints.Declassify(pid, crossed.Declassified...)
-		return result, nil
-	}
-	m.taints.observe(pid, result.Labels())
-	return result, nil
-}
-
-func (m *FlowMonitor[ID, K]) Capabilities() []sys.Capability {
-	return m.next.Capabilities()
 }
 
 // DeclassifyRequest is the args payload of the reserved sys.declassify

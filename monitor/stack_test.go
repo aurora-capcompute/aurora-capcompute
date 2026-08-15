@@ -6,6 +6,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
@@ -22,7 +23,23 @@ func (d *stackDriver) Dispatch(ctx context.Context, _ testPID, syscall sys.Sysca
 	return sys.Result(json.RawMessage(`{"from":"` + syscall.Name + `"}`)), nil
 }
 
-func (d *stackDriver) Capabilities() []sys.Capability { return flowCaps }
+func (d *stackDriver) Capabilities() []sys.Capability { return stackTable.Capabilities() }
+
+// stackTable is the grant index this chain is assembled around: the same one the
+// flow layer reads its policy from and the Validator admits against.
+var stackTable = func() *capability.Table {
+	table := capability.NewTable()
+	for _, family := range []capability.Family{
+		single("internet.read", []string{"untrusted_web"}, nil, echo),
+		single("k8s.delete", nil, []string{"untrusted_web"}, echo),
+		single("mail.send", nil, nil, echo),
+	} {
+		if err := table.Add(family); err != nil {
+			panic(err)
+		}
+	}
+	return table
+}()
 
 // The Stack's reason to exist: each layer on its correct side of the replay
 // boundary. One test per load-bearing ordering property.
@@ -33,9 +50,9 @@ func TestStackEnforcesCanonicalOrder(t *testing.T) {
 
 	// Everything the chain publishes is granted, plus the reserved syscalls.
 	grants := func(cred testPID) []sys.Capability {
-		return append([]sys.Capability(nil), append(flowCaps,
+		return append(stackTable.Capabilities(),
 			sys.Capability{Name: sys.SyscallDeclassify},
-		)...)
+		)
 	}
 	boot := func(t *testing.T) sys.Dispatcher[testPID] {
 		t.Helper()
@@ -46,7 +63,7 @@ func TestStackEnforcesCanonicalOrder(t *testing.T) {
 		chain, err := Stack[string, testPID]{
 			Grants: grants,
 			Taints: NewTaints[string](), // fresh per boot: a crash loses host memory
-		}.ForProcess(tape, driver)
+		}.ForProcess(tape, stackTable, driver)
 		if err != nil {
 			t.Fatalf("for run: %v", err)
 		}
@@ -104,13 +121,13 @@ func TestStackEnforcesCanonicalOrder(t *testing.T) {
 
 func TestStackRequiresItsPieces(t *testing.T) {
 	tape, _ := journaled.NewTape(newMemJournal(), journaled.Header{ABI: sys.ABIVersion, Program: "p", Process: "r"})
-	if _, err := (Stack[string, testPID]{Taints: NewTaints[string]()}).ForProcess(tape, &recordingDispatcher{}); err == nil {
+	if _, err := (Stack[string, testPID]{Taints: NewTaints[string]()}).ForProcess(tape, stackTable, &recordingDispatcher{}); err == nil {
 		t.Fatal("stack without Grants accepted")
 	}
-	if _, err := (Stack[string, testPID]{Grants: grantsFixture()}).ForProcess(tape, &recordingDispatcher{}); err == nil {
+	if _, err := (Stack[string, testPID]{Grants: grantsFixture()}).ForProcess(tape, stackTable, &recordingDispatcher{}); err == nil {
 		t.Fatal("stack without Taints accepted")
 	}
-	if _, err := (Stack[string, testPID]{Grants: grantsFixture(), Taints: NewTaints[string]()}).ForProcess(tape, nil); err == nil {
+	if _, err := (Stack[string, testPID]{Grants: grantsFixture(), Taints: NewTaints[string]()}).ForProcess(tape, stackTable, nil); err == nil {
 		t.Fatal("stack without drivers accepted")
 	}
 }

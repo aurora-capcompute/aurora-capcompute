@@ -3,6 +3,7 @@ package monitor
 import (
 	"errors"
 
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-capcompute/replay"
 	"github.com/aurora-capcompute/capcompute"
 	"github.com/aurora-capcompute/capcompute/sys"
@@ -11,7 +12,7 @@ import (
 // Stack wires the processor's canonical dispatcher chain. The order is the
 // load-bearing part, so it lives in code instead of prose:
 //
-//	Validator → FlowMonitor → [replay] → Labeler → Declassifier → drivers
+//	Validator → Flow.Guard → [replay] → Flow.Stamp → Declassifier → drivers
 //
 // Above the replay layer sit the pieces whose decisions must re-derive
 // deterministically on every pass and never enter the journal: validation and
@@ -20,11 +21,13 @@ import (
 // once and served from the tape thereafter: stamped labels and approved
 // declassification crossings — which also need the tape's idempotency keys.
 // Assembling this by hand and getting one layer on the wrong side silently
-// breaks a law; ForProcess cannot.
+// breaks a law; ForProcess cannot. That the flow cross-cut appears twice is why
+// it is one object with two decorators rather than two types: the state they
+// share is the same state, and only the journal separates them.
 //
 // The Stack holds the chain's cross-process components (grant source, taint
-// state); ForProcess completes it with the one per-process piece — the tape —
-// and the process's drivers.
+// state); ForProcess completes it with the two per-process pieces — the tape
+// and the process's grant table — and the drivers built from that table.
 type Stack[ID comparable, K capcompute.PID[ID]] struct {
 	// Grants is the manifest seam: the capability set granted to a cred.
 	// Required — a stack without a grant source is not a reference monitor.
@@ -38,8 +41,11 @@ type Stack[ID comparable, K capcompute.PID[ID]] struct {
 	OpenIntents replay.OpenIntentPolicy
 }
 
-// ForProcess assembles the chain for one process around its tape and drivers.
-func (s Stack[ID, K]) ForProcess(tape replay.Tape, drivers sys.Dispatcher[K]) (sys.Dispatcher[K], error) {
+// ForProcess assembles the chain for one process around its tape, its grant
+// table and the drivers that serve it. The table is what the flow layer reads
+// its policy from; passing the same one the drivers were built from is what
+// keeps the monitor's view of an operation and the handler's identical.
+func (s Stack[ID, K]) ForProcess(tape replay.Tape, table *capability.Table, drivers sys.Dispatcher[K]) (sys.Dispatcher[K], error) {
 	if s.Grants == nil {
 		return nil, errors.New("stack: Grants is required")
 	}
@@ -50,8 +56,10 @@ func (s Stack[ID, K]) ForProcess(tape replay.Tape, drivers sys.Dispatcher[K]) (s
 		return nil, errors.New("stack: drivers are required")
 	}
 
+	flow := NewFlow[ID, K](s.Taints, table)
+
 	// Below the replay layer: journaled once, replayed thereafter.
-	below := NewLabeler[K](NewDeclassifier[K](drivers))
+	below := flow.Stamp(NewDeclassifier[K](drivers))
 
 	journaled := replay.NewDispatcher(tape, below)
 	if s.OpenIntents != nil {
@@ -59,5 +67,5 @@ func (s Stack[ID, K]) ForProcess(tape replay.Tape, drivers sys.Dispatcher[K]) (s
 	}
 
 	// Above the replay layer: re-derived on every pass, never journaled.
-	return NewValidator(s.Grants, NewFlowMonitor(s.Taints, journaled)), nil
+	return NewValidator(s.Grants, flow.Guard(journaled)), nil
 }

@@ -6,24 +6,50 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/aurora-capcompute/replay"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-var flowCaps = []sys.Capability{
-	{Name: "internet.read", Labels: []string{"untrusted_web"}},
-	{Name: "k8s.delete", Forbid: []string{"untrusted_web"}},
-	{Name: "mail.send"},
+// handlerFunc is a leaf operation: the table resolved the call, this performs it.
+type handlerFunc func(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error)
+
+func (f handlerFunc) DispatchCall(ctx context.Context, call sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
+	return f(ctx, call)
 }
 
-type flowDriver struct{}
+// echo is the trivial handler: it names the operation it served.
+var echo = handlerFunc(func(_ context.Context, call sys.Syscall) (sys.SyscallResult, error) {
+	return sys.Result(json.RawMessage(`{"from":"` + call.Name + `"}`)), nil
+})
 
-func (flowDriver) Dispatch(_ context.Context, _ testPID, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
-	return sys.Result(json.RawMessage(`{"from":"` + syscall.Name + `"}`)), nil
+// single indexes a syscall that is one operation by itself.
+func single(name string, labels, forbid []string, handler capability.Handler) capability.Family {
+	return capability.Family{Entries: []capability.Entry{{
+		Key:     capability.Key{Syscall: name},
+		Labels:  labels,
+		Forbid:  forbid,
+		Handler: handler,
+	}}}
 }
 
-func (flowDriver) Capabilities() []sys.Capability { return flowCaps }
+// flowTable is the policy the whole suite runs against: a source of untrusted
+// data, a sink that refuses it, and a sink that does not care.
+func flowTable(t *testing.T, handler capability.Handler) *capability.Table {
+	t.Helper()
+	table := capability.NewTable()
+	for _, family := range []capability.Family{
+		single("internet.read", []string{"untrusted_web"}, nil, handler),
+		single("k8s.delete", nil, []string{"untrusted_web"}, handler),
+		single("mail.send", nil, nil, handler),
+	} {
+		if err := table.Add(family); err != nil {
+			t.Fatalf("add family: %v", err)
+		}
+	}
+	return table
+}
 
 func call(t *testing.T, d sys.Dispatcher[testPID], pid string, name string) sys.SyscallResult {
 	t.Helper()
@@ -34,9 +60,18 @@ func call(t *testing.T, d sys.Dispatcher[testPID], pid string, name string) sys.
 	return result
 }
 
-func TestLabelerStampsDerivingCapabilityAndClasses(t *testing.T) {
-	labeler := NewLabeler[testPID](flowDriver{})
-	result := call(t, labeler, "p1", "internet.read")
+// stamped is the below-the-tape half over the table's own routing dispatcher:
+// the index that resolves the call is the index the labels come from.
+func stamped(t *testing.T, table *capability.Table, taints *Taints[string]) (*Flow[string, testPID], sys.Dispatcher[testPID]) {
+	t.Helper()
+	flow := NewFlow[string, testPID](taints, table)
+	return flow, flow.Stamp(capability.NewDispatcher[testPID](table))
+}
+
+func TestStampRecordsDerivingCapabilityAndClasses(t *testing.T) {
+	table := flowTable(t, echo)
+	_, below := stamped(t, table, NewTaints[string]())
+	result := call(t, below, "p1", "internet.read")
 
 	labels := result.Labels()
 	for _, want := range []string{"syscall:internet.read", "untrusted_web"} {
@@ -46,62 +81,66 @@ func TestLabelerStampsDerivingCapabilityAndClasses(t *testing.T) {
 	}
 }
 
-func TestFlowMonitorBlocksTaintedFlow(t *testing.T) {
-	monitor := NewFlowMonitor(NewTaints[string](), NewLabeler[testPID](flowDriver{}))
+func TestFlowGuardBlocksTaintedFlow(t *testing.T) {
+	flow, below := stamped(t, flowTable(t, echo), NewTaints[string]())
+	guarded := flow.Guard(below)
 
 	// Before any taint the protected capability is callable.
-	if result := call(t, monitor, "p1", "k8s.delete"); result.Status() != sys.StatusResult {
+	if result := call(t, guarded, "p1", "k8s.delete"); result.Status() != sys.StatusResult {
 		t.Fatalf("untainted k8s.delete = %#v, want result", result)
 	}
 
 	// Observing untrusted data taints the run…
-	call(t, monitor, "p1", "internet.read")
+	call(t, guarded, "p1", "internet.read")
 
 	// …so the protected capability is now refused…
-	result := call(t, monitor, "p1", "k8s.delete")
+	result := call(t, guarded, "p1", "k8s.delete")
 	if result.Status() != sys.StatusFailed || result.Errno() != sys.ErrnoDenied {
 		t.Fatalf("tainted k8s.delete = %#v, want failed/denied", result)
 	}
 
 	// …while unprotected capabilities still work…
-	if result := call(t, monitor, "p1", "mail.send"); result.Status() != sys.StatusResult {
+	if result := call(t, guarded, "p1", "mail.send"); result.Status() != sys.StatusResult {
 		t.Fatalf("mail.send = %#v, want result", result)
 	}
 
 	// …and other runs are unaffected.
-	if result := call(t, monitor, "p2", "k8s.delete"); result.Status() != sys.StatusResult {
+	if result := call(t, guarded, "p2", "k8s.delete"); result.Status() != sys.StatusResult {
 		t.Fatalf("other run's k8s.delete = %#v, want result", result)
 	}
 }
 
-func TestFlowMonitorDeclassify(t *testing.T) {
+func TestFlowGuardDeclassify(t *testing.T) {
 	taints := NewTaints[string]()
-	monitor := NewFlowMonitor(taints, NewLabeler[testPID](flowDriver{}))
-	call(t, monitor, "p1", "internet.read")
+	flow, below := stamped(t, flowTable(t, echo), taints)
+	guarded := flow.Guard(below)
+	call(t, guarded, "p1", "internet.read")
 
-	if result := call(t, monitor, "p1", "k8s.delete"); result.Errno() != sys.ErrnoDenied {
+	if result := call(t, guarded, "p1", "k8s.delete"); result.Errno() != sys.ErrnoDenied {
 		t.Fatalf("expected denial before declassification, got %#v", result)
 	}
 	taints.Declassify("p1", "untrusted_web")
-	if result := call(t, monitor, "p1", "k8s.delete"); result.Status() != sys.StatusResult {
+	if result := call(t, guarded, "p1", "k8s.delete"); result.Status() != sys.StatusResult {
 		t.Fatalf("declassified k8s.delete = %#v, want result", result)
 	}
 }
 
-// The full chain: FlowMonitor → replay → Labeler → driver. Labels must land in
-// the journal, and a crash-restarted host must rebuild the run's taint from
+// The full chain: Guard → replay → Stamp → drivers. Labels must land in the
+// journal, and a crash-restarted host must rebuild the run's taint from
 // replayed results alone.
 func TestFlowTaintSurvivesCrashReplay(t *testing.T) {
 	journal := newMemJournal()
 	header := journaled.Header{ABI: sys.ABIVersion, Program: "sha256:test", Process: "p1"}
+	table := flowTable(t, echo)
 
-	newChain := func(t *testing.T) *FlowMonitor[string, testPID] {
+	newChain := func(t *testing.T) sys.Dispatcher[testPID] {
 		t.Helper()
 		tape, err := journaled.NewTape(journal, header)
 		if err != nil {
 			t.Fatalf("new tape: %v", err)
 		}
-		return NewFlowMonitor(NewTaints[string](), replay.NewDispatcher[testPID](tape, NewLabeler[testPID](flowDriver{})))
+		flow, below := stamped(t, table, NewTaints[string]())
+		return flow.Guard(replay.NewDispatcher[testPID](tape, below))
 	}
 
 	first := newChain(t)
@@ -116,7 +155,7 @@ func TestFlowTaintSurvivesCrashReplay(t *testing.T) {
 		t.Fatalf("journaled labels = %v, want untrusted_web", completion.Result.Labels())
 	}
 
-	// Crash: a fresh host process (fresh monitor, fresh tape, same journal)
+	// Crash: a fresh host process (fresh flow state, fresh tape, same journal)
 	// replays the run. The replayed result must rebuild the taint…
 	crashed := newChain(t)
 	replayed := call(t, crashed, "p1", "internet.read")
@@ -136,15 +175,16 @@ func TestFlowTaintSurvivesCrashReplay(t *testing.T) {
 func TestDeclassifySyscallLifecycle(t *testing.T) {
 	journal := newMemJournal()
 	header := journaled.Header{ABI: sys.ABIVersion, Program: "sha256:test", Process: "p1"}
-	newChain := func(t *testing.T) *FlowMonitor[string, testPID] {
+	table := flowTable(t, echo)
+	newChain := func(t *testing.T) sys.Dispatcher[testPID] {
 		t.Helper()
 		tape, err := journaled.NewTape(journal, header)
 		if err != nil {
 			t.Fatalf("new tape: %v", err)
 		}
-		return NewFlowMonitor(NewTaints[string](),
-			replay.NewDispatcher[testPID](tape,
-				NewLabeler[testPID](NewDeclassifier[testPID](flowDriver{}))))
+		flow := NewFlow[string, testPID](NewTaints[string](), table)
+		below := flow.Stamp(NewDeclassifier[testPID](capability.NewDispatcher[testPID](table)))
+		return flow.Guard(replay.NewDispatcher[testPID](tape, below))
 	}
 	declassify := sys.Syscall{
 		Abi:  sys.ABIVersion,
@@ -211,7 +251,8 @@ func TestDeclassifySyscallLifecycle(t *testing.T) {
 }
 
 func TestDeclassifyValidatesRequest(t *testing.T) {
-	declassifier := NewDeclassifier[testPID](flowDriver{})
+	table := flowTable(t, echo)
+	declassifier := NewDeclassifier[testPID](capability.NewDispatcher[testPID](table))
 	for name, args := range map[string]string{
 		"no labels": `{"labels":[],"reason":"r"}`,
 		"no reason": `{"labels":["x"],"reason":"  "}`,
@@ -231,39 +272,23 @@ func TestDeclassifyValidatesRequest(t *testing.T) {
 	}
 }
 
-func TestFlowMonitorHandsTaintDownstream(t *testing.T) {
+func TestFlowGuardHandsTaintDownstream(t *testing.T) {
 	var seen []string
-	probe := nextFuncDispatcher(func(ctx context.Context, syscall sys.Syscall) (sys.SyscallResult, error) {
-		if syscall.Name == "mail.send" {
+	probe := handlerFunc(func(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error) {
+		if call.Name == "mail.send" {
 			seen = sys.Taint(ctx)
 		}
 		return sys.Result(nil), nil
 	})
-	monitor := NewFlowMonitor(NewTaints[string](), NewLabeler[testPID](probe))
+	flow, below := stamped(t, flowTable(t, probe), NewTaints[string]())
+	guarded := flow.Guard(below)
 
-	call(t, monitor, "p1", "internet.read")
-	call(t, monitor, "p1", "mail.send")
+	call(t, guarded, "p1", "internet.read")
+	call(t, guarded, "p1", "mail.send")
 	if !slices.Contains(seen, "untrusted_web") {
 		t.Fatalf("downstream taint = %v, want untrusted_web", seen)
 	}
 }
-
-type nextFuncDispatcher func(ctx context.Context, syscall sys.Syscall) (sys.SyscallResult, error)
-
-func (f nextFuncDispatcher) Dispatch(ctx context.Context, _ testPID, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
-	return f(ctx, syscall)
-}
-func (nextFuncDispatcher) Capabilities() []sys.Capability { return flowCaps }
-
-// adtDriver serves one capability that declares an ADT, so the monitor has a
-// per-case policy to resolve.
-type adtDriver struct{ capability sys.Capability }
-
-func (d adtDriver) Dispatch(_ context.Context, _ testPID, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
-	return sys.Result(json.RawMessage(`{"from":"` + syscall.Name + `"}`)), nil
-}
-
-func (d adtDriver) Capabilities() []sys.Capability { return []sys.Capability{d.capability} }
 
 func adtCall(t *testing.T, d sys.Dispatcher[testPID], operation string) sys.SyscallResult {
 	t.Helper()
@@ -278,20 +303,34 @@ func adtCall(t *testing.T, d sys.Dispatcher[testPID], operation string) sys.Sysc
 	return result
 }
 
-// Per-operation flow policy: a capability with an ADT carries its labels and its
-// sink guard per case, and the monitor resolves the case from the call's
-// arguments. This is where filesystem's own sink-guard and label tests moved to
-// when enforcement left the driver.
-func TestPerOperationFlowPolicy(t *testing.T) {
-	driver := adtDriver{capability: sys.Capability{
-		Name:          "core.filesystem",
+// adtTable indexes one syscall with two cases: a read that is a source and a
+// write that is a sink, plus a family-wide bar the write cannot escape.
+func adtTable(t *testing.T, familyForbid []string) *capability.Table {
+	t.Helper()
+	table := capability.NewTable()
+	err := table.Add(capability.Family{
 		Discriminator: "operation",
-		Operations: []sys.Operation{
-			{Name: "read", Labels: []string{"untrusted_file"}},
-			{Name: "write", Forbid: []string{"untrusted_file"}},
+		Forbid:        familyForbid,
+		Entries: []capability.Entry{
+			{Key: capability.Key{Syscall: "core.filesystem", Operation: "read"}, Labels: []string{"untrusted_file"}, Handler: echo},
+			{Key: capability.Key{Syscall: "core.filesystem", Operation: "write"}, Forbid: []string{"untrusted_file"}, Handler: echo},
 		},
-	}}
-	chain := NewFlowMonitor(NewTaints[string](), NewLabeler[testPID](driver))
+	})
+	if err != nil {
+		t.Fatalf("add family: %v", err)
+	}
+	return table
+}
+
+// Per-operation flow policy: a syscall with several cases carries its labels and
+// its sink guard per case, and the monitor resolves the case from the call's
+// arguments — the same resolution the routing dispatcher below the journal does.
+// This is where filesystem's own sink-guard and label tests moved to when
+// enforcement left the driver.
+func TestPerOperationFlowPolicy(t *testing.T) {
+	table := adtTable(t, nil)
+	flow, below := stamped(t, table, NewTaints[string]())
+	chain := flow.Guard(below)
 
 	// A read stamps its own source class and taints the run.
 	result := adtCall(t, chain, "read")
@@ -306,5 +345,42 @@ func TestPerOperationFlowPolicy(t *testing.T) {
 	}
 	if again := adtCall(t, chain, "read"); again.Status() != sys.StatusResult {
 		t.Fatalf("read after taint = %v, want it still permitted", again.Status())
+	}
+}
+
+// A family-wide bar applies to every case, including one that declares no bar of
+// its own: the table folds it in at indexing time, so there is no case a call can
+// name to reach the family with less policy than the family declared.
+func TestFamilyForbidCannotBeEscapedByCase(t *testing.T) {
+	table := adtTable(t, []string{"untrusted_file"})
+	flow, below := stamped(t, table, NewTaints[string]())
+	chain := flow.Guard(below)
+
+	adtCall(t, chain, "read") // taints the run with untrusted_file
+	// "read" declares no Forbid of its own, but the family does.
+	if blocked := adtCall(t, chain, "read"); blocked.Errno() != sys.ErrnoDenied {
+		t.Fatalf("errno = %v, want the family-wide bar to apply to the read case", blocked.Errno())
+	}
+}
+
+// An unresolvable case must not be a way past the sink guard: the discriminator
+// is unreadable, so no entry applies, and the family's own bar is what answers.
+func TestUnresolvableCaseFallsBackToFamilyBar(t *testing.T) {
+	table := adtTable(t, []string{"untrusted_file"})
+	flow, below := stamped(t, table, NewTaints[string]())
+	chain := flow.Guard(below)
+
+	adtCall(t, chain, "read") // taints the run
+
+	result, err := chain.Dispatch(context.Background(), testPID{id: "p1"}, sys.Syscall{
+		Abi:  sys.ABIVersion,
+		Name: "core.filesystem",
+		Args: json.RawMessage(`{"operation":42}`),
+	}, sys.Authorization{})
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if result.Errno() != sys.ErrnoDenied {
+		t.Fatalf("errno = %v, want the family bar to deny a call whose case cannot be read", result.Errno())
 	}
 }

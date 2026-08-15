@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/aurora-capcompute/monitor"
 	"github.com/aurora-capcompute/capcompute/sys"
@@ -68,8 +69,8 @@ type integrityEnv struct {
 	header  journaled.Header
 }
 
-func (integrityEnv) Drivers(context.Context, integrityPID) (sys.Dispatcher[integrityPID], error) {
-	return noopDispatcher{}, nil
+func (integrityEnv) Drivers(context.Context, integrityPID) (sys.Dispatcher[integrityPID], *capability.Table, error) {
+	return noopDispatcher{}, capability.NewTable(), nil
 }
 
 func (e integrityEnv) ProcessJournal(context.Context, integrityPID) (journaled.Journal, error) {

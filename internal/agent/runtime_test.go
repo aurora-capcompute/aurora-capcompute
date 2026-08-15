@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/capcompute/sys"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
@@ -34,11 +35,11 @@ func (*runtimeDispatchers) Normalize(_ string, settings json.RawMessage) (json.R
 	return append(json.RawMessage(nil), settings...), nil
 }
 
-func (p *runtimeDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, manifest manifest.Manifest) (sys.Dispatcher[ProcessContext], error) {
+func (p *runtimeDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, manifest manifest.Manifest) (*capability.Table, error) {
 	p.mu.Lock()
 	p.manifests = append(p.manifests, manifest.Clone())
 	p.mu.Unlock()
-	return finalDispatcher{}, nil
+	return tableOf(finalDispatcher{}), nil
 }
 
 // llmCapability publishes the fake cognition tool the way a real assembly
@@ -650,8 +651,8 @@ func (approvalDispatchers) Normalize(_ string, settings json.RawMessage) (json.R
 	return append(json.RawMessage(nil), settings...), nil
 }
 
-func (approvalDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ manifest.Manifest) (sys.Dispatcher[ProcessContext], error) {
-	return approvalToolDispatcher{}, nil
+func (approvalDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ manifest.Manifest) (*capability.Table, error) {
+	return tableOf(approvalToolDispatcher{}), nil
 }
 
 type approvalToolDispatcher struct{}
@@ -774,8 +775,8 @@ func (*failThenSucceedDispatchers) Normalize(_ string, settings json.RawMessage)
 	return append(json.RawMessage(nil), settings...), nil
 }
 
-func (d *failThenSucceedDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ manifest.Manifest) (sys.Dispatcher[ProcessContext], error) {
-	return &failThenSucceedDispatcher{parent: d}, nil
+func (d *failThenSucceedDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ manifest.Manifest) (*capability.Table, error) {
+	return tableOf(&failThenSucceedDispatcher{parent: d}), nil
 }
 
 type failThenSucceedDispatcher struct{ parent *failThenSucceedDispatchers }
@@ -938,8 +939,8 @@ func (effectsDispatchers) Normalize(_ string, settings json.RawMessage) (json.Ra
 	return settings, nil
 }
 
-func (p effectsDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ manifest.Manifest) (sys.Dispatcher[ProcessContext], error) {
-	return p.d, nil
+func (p effectsDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ manifest.Manifest) (*capability.Table, error) {
+	return tableOf(p.d), nil
 }
 
 type effectsDispatcher struct {

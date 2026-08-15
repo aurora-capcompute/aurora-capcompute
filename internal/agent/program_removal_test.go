@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 	"github.com/aurora-capcompute/capcompute/sys"
@@ -41,8 +42,8 @@ func (*blockingDispatchers) Normalize(_ string, settings json.RawMessage) (json.
 	return append(json.RawMessage(nil), settings...), nil
 }
 
-func (d *blockingDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ manifest.Manifest) (sys.Dispatcher[ProcessContext], error) {
-	return d, nil
+func (d *blockingDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ manifest.Manifest) (*capability.Table, error) {
+	return tableOf(d), nil
 }
 
 func (d *blockingDispatchers) Capabilities() []sys.Capability {

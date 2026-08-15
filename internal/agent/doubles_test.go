@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/capcompute/sys"
 
@@ -179,8 +180,8 @@ func (p *testDispatchers) Normalize(syscall string, config json.RawMessage) (jso
 	return append(json.RawMessage(nil), config...), nil
 }
 
-func (*testDispatchers) NewDispatcher(context.Context, ProcessContext, manifest.Manifest) (sys.Dispatcher[ProcessContext], error) {
-	return nil, nil
+func (*testDispatchers) NewDispatcher(context.Context, ProcessContext, manifest.Manifest) (*capability.Table, error) {
+	return capability.NewTable(), nil
 }
 
 // waitForTerminal blocks until a process reaches any final state.
@@ -199,4 +200,40 @@ func waitForTerminal(t *testing.T, runtime *Runtime, processID string) ProcessSn
 	}
 	t.Fatal("process did not reach a terminal status within timeout")
 	return ProcessSnapshot{}
+}
+
+// tableOf indexes a test double's capabilities as single-operation families all
+// served by the double itself — the shape registry.Build produces for a real
+// assembly, without needing a registry. It exists because a provider now hands
+// back the grant table rather than a dispatcher: the routing, the grant set and
+// the flow policy all read from one index, so a test that wants a fake driver
+// has to say what that index contains.
+func tableOf(d sys.Dispatcher[ProcessContext]) *capability.Table {
+	table := capability.NewTable()
+	for _, published := range d.Capabilities() {
+		family := capability.Family{
+			Description: published.Description,
+			Input:       published.InputSchema,
+			Hidden:      published.Hidden,
+			Entries: []capability.Entry{{
+				Key:     capability.Key{Syscall: published.Name},
+				Handler: dispatchAsHandler{d},
+			}},
+		}
+		if err := table.Add(family); err != nil {
+			panic(err)
+		}
+	}
+	return table
+}
+
+// dispatchAsHandler lets an existing dispatcher double stand in as the handler
+// for each of its own capabilities.
+type dispatchAsHandler struct {
+	d sys.Dispatcher[ProcessContext]
+}
+
+func (h dispatchAsHandler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
+	var cred ProcessContext
+	return h.d.Dispatch(ctx, cred, call, auth)
 }

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
@@ -28,8 +29,8 @@ type fixedProvider struct{ caps []sys.Capability }
 func (fixedProvider) Normalize(_ string, settings json.RawMessage) (json.RawMessage, error) {
 	return settings, nil
 }
-func (p fixedProvider) NewDispatcher(context.Context, ProcessContext, manifest.Manifest) (sys.Dispatcher[ProcessContext], error) {
-	return capsDispatcher{caps: p.caps}, nil
+func (p fixedProvider) NewDispatcher(context.Context, ProcessContext, manifest.Manifest) (*capability.Table, error) {
+	return tableOf(capsDispatcher{caps: p.caps}), nil
 }
 
 // The reconciliation guard makes the manifest authoritative over what the
@@ -86,7 +87,7 @@ func TestProcessDriversRejectsOverAdvertisingProvider(t *testing.T) {
 			}}},
 		},
 	}
-	_, err := r.Drivers(context.Background(), ProcessContext{ProcessID: "p1"})
+	_, _, err := r.Drivers(context.Background(), ProcessContext{ProcessID: "p1"})
 	if err == nil || !strings.Contains(err.Error(), "core.leak") {
 		t.Fatalf("Drivers err = %v, want a fail-closed rejection naming core.leak", err)
 	}
@@ -101,7 +102,7 @@ func TestProcessDriversAdmitsFaithfulProvider(t *testing.T) {
 			}}},
 		},
 	}
-	if _, err := r.Drivers(context.Background(), ProcessContext{ProcessID: "p1"}); err != nil {
+	if _, _, err := r.Drivers(context.Background(), ProcessContext{ProcessID: "p1"}); err != nil {
 		t.Fatalf("faithful provider rejected at activation: %v", err)
 	}
 }

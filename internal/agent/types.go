@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct"
 	"github.com/aurora-capcompute/aurora-capcompute/monitor"
 	"github.com/aurora-capcompute/capcompute/sys"
@@ -37,14 +38,19 @@ type HistoryMessage struct {
 	Labels []string `json:"labels,omitempty"`
 }
 
-// DispatcherProvider builds the capability dispatcher one process runs under,
-// and canonicalizes the grant configs a manifest declares. It lives here rather
-// than beside the manifest because building a dispatcher needs a process
+// DispatcherProvider builds the grant table one process runs under, and
+// canonicalizes the grant configs a manifest declares. It lives here rather
+// than beside the manifest because building a table needs a process
 // credential, which the manifest layer knows nothing about; manifest validation
 // asks only for the Normalize half (manifest.Normalizer), which this satisfies.
+//
+// It returns the index rather than a dispatcher because one index has to answer
+// three questions at once — what routes, what the monitor may admit, and what
+// flow policy applies — and handing back only a dispatcher would leave the
+// other two to be reconstructed, which is where they could disagree.
 type DispatcherProvider interface {
 	Normalize(syscall string, config json.RawMessage) (json.RawMessage, error)
-	NewDispatcher(context.Context, ProcessContext, manifest.Manifest) (sys.Dispatcher[ProcessContext], error)
+	NewDispatcher(context.Context, ProcessContext, manifest.Manifest) (*capability.Table, error)
 }
 
 // Config wires a Runtime. Everything concrete is injected: programs, capability

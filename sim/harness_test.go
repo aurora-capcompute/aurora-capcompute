@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/aurora-capcompute/monitor"
 	"github.com/aurora-capcompute/capcompute/sys"
@@ -113,21 +114,31 @@ type Program []Step
 
 // Capabilities granted to every simulated process. clock.now is a read,
 // internet.read carries taint, transfer.refund is transfer.out's inverse.
-func Capabilities() []sys.Capability {
-	return []sys.Capability{
-		{Name: "clock.now"},
-		{Name: "internet.read", Labels: []string{"untrusted_web"}},
-		{Name: "transfer.out"},
-		{Name: "mail.send"},
-		{Name: "transfer.refund", Hidden: true},
+func Table(effects *Effects) *capability.Table {
+	table := capability.NewTable()
+	handler := driver{effects: effects}
+	add := func(name string, labels []string, hidden bool) {
+		family := capability.Family{
+			Hidden:  hidden,
+			Entries: []capability.Entry{{Key: capability.Key{Syscall: name}, Labels: labels, Handler: handler}},
+		}
+		if err := table.Add(family); err != nil {
+			panic(err)
+		}
 	}
+	add("clock.now", nil, false)
+	add("internet.read", []string{"untrusted_web"}, false)
+	add("transfer.out", nil, false)
+	add("mail.send", nil, false)
+	add("transfer.refund", nil, true)
+	return table
 }
 
 type driver struct {
 	effects *Effects
 }
 
-func (d driver) Dispatch(ctx context.Context, _ PID, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
+func (d driver) DispatchCall(ctx context.Context, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
 	d.effects.Dispatches++
 	key, ok := sys.IdempotencyKey(ctx)
 	if !ok {
@@ -142,8 +153,6 @@ func (d driver) Dispatch(ctx context.Context, _ PID, syscall sys.Syscall, _ sys.
 	return result, nil
 }
 
-func (d driver) Capabilities() []sys.Capability { return Capabilities() }
-
 // Chain builds the canonical dispatcher stack over the world, exactly as a
 // real deployment does — via Stack.ForProcess, so the sim's crash matrix
 // exercises the same layer order production runs. Fails with
@@ -157,11 +166,12 @@ func Chain(world *World, process string) (sys.Dispatcher[PID], error) {
 	if err != nil {
 		return nil, err
 	}
+	table := Table(world.Effects)
 	stack := monitor.Stack[string, PID]{
-		Grants: func(PID) []sys.Capability { return Capabilities() },
+		Grants: func(PID) []sys.Capability { return table.Capabilities() },
 		Taints: monitor.NewTaints[string](), // fresh per boot: a crash loses host memory
 	}
-	return stack.ForProcess(tape, driver{effects: world.Effects})
+	return stack.ForProcess(tape, table, capability.NewDispatcher[PID](table))
 }
 
 // Run boots a fresh host process over the surviving world and drives the

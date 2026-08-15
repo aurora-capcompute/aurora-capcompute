@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/aurora-capcompute/monitor"
@@ -268,7 +269,7 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 
 // Drivers builds the driver chain below the task layer for one process: the
 // application's capability dispatcher wrapped with progress reporting.
-func (r *Runtime) Drivers(resolveCtx context.Context, cred ProcessContext) (sys.Dispatcher[ProcessContext], error) {
+func (r *Runtime) Drivers(resolveCtx context.Context, cred ProcessContext) (sys.Dispatcher[ProcessContext], *capability.Table, error) {
 	r.mu.Lock()
 	proc := r.processes[cred.ProcessID]
 	var spec manifest.Manifest
@@ -277,21 +278,25 @@ func (r *Runtime) Drivers(resolveCtx context.Context, cred ProcessContext) (sys.
 	}
 	r.mu.Unlock()
 	if proc == nil {
-		return nil, fmt.Errorf("%w: process %s", errs.NotFound, cred.ProcessID)
+		return nil, nil, fmt.Errorf("%w: process %s", errs.NotFound, cred.ProcessID)
 	}
-	base, err := r.dispatchers.NewDispatcher(resolveCtx, cred, spec)
+	table, err := r.dispatchers.NewDispatcher(resolveCtx, cred, spec)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if err := reconcileGrants(base.Capabilities(), spec); err != nil {
-		return nil, err
+	if err := reconcileGrants(table.Capabilities(), spec); err != nil {
+		return nil, nil, err
 	}
+	// The routing dispatcher is built here, from the table the provider returned,
+	// rather than by the provider: the chain that serves a call and the index the
+	// monitor judges it against are then the same object by construction.
+	var base sys.Dispatcher[ProcessContext] = capability.NewDispatcher[ProcessContext](table)
 	if grant, ok := spec.Grant(manifest.TimerSyscall); ok {
 		// sys.timer is the runtime's own, served below the task layer so its
 		// yield becomes a durable timer task.
 		base = newTimerDispatcher(base, grant)
 	}
-	return newProgressDispatcher(base), nil
+	return newProgressDispatcher(base), table, nil
 }
 
 // wrapProtocol stacks the runtime's protocol layers above the task layer: the

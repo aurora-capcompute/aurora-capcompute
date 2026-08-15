@@ -18,6 +18,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/aurora-capcompute/monitor"
 	"github.com/aurora-capcompute/aurora-capcompute/replay"
@@ -33,8 +34,11 @@ import (
 // what is its X — so they are one collaborator rather than four hooks.
 type Environment[K any] interface {
 	// Drivers supplies everything below the task layer: progress reporting and
-	// the application's own capability drivers.
-	Drivers(ctx context.Context, cred K) (sys.Dispatcher[K], error)
+	// the application's own capability drivers, together with the grant table
+	// those drivers were built from. The table travels with the chain because the
+	// flow monitor — which sits far above it, on the other side of the journal —
+	// judges each call against the very index that routes it.
+	Drivers(ctx context.Context, cred K) (sys.Dispatcher[K], *capability.Table, error)
 	// ProcessJournal is the process's live journal, which the tape reads and
 	// writes through.
 	ProcessJournal(ctx context.Context, cred K) (journaled.Journal, error)
@@ -107,7 +111,7 @@ func New[ID comparable, K capcompute.PID[ID]](config Config[ID, K]) (*Factory[ID
 }
 
 func (f *Factory[ID, K]) NewDispatcher(ctx context.Context, cred K) (sys.Dispatcher[K], error) {
-	drivers, err := f.config.Environment.Drivers(ctx, cred)
+	drivers, table, err := f.config.Environment.Drivers(ctx, cred)
 	if err != nil {
 		return nil, err
 	}
@@ -161,5 +165,5 @@ func (f *Factory[ID, K]) NewDispatcher(ctx context.Context, cred K) (sys.Dispatc
 		Taints:      f.config.Taints,
 		OpenIntents: f.config.OpenIntents,
 	}
-	return stack.ForProcess(tape, withSavepoints)
+	return stack.ForProcess(tape, table, withSavepoints)
 }
