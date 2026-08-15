@@ -74,8 +74,14 @@ func newLifecycleDispatcher(
 	// advertised (not hidden) so the model can discover and request it; every
 	// crossing still yields for human approval, so the guest can propose a lift
 	// but never perform one itself.
+	//
+	// Strict Reserve, not ReserveMissing: sys.declassify is runtimeServed, so
+	// LeafSyscalls never yields it and no provider family can be named for it. A
+	// collision here would mean that invariant broke, and it should say so
+	// loudly rather than skip the reservation and leave the Validator enforcing
+	// a driver's schema on a call the Declassifier serves.
 	if _, ok := manifest.Grant(manifestpkg.DeclassifySyscall); ok {
-		err := table.ReserveMissing(capability.Descriptor{
+		err := table.Reserve(capability.Descriptor{
 			Name:        manifestpkg.DeclassifySyscall,
 			Description: "request lifting labels from this run's taint; each crossing requires human approval and is journaled with its reason",
 			InputSchema: declassifyInputSchema,
