@@ -15,10 +15,12 @@
 package capability
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -85,15 +87,14 @@ type Entry struct {
 	Handler         Handler
 }
 
-// Family is everything one contributor has to say about one syscall: how to
-// tell its cases apart, the cases themselves, and how the syscall as a whole
-// presents itself. It carries no policy of its own — that is the Entry's. A contributor returns this and touches nothing else — the table is the
-// assembler's, so no contributor can reach past its own grant.
+// Family is everything one contributor has to say about one syscall: the cases
+// themselves, and the prose that introduces them. It carries neither policy nor
+// schema of its own — the first is the Entry's, and the second is projected from
+// the entries by the table (see menuSchema). A contributor returns this and
+// touches nothing else — the table is the assembler's, so no contributor can
+// reach past its own grant.
 type Family struct {
 	Description string
-	// Input is the family-level argument schema the reference monitor validates
-	// against before any case is resolved.
-	Input json.RawMessage
 	// Hidden keeps the family dispatchable but off the guest's discoverable menu.
 	Hidden  bool
 	Entries []Entry
@@ -124,6 +125,39 @@ func (f Family) served() (syscall, discriminator string, err error) {
 		}
 	}
 	return syscall, discriminator, nil
+}
+
+// menuSchema is the family-level argument schema — the shape a guest is handed
+// and the reference monitor admits a call against — projected from the cases
+// themselves rather than declared beside them. A contributor that wrote both
+// would be writing the same branches twice, and the copy that drifted would be
+// the one advertising an operation this table does not route.
+func menuSchema(entries []Entry) json.RawMessage {
+	branches := make([]json.RawMessage, 0, len(entries))
+	for _, entry := range entries {
+		// A case with no shape of its own constrains nothing, and unioning it with
+		// a sibling's branch would reject that case's own valid arguments. So the
+		// whole family goes unvalidated: resolve below still denies an operation
+		// this table does not serve.
+		if len(entry.Input) == 0 {
+			return nil
+		}
+		if !slices.ContainsFunc(branches, func(b json.RawMessage) bool { return bytes.Equal(b, entry.Input) }) {
+			branches = append(branches, entry.Input)
+		}
+	}
+	if len(branches) == 0 {
+		return nil
+	}
+	// Cases told apart by a property their own shape does not pin — an internet
+	// method — share one branch. A oneOf over two copies of it matches every
+	// instance twice, which is exactly one too many: the union would admit
+	// nothing at all.
+	if len(branches) == 1 {
+		return branches[0]
+	}
+	union, _ := json.Marshal(branches)
+	return json.RawMessage(fmt.Sprintf(`{"oneOf":%s}`, union))
 }
 
 // caseName reads the discriminator property out of a call's arguments. An
@@ -164,6 +198,10 @@ type Table struct {
 	// it knows which entry the call is — the lookup order, not a second place
 	// anyone declares it.
 	discriminators map[string]string
+	// schemas is the per-syscall menu projected from its entries at indexing time.
+	// It is held rather than recomputed because the Validator asks for it on every
+	// dispatch, and because stable bytes keep its compiled-schema cache warm.
+	schemas map[string]json.RawMessage
 	// reserved holds syscalls this table admits but does not route — served by a
 	// decorator above the routing dispatcher. They are deliberately a separate
 	// map: resolve never sees them, so a reserved name cannot be dispatched to a
@@ -177,6 +215,7 @@ func NewTable() *Table {
 		entries:        make(map[Key]Entry),
 		families:       make(map[string]Family),
 		discriminators: make(map[string]string),
+		schemas:        make(map[string]json.RawMessage),
 		reserved:       make(map[string]Descriptor),
 	}
 }
@@ -210,6 +249,7 @@ func (t *Table) Add(family Family) error {
 	family.Entries = indexed
 	t.families[syscall] = family
 	t.discriminators[syscall] = discriminator
+	t.schemas[syscall] = menuSchema(indexed)
 	t.order = append(t.order, syscall)
 	return nil
 }
@@ -391,7 +431,7 @@ func (t *Table) Descriptor(syscall string) (Descriptor, bool) {
 		return Descriptor{
 			Name:        syscall,
 			Description: family.Description,
-			InputSchema: family.Input,
+			InputSchema: t.schemas[syscall],
 			Hidden:      family.Hidden,
 		}, true
 	}

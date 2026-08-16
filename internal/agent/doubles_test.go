@@ -210,10 +210,10 @@ func tableOf(d sys.Dispatcher[ProcessContext], publish ...capability.Descriptor)
 	for _, published := range publish {
 		family := capability.Family{
 			Description: published.Description,
-			Input:       published.InputSchema,
 			Hidden:      published.Hidden,
 			Entries: []capability.Entry{{
 				Key:     capability.Key{Syscall: published.Name},
+				Input:   published.InputSchema,
 				Handler: dispatchAsHandler{d},
 			}},
 		}
