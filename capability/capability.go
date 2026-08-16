@@ -191,17 +191,11 @@ func caseName(discriminator string, args json.RawMessage) (string, error) {
 // to find the operation in a call, and the capabilities those operations add up
 // to.
 type Table struct {
-	entries  map[Key]Entry
-	families map[string]Family
-	// discriminators is the per-syscall property derived from each family's
-	// entries at indexing time. It is stored because resolution needs it before
-	// it knows which entry the call is — the lookup order, not a second place
-	// anyone declares it.
-	discriminators map[string]string
-	// schemas is the per-syscall menu projected from its entries at indexing time.
-	// It is held rather than recomputed because the Validator asks for it on every
-	// dispatch, and because stable bytes keep its compiled-schema cache warm.
-	schemas map[string]json.RawMessage
+	entries map[Key]Entry
+	// routes is one entry per syscall this table serves. Everything in it is
+	// projected from that syscall's entries at indexing time — nothing anyone
+	// declares, and nothing to keep in step with the index it came from.
+	routes map[string]route
 	// reserved holds syscalls this table admits but does not route — served by a
 	// decorator above the routing dispatcher. They are deliberately a separate
 	// map: resolve never sees them, so a reserved name cannot be dispatched to a
@@ -210,13 +204,22 @@ type Table struct {
 	order    []string // added order, so the grant set and the menu are stable
 }
 
+// route is what the table knows about one syscall it serves: how to find the
+// case in a call, and how the syscall presents itself to the monitor and to the
+// guest. The entries it was derived from are not held beside it — they live in
+// the flat index, which is the one place anything reads them.
+type route struct {
+	// discriminator is the property resolution reads before it knows which entry
+	// the call is: the lookup order, not a second place anyone declares it.
+	discriminator string
+	descriptor    Descriptor
+}
+
 func NewTable() *Table {
 	return &Table{
-		entries:        make(map[Key]Entry),
-		families:       make(map[string]Family),
-		discriminators: make(map[string]string),
-		schemas:        make(map[string]json.RawMessage),
-		reserved:       make(map[string]Descriptor),
+		entries:  make(map[Key]Entry),
+		routes:   make(map[string]route),
+		reserved: make(map[string]Descriptor),
 	}
 }
 
@@ -229,13 +232,12 @@ func (t *Table) Add(family Family) error {
 	if err != nil {
 		return err
 	}
-	if _, taken := t.families[syscall]; taken {
+	if _, taken := t.routes[syscall]; taken {
 		return fmt.Errorf("syscall %q is served twice", syscall)
 	}
 	if _, taken := t.reserved[syscall]; taken {
 		return fmt.Errorf("syscall %q is already reserved by a layer above", syscall)
 	}
-	indexed := make([]Entry, 0, len(family.Entries))
 	for _, entry := range family.Entries {
 		if entry.Handler == nil {
 			return fmt.Errorf("entry %s has no handler", entry.Key)
@@ -244,12 +246,16 @@ func (t *Table) Add(family Family) error {
 			return fmt.Errorf("operation %s is granted twice", entry.Key)
 		}
 		t.entries[entry.Key] = entry
-		indexed = append(indexed, entry)
 	}
-	family.Entries = indexed
-	t.families[syscall] = family
-	t.discriminators[syscall] = discriminator
-	t.schemas[syscall] = menuSchema(indexed)
+	t.routes[syscall] = route{
+		discriminator: discriminator,
+		descriptor: Descriptor{
+			Name:        syscall,
+			Description: family.Description,
+			InputSchema: menuSchema(family.Entries),
+			Hidden:      family.Hidden,
+		},
+	}
 	t.order = append(t.order, syscall)
 	return nil
 }
@@ -258,11 +264,11 @@ func (t *Table) Add(family Family) error {
 // different refusals: an unserved syscall or unknown case is a denial, a
 // discriminator that cannot be read is bad input.
 func (t *Table) resolve(call sys.Syscall) (Entry, error) {
-	discriminator, served := t.discriminators[call.Name]
+	route, served := t.routes[call.Name]
 	if !served {
 		return Entry{}, &DenialError{Syscall: call.Name}
 	}
-	operation, err := caseName(discriminator, call.Args)
+	operation, err := caseName(route.discriminator, call.Args)
 	if err != nil {
 		return Entry{}, &ArgsError{Syscall: call.Name, Err: err}
 	}
@@ -309,7 +315,7 @@ func (e *ArgsError) Unwrap() error { return e.Err }
 // with no check applied. An unserved syscall has no policy — it is about to be
 // denied outright.
 func (t *Table) Forbidden(call sys.Syscall) (forbid []string, sink string) {
-	if _, served := t.families[call.Name]; !served {
+	if _, served := t.routes[call.Name]; !served {
 		return nil, call.Name
 	}
 	if entry, err := t.resolve(call); err == nil {
@@ -357,9 +363,9 @@ func (t *Table) Labels(call sys.Syscall) []string {
 
 // Hide keeps a syscall dispatchable but off the guest's discoverable menu.
 func (t *Table) Hide(syscall string) {
-	if family, served := t.families[syscall]; served {
-		family.Hidden = true
-		t.families[syscall] = family
+	if route, served := t.routes[syscall]; served {
+		route.descriptor.Hidden = true
+		t.routes[syscall] = route
 	}
 }
 
@@ -399,7 +405,7 @@ func (t *Table) Reserve(descriptor Descriptor) error {
 	if descriptor.Name == "" {
 		return fmt.Errorf("a reserved syscall must be named")
 	}
-	if _, taken := t.families[descriptor.Name]; taken {
+	if _, taken := t.routes[descriptor.Name]; taken {
 		return fmt.Errorf("syscall %q is already served by a handler", descriptor.Name)
 	}
 	if _, taken := t.reserved[descriptor.Name]; taken {
@@ -427,13 +433,8 @@ func (t *Table) Descriptors() []Descriptor {
 // Descriptor answers what one name means in this table — the question every
 // monitor layer asks.
 func (t *Table) Descriptor(syscall string) (Descriptor, bool) {
-	if family, served := t.families[syscall]; served {
-		return Descriptor{
-			Name:        syscall,
-			Description: family.Description,
-			InputSchema: t.schemas[syscall],
-			Hidden:      family.Hidden,
-		}, true
+	if route, served := t.routes[syscall]; served {
+		return route.descriptor, true
 	}
 	descriptor, reserved := t.reserved[syscall]
 	return descriptor, reserved
