@@ -1,6 +1,7 @@
 package capability
 
 import (
+	"bytes"
 	"context"
 	"testing"
 
@@ -98,5 +99,45 @@ func TestHideKeepsTheSyscallOffTheMenu(t *testing.T) {
 	// Hidden is not ungranted: the agent still calls it by a name it knows.
 	if _, err := table.resolve(sys.Syscall{Name: "core.openaiApi"}); err != nil {
 		t.Fatalf("a hidden syscall must stay dispatchable: %v", err)
+	}
+}
+
+// The menu is a union only when there is a choice to make. One case publishes
+// that case's own shape: a oneOf of one branch says nothing more, and a oneOf
+// over repeated copies of one shape — cases told apart by a property the shape
+// does not pin — matches every instance more than once and so admits nothing.
+func TestMenuIsAUnionOnlyWhenThereIsAChoice(t *testing.T) {
+	shape := []byte(`{"type":"object"}`)
+	withInput := func(e Entry) Entry { e.Input = shape; return e }
+
+	one := NewTable()
+	if err := one.Add(Family{Entries: []Entry{withInput(entry("core.filesystem", "operation", "read"))}}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if descriptor, _ := one.Descriptor("core.filesystem"); string(descriptor.InputSchema) != string(shape) {
+		t.Fatalf("menu = %s, want the single case's own shape", descriptor.InputSchema)
+	}
+
+	shared := NewTable()
+	if err := shared.Add(Family{Entries: []Entry{
+		withInput(entry("core.internet", "method", "GET")),
+		withInput(entry("core.internet", "method", "POST")),
+	}}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if descriptor, _ := shared.Descriptor("core.internet"); string(descriptor.InputSchema) != string(shape) {
+		t.Fatalf("menu = %s, want one copy of the shape both cases share", descriptor.InputSchema)
+	}
+
+	distinct := NewTable()
+	get := withInput(entry("core.thing", "operation", "get"))
+	put := entry("core.thing", "operation", "put")
+	put.Input = []byte(`{"type":"object","properties":{"value":{}}}`)
+	if err := distinct.Add(Family{Entries: []Entry{get, put}}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	descriptor, _ := distinct.Descriptor("core.thing")
+	if !bytes.Contains(descriptor.InputSchema, []byte(`"oneOf"`)) {
+		t.Fatalf("menu = %s, want a union over the two distinct shapes", descriptor.InputSchema)
 	}
 }
