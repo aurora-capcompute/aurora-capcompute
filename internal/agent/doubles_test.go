@@ -169,15 +169,12 @@ type testDispatchers struct {
 	normalized []string
 }
 
-func (p *testDispatchers) Normalize(syscall string, config json.RawMessage) (json.RawMessage, error) {
+func (p *testDispatchers) ValidateConfig(syscall string, _ json.RawMessage) error {
 	if syscall == "unknown" {
-		return nil, fmt.Errorf("unsupported syscall")
+		return fmt.Errorf("unsupported syscall")
 	}
 	p.normalized = append(p.normalized, syscall)
-	if len(config) == 0 {
-		return json.RawMessage(`{}`), nil
-	}
-	return append(json.RawMessage(nil), config...), nil
+	return nil
 }
 
 func (*testDispatchers) NewDispatcher(context.Context, ProcessContext, manifest.Manifest) (*capability.Table, error) {

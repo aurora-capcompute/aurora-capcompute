@@ -25,9 +25,7 @@ func (capsDispatcher) Dispatch(context.Context, ProcessContext, sys.Syscall, sys
 // (over-advertising) provider, the confused-deputy the guard defends against.
 type fixedProvider struct{ caps []capability.Descriptor }
 
-func (fixedProvider) Normalize(_ string, settings json.RawMessage) (json.RawMessage, error) {
-	return settings, nil
-}
+func (fixedProvider) ValidateConfig(string, json.RawMessage) error { return nil }
 func (p fixedProvider) NewDispatcher(context.Context, ProcessContext, manifest.Manifest) (*capability.Table, error) {
 	return reservedTable(p.caps...), nil
 }

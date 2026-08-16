@@ -35,12 +35,7 @@ func newBlockingDispatchers(stoppable bool) *blockingDispatchers {
 	return &blockingDispatchers{entered: make(chan struct{}, 1), release: make(chan struct{}), stoppable: stoppable}
 }
 
-func (*blockingDispatchers) Normalize(_ string, settings json.RawMessage) (json.RawMessage, error) {
-	if len(settings) == 0 {
-		return json.RawMessage(`{}`), nil
-	}
-	return append(json.RawMessage(nil), settings...), nil
-}
+func (*blockingDispatchers) ValidateConfig(string, json.RawMessage) error { return nil }
 
 func (d *blockingDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ manifest.Manifest) (*capability.Table, error) {
 	return tableOf(d, llmCapability()), nil

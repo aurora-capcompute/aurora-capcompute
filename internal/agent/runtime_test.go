@@ -28,12 +28,7 @@ type runtimeDispatchers struct {
 	manifests []manifest.Manifest
 }
 
-func (*runtimeDispatchers) Normalize(_ string, settings json.RawMessage) (json.RawMessage, error) {
-	if len(settings) == 0 {
-		return json.RawMessage(`{}`), nil
-	}
-	return append(json.RawMessage(nil), settings...), nil
-}
+func (*runtimeDispatchers) ValidateConfig(string, json.RawMessage) error { return nil }
 
 func (p *runtimeDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, manifest manifest.Manifest) (*capability.Table, error) {
 	p.mu.Lock()
@@ -642,12 +637,7 @@ func firstAndLaterUser(messages []struct {
 // an approved Authorization (the task layer's injection seam).
 type approvalDispatchers struct{}
 
-func (approvalDispatchers) Normalize(_ string, settings json.RawMessage) (json.RawMessage, error) {
-	if len(settings) == 0 {
-		return json.RawMessage(`{}`), nil
-	}
-	return append(json.RawMessage(nil), settings...), nil
-}
+func (approvalDispatchers) ValidateConfig(string, json.RawMessage) error { return nil }
 
 func (approvalDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ manifest.Manifest) (*capability.Table, error) {
 	return tableOf(approvalToolDispatcher{}, llmCapability(),
@@ -760,12 +750,7 @@ type failThenSucceedDispatchers struct {
 	turn2 int
 }
 
-func (*failThenSucceedDispatchers) Normalize(_ string, settings json.RawMessage) (json.RawMessage, error) {
-	if len(settings) == 0 {
-		return json.RawMessage(`{}`), nil
-	}
-	return append(json.RawMessage(nil), settings...), nil
-}
+func (*failThenSucceedDispatchers) ValidateConfig(string, json.RawMessage) error { return nil }
 
 func (d *failThenSucceedDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ manifest.Manifest) (*capability.Table, error) {
 	return tableOf(&failThenSucceedDispatcher{parent: d}, llmCapability(),
@@ -917,9 +902,7 @@ func TestRuntimeHardRetryForksFromBeginning(t *testing.T) {
 // parked in a terminal Failed state with a real journal behind it.
 type effectsDispatchers struct{ d *effectsDispatcher }
 
-func (effectsDispatchers) Normalize(_ string, settings json.RawMessage) (json.RawMessage, error) {
-	return settings, nil
-}
+func (effectsDispatchers) ValidateConfig(string, json.RawMessage) error { return nil }
 
 func (p effectsDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ manifest.Manifest) (*capability.Table, error) {
 	return tableOf(p.d, llmCapability(),

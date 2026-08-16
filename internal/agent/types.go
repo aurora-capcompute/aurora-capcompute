@@ -49,7 +49,7 @@ type HistoryMessage struct {
 // flow policy applies — and handing back only a dispatcher would leave the
 // other two to be reconstructed, which is where they could disagree.
 type DispatcherProvider interface {
-	Normalize(syscall string, config json.RawMessage) (json.RawMessage, error)
+	ValidateConfig(syscall string, config json.RawMessage) error
 	NewDispatcher(context.Context, ProcessContext, manifest.Manifest) (*capability.Table, error)
 }
 

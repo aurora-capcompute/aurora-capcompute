@@ -15,11 +15,11 @@ import (
 // that no longer compiles in a capability historical manifests still name.
 type vanishedToolDispatchers struct{ runtimeDispatchers }
 
-func (p *vanishedToolDispatchers) Normalize(toolType string, settings json.RawMessage) (json.RawMessage, error) {
+func (p *vanishedToolDispatchers) ValidateConfig(toolType string, settings json.RawMessage) error {
 	if toolType == "core.gone" {
-		return nil, errors.New("unsupported tool type")
+		return errors.New("unsupported tool type")
 	}
-	return p.runtimeDispatchers.Normalize(toolType, settings)
+	return p.runtimeDispatchers.ValidateConfig(toolType, settings)
 }
 
 // A historical run whose manifest names a decommissioned tool type must not

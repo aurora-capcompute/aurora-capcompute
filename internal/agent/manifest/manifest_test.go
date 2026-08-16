@@ -14,15 +14,12 @@ type testNormalizer struct {
 	normalized []string
 }
 
-func (p *testNormalizer) Normalize(syscall string, config json.RawMessage) (json.RawMessage, error) {
+func (p *testNormalizer) ValidateConfig(syscall string, _ json.RawMessage) error {
 	if syscall == "unknown" {
-		return nil, fmt.Errorf("unsupported syscall")
+		return fmt.Errorf("unsupported syscall")
 	}
 	p.normalized = append(p.normalized, syscall)
-	if len(config) == 0 {
-		return json.RawMessage(`{}`), nil
-	}
-	return append(json.RawMessage(nil), config...), nil
+	return nil
 }
 
 func TestValidateManifestUsesInjectedProvider(t *testing.T) {
@@ -38,8 +35,14 @@ func TestValidateManifestUsesInjectedProvider(t *testing.T) {
 	if spec.Syscalls[0].Syscall != "core.custom" {
 		t.Fatalf("manifest = %+v", spec)
 	}
-	if string(spec.Syscalls[0].Config) != "{}" {
-		t.Fatalf("config = %s", spec.Syscalls[0].Config)
+	// The provider was consulted about the grant, and the manifest kept exactly
+	// what its author wrote: validation refuses, it does not rewrite. Whatever
+	// canonical form the driver derives is the driver's own business at spawn.
+	if len(provider.normalized) != 1 || provider.normalized[0] != "core.custom" {
+		t.Fatalf("validated syscalls = %v, want the grant to have been checked", provider.normalized)
+	}
+	if len(spec.Syscalls[0].Config) != 0 {
+		t.Fatalf("config = %s, want the author's own (absent) config preserved", spec.Syscalls[0].Config)
 	}
 }
 

@@ -7,7 +7,7 @@
 //
 // The package interprets only the fields the runtime owns; a leaf grant's Config
 // is opaque here and normalized by whoever serves that syscall, reached through
-// the one-method Normalizer this package asks for.
+// the one-method ConfigValidator this package asks for.
 package manifest
 
 import (
@@ -179,25 +179,31 @@ func (m Manifest) Grant(syscall string) (Syscall, bool) {
 	return Syscall{}, false
 }
 
-// Normalizer canonicalizes one leaf grant's Config — the only thing validation
+// ConfigValidator refuses one leaf grant's Config — the only thing validation
 // needs from whoever serves that syscall. The runtime's dispatcher provider
-// satisfies it; asking for just this keeps manifest validation independent of how
-// a dispatcher is built, and of the process credential building one needs.
-type Normalizer interface {
-	Normalize(syscall string, config json.RawMessage) (json.RawMessage, error)
+// satisfies it; asking for just this keeps manifest validation independent of
+// how a dispatcher is built, and of the process credential building one needs.
+//
+// It refuses and returns nothing. An earlier version handed back a canonical
+// rewriting of the config, which this package stored on the grant — but nothing
+// ever read that form except the code that parsed it again at spawn, so the
+// manifest now keeps exactly what its author wrote and the check is only a
+// check.
+type ConfigValidator interface {
+	ValidateConfig(syscall string, config json.RawMessage) error
 }
 
 // Validate checks and normalizes a manifest tree, returning a clone the caller
-// owns. A nil Normalizer is refused: an unnormalized leaf grant is one whose
+// owns. A nil ConfigValidator is refused: an unchecked leaf grant is one whose
 // authority nobody has checked.
-func Validate(spec Manifest, normalizer Normalizer) (Manifest, error) {
-	if normalizer == nil {
+func Validate(spec Manifest, validator ConfigValidator) (Manifest, error) {
+	if validator == nil {
 		return Manifest{}, fmt.Errorf("%w: dispatcher provider is required", errs.Invalid)
 	}
 	if spec.Version != Version {
 		return Manifest{}, fmt.Errorf("%w: manifest version must be %d", errs.Invalid, Version)
 	}
-	if err := validateNode(&spec, normalizer); err != nil {
+	if err := validateNode(&spec, validator); err != nil {
 		return Manifest{}, err
 	}
 	// The runtime keeps no default program — a process names the program it runs,
@@ -209,16 +215,16 @@ func Validate(spec Manifest, normalizer Normalizer) (Manifest, error) {
 }
 
 // validateNode normalizes one manifest node — the root, or a spawnable
-func validateNode(node *Manifest, normalizer Normalizer) error {
+func validateNode(node *Manifest, validator ConfigValidator) error {
 	node.Program = strings.TrimSpace(node.Program)
 	node.BindingRef = strings.TrimSpace(node.BindingRef)
-	return validateSyscalls(node.Syscalls, normalizer)
+	return validateSyscalls(node.Syscalls, validator)
 }
 
 // validateSyscalls normalizes a grant set: driver grants against their
 // registrations, the runtime-served ones (spawn's programs, the timer's
 // bound) in place. Nothing is named, so a syscall may be granted once.
-func validateSyscalls(syscalls []Syscall, normalizer Normalizer) error {
+func validateSyscalls(syscalls []Syscall, validator ConfigValidator) error {
 	seen := make(map[string]struct{}, len(syscalls))
 	for i := range syscalls {
 		grant := &syscalls[i]
@@ -251,11 +257,9 @@ func validateSyscalls(syscalls []Syscall, normalizer Normalizer) error {
 			}
 			grant.Config = nil
 		} else {
-			normalized, err := normalizer.Normalize(grant.Syscall, grant.Config)
-			if err != nil {
+			if err := validator.ValidateConfig(grant.Syscall, grant.Config); err != nil {
 				return fmt.Errorf("%w: syscall %q config: %v", errs.Invalid, grant.Syscall, err)
 			}
-			grant.Config = append(json.RawMessage(nil), normalized...)
 		}
 		if _, exists := seen[grant.Syscall]; exists {
 			return fmt.Errorf("%w: duplicate syscall %q", errs.Invalid, grant.Syscall)
