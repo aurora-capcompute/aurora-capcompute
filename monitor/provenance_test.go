@@ -430,3 +430,24 @@ func TestFlowRefusesToBeBuiltWithoutAnIndex(t *testing.T) {
 	}()
 	NewFlow[string, testPID](NewTaints[string](), nil)
 }
+
+// A failed result is still an observation: the call reached a labelled source
+// and the failure text may carry what it saw. Stamp labels it like any other
+// outcome, which is why a driver need not — and must not — label its own
+// failures. openaillm relied on doing that itself until its policy moved onto
+// its entries; this is the guarantee it now leans on.
+func TestStampLabelsFailuresToo(t *testing.T) {
+	failing := handlerFunc(func(_ context.Context, _ sys.Syscall) (sys.SyscallResult, error) {
+		return sys.FailCode(sys.ErrnoTransient, "provider unreachable"), nil
+	})
+	_, below := stamped(t, flowTable(t, failing), NewTaints[string]())
+
+	result := call(t, below, "p1", "internet.read")
+	if result.Status() != sys.StatusFailed {
+		t.Fatalf("status = %v, want the handler's failure", result.Status())
+	}
+	if !slices.Contains(result.Labels(), "untrusted_web") {
+		t.Fatalf("SECURITY: failed result labels = %v, want the source class — an "+
+			"unlabelled error is a channel a forbidding sink would accept", result.Labels())
+	}
+}
