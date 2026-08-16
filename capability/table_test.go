@@ -75,3 +75,28 @@ func TestFamilyIndexesBothShapes(t *testing.T) {
 		t.Fatalf("resolved entry says it is told apart by %q, want method", resolved.Discriminator)
 	}
 }
+
+// Hiding is a property of the record the table holds, not of the family the
+// contributor handed over — that copy is gone once the entries are indexed. So
+// Hide has to write its change back, and the menu has to be read from what it
+// wrote: a grant the manifest marks hidden but the table still advertises is a
+// capability the guest was never meant to discover.
+func TestHideKeepsTheSyscallOffTheMenu(t *testing.T) {
+	table := NewTable()
+	if err := table.Add(Family{Description: "cognition", Entries: []Entry{entry("core.openaiApi", "", "")}}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	table.Hide("core.openaiApi")
+
+	descriptor, served := table.Descriptor("core.openaiApi")
+	if !served || !descriptor.Hidden {
+		t.Fatalf("descriptor = %+v, want it served and hidden", descriptor)
+	}
+	if descriptors := table.Descriptors(); len(descriptors) != 1 || !descriptors[0].Hidden {
+		t.Fatalf("menu = %+v, want the hidden grant reported hidden", descriptors)
+	}
+	// Hidden is not ungranted: the agent still calls it by a name it knows.
+	if _, err := table.resolve(sys.Syscall{Name: "core.openaiApi"}); err != nil {
+		t.Fatalf("a hidden syscall must stay dispatchable: %v", err)
+	}
+}
