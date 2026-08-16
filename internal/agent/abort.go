@@ -5,8 +5,8 @@ package agent
 // A guest's sys.abort gives up on the savepoint section it is inside: the
 // journal forks at the section's still-open sys.begin and the whole declared
 // unit re-executes as a fresh revision, over whatever state its first attempt
-// left behind. Nothing is undone — the runtime serves no compensations — so a
-// section that must be re-runnable is the program's own contract, and the
+// left behind. Nothing is undone, so a section that must be re-runnable is the
+// program's own contract, and the
 // abandoned attempt stays in the log as an audited, closed revision.
 //
 // A host failure re-drives the same revision instead, at most once per journal

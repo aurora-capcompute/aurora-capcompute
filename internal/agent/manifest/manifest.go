@@ -1,13 +1,8 @@
-// Package manifest is the grant tree: what a process may do, declared as data.
-//
-// A Manifest is one program node — the program it runs plus its granted syscalls
-// recursion that makes the whole tree one shape. Validate normalizes a tree and
-// refuses one that grants what cannot be served, so an invalid manifest never
-// reaches a process.
+// Package manifest is the grant set: what a process may do, declared as data.
 //
 // The package interprets only the fields the runtime owns; a leaf grant's Config
-// is opaque here and normalized by whoever serves that syscall, reached through
-// the one-method ConfigValidator this package asks for.
+// is opaque here and checked by whoever serves that syscall, reached through the
+// one-method ConfigValidator.
 package manifest
 
 import (
@@ -44,16 +39,6 @@ type TimerSettings struct {
 	MaxDurationMS int64 `json:"max_duration_ms,omitempty"`
 }
 
-// Manifest is one process node: Program names it and Syscalls is its grant
-// recursion that makes the whole grant tree one shape — carrying no Version
-// of its own: the root's governs. A child's failure is a recoverable
-// observation to its parent's cognition; a program that must abort on it makes
-// the spawn a hard call.
-//
-// A program node carries two optional context settings, honored wherever the
-// program runs — as the root, or spawned as a child — so history and capability
-// sharing live in one place per program rather than on the spawning grant.
-// Everything else is configuration on the syscall grants.
 type Manifest struct {
 	Version int    `json:"version,omitempty"`
 	Program string `json:"program,omitempty"`
