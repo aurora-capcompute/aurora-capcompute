@@ -55,9 +55,20 @@ type Handler interface {
 // labelled GET and a forbidding POST — and because it is the entry, not the
 // handler, that a monitor above the journal can see.
 type Entry struct {
-	Key         Key
-	Description string
-	Input       json.RawMessage
+	Key Key
+	// Discriminator names the argument property whose value is Key.Operation —
+	// the other half of what makes this entry a case. An entry that carried only
+	// the value would not say what it is a value of, and could not be read
+	// without its family standing next to it.
+	//
+	// Empty means the syscall is one operation and Key.Operation is empty too.
+	//
+	// It is read, never canonicalized: the value the guest sent is matched
+	// exactly, so a near miss is a refusal naming the alternatives rather than a
+	// silent correction.
+	Discriminator string
+	Description   string
+	Input         json.RawMessage
 	// Labels are the source classes this operation's results carry; Forbid are
 	// the labels barred from flowing into its arguments. Both are enforced by the
 	// runtime's flow monitor — never by the handler, which is reached only once
@@ -84,36 +95,35 @@ type Family struct {
 	// against before any case is resolved.
 	Input json.RawMessage
 	// Hidden keeps the family dispatchable but off the guest's discoverable menu.
-	Hidden bool
-	// Discriminator names the argument property whose value selects a case.
-	// Empty means the syscall is one operation.
-	//
-	// It lives here rather than on Entry because it is what *finds* the entry:
-	// the table must read the case out of the arguments before it knows which
-	// entry the call is, so that read can only be keyed by the syscall. Policy
-	// runs the other way round — labels and forbid sets describe a case that has
-	// already been found, and live on the Entry alone.
-	//
-	// It is read, never canonicalized: the value the guest sent is matched
-	// exactly, so a near miss is a refusal naming the alternatives rather than a
-	// silent correction.
-	Discriminator string
-	Entries       []Entry
+	Hidden  bool
+	Entries []Entry
 }
 
-// syscall is the one this family is for, taken from the entries rather than
-// passed alongside them — there is then no way for the two to disagree.
-func (f Family) syscall() (string, error) {
+// served is what this family is for — the syscall it grants and the property
+// its cases are told apart by — taken from the entries rather than declared
+// alongside them. There is then no way for the two to disagree, and no way to
+// index an entry whose own account of itself the table does not use.
+func (f Family) served() (syscall, discriminator string, err error) {
 	if len(f.Entries) == 0 {
-		return "", fmt.Errorf("a family must grant at least one operation")
+		return "", "", fmt.Errorf("a family must grant at least one operation")
 	}
-	syscall := f.Entries[0].Key.Syscall
+	syscall = f.Entries[0].Key.Syscall
+	discriminator = f.Entries[0].Discriminator
 	for _, entry := range f.Entries {
 		if entry.Key.Syscall != syscall {
-			return "", fmt.Errorf("family mixes syscalls %q and %q", syscall, entry.Key.Syscall)
+			return "", "", fmt.Errorf("family mixes syscalls %q and %q", syscall, entry.Key.Syscall)
+		}
+		if entry.Discriminator != discriminator {
+			return "", "", fmt.Errorf("syscall %q tells its cases apart by %q and %q at once",
+				syscall, discriminator, entry.Discriminator)
+		}
+		// A named case with nothing to read it out of is unreachable: caseName
+		// would always resolve to "" and the entry would never be indexed.
+		if discriminator == "" && entry.Key.Operation != "" {
+			return "", "", fmt.Errorf("operation %s names a case but declares no discriminator to select it", entry.Key)
 		}
 	}
-	return syscall, nil
+	return syscall, discriminator, nil
 }
 
 // caseName reads the discriminator property out of a call's arguments. An
@@ -123,16 +133,16 @@ func (f Family) syscall() (string, error) {
 //
 // This is the single case resolution in the system. Both the routing dispatcher
 // and the flow monitor reach it through Table.resolve.
-func (f Family) caseName(args json.RawMessage) (string, error) {
-	if f.Discriminator == "" {
+func caseName(discriminator string, args json.RawMessage) (string, error) {
+	if discriminator == "" {
 		return "", nil // a syscall that is one operation
 	}
-	malformed := fmt.Errorf("arguments must be an object with a string %q", f.Discriminator)
+	malformed := fmt.Errorf("arguments must be an object with a string %q", discriminator)
 	var envelope map[string]json.RawMessage
 	if err := json.Unmarshal(args, &envelope); err != nil {
 		return "", malformed
 	}
-	raw, present := envelope[f.Discriminator]
+	raw, present := envelope[discriminator]
 	if !present {
 		return "", nil
 	}
@@ -149,6 +159,11 @@ func (f Family) caseName(args json.RawMessage) (string, error) {
 type Table struct {
 	entries  map[Key]Entry
 	families map[string]Family
+	// discriminators is the per-syscall property derived from each family's
+	// entries at indexing time. It is stored because resolution needs it before
+	// it knows which entry the call is — the lookup order, not a second place
+	// anyone declares it.
+	discriminators map[string]string
 	// reserved holds syscalls this table admits but does not route — served by a
 	// decorator above the routing dispatcher. They are deliberately a separate
 	// map: resolve never sees them, so a reserved name cannot be dispatched to a
@@ -159,9 +174,10 @@ type Table struct {
 
 func NewTable() *Table {
 	return &Table{
-		entries:  make(map[Key]Entry),
-		families: make(map[string]Family),
-		reserved: make(map[string]Descriptor),
+		entries:        make(map[Key]Entry),
+		families:       make(map[string]Family),
+		discriminators: make(map[string]string),
+		reserved:       make(map[string]Descriptor),
 	}
 }
 
@@ -170,7 +186,7 @@ func NewTable() *Table {
 // two things at once, and a linear scan would answer that by picking whichever
 // was appended first.
 func (t *Table) Add(family Family) error {
-	syscall, err := family.syscall()
+	syscall, discriminator, err := family.served()
 	if err != nil {
 		return err
 	}
@@ -193,6 +209,7 @@ func (t *Table) Add(family Family) error {
 	}
 	family.Entries = indexed
 	t.families[syscall] = family
+	t.discriminators[syscall] = discriminator
 	t.order = append(t.order, syscall)
 	return nil
 }
@@ -201,11 +218,11 @@ func (t *Table) Add(family Family) error {
 // different refusals: an unserved syscall or unknown case is a denial, a
 // discriminator that cannot be read is bad input.
 func (t *Table) resolve(call sys.Syscall) (Entry, error) {
-	family, served := t.families[call.Name]
+	discriminator, served := t.discriminators[call.Name]
 	if !served {
 		return Entry{}, &DenialError{Syscall: call.Name}
 	}
-	operation, err := family.caseName(call.Args)
+	operation, err := caseName(discriminator, call.Args)
 	if err != nil {
 		return Entry{}, &ArgsError{Syscall: call.Name, Err: err}
 	}

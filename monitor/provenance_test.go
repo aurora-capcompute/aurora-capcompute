@@ -309,10 +309,11 @@ func adtTable(t *testing.T) *capability.Table {
 	t.Helper()
 	table := capability.NewTable()
 	err := table.Add(capability.Family{
-		Discriminator: "operation",
 		Entries: []capability.Entry{
-			{Key: capability.Key{Syscall: "core.filesystem", Operation: "read"}, Labels: []string{"untrusted_file"}, Handler: echo},
-			{Key: capability.Key{Syscall: "core.filesystem", Operation: "write"}, Forbid: []string{"untrusted_file"}, Handler: echo},
+			{Key: capability.Key{Syscall: "core.filesystem", Operation: "read"}, Discriminator: "operation",
+				Labels: []string{"untrusted_file"}, Handler: echo},
+			{Key: capability.Key{Syscall: "core.filesystem", Operation: "write"}, Discriminator: "operation",
+				Forbid: []string{"untrusted_file"}, Handler: echo},
 		},
 	})
 	if err != nil {

@@ -1,0 +1,77 @@
+package capability
+
+import (
+	"context"
+	"testing"
+
+	"github.com/aurora-capcompute/capcompute/sys"
+)
+
+type nopHandler struct{}
+
+func (nopHandler) DispatchCall(context.Context, sys.Syscall, sys.Authorization) (sys.SyscallResult, error) {
+	return sys.Result(nil), nil
+}
+
+func entry(syscall, discriminator, operation string) Entry {
+	return Entry{
+		Key:           Key{Syscall: syscall, Operation: operation},
+		Discriminator: discriminator,
+		Handler:       nopHandler{},
+	}
+}
+
+// A case is (property, value): the property it is read from is as much a part of
+// an entry as the value that selects it. Because the table derives the property
+// from the entries rather than taking it declared alongside them, an entry that
+// disagrees with its siblings is refused instead of being silently indexed under
+// somebody else's discriminator.
+func TestFamilyRefusesCasesToldApartTwoWays(t *testing.T) {
+	table := NewTable()
+	err := table.Add(Family{Entries: []Entry{
+		entry("core.internet", "method", "GET"),
+		entry("core.internet", "operation", "POST"),
+	}})
+	if err == nil {
+		t.Fatal("a family whose cases name two different discriminators was indexed")
+	}
+	if _, served := table.Descriptor("core.internet"); served {
+		t.Fatal("the refused family was indexed anyway")
+	}
+}
+
+// An entry that names a case but no property to read it from can never be
+// reached: resolution would always produce the empty case. That is a wiring bug
+// worth refusing at indexing time rather than a grant that silently does nothing.
+func TestFamilyRefusesANamedCaseWithNoDiscriminator(t *testing.T) {
+	err := NewTable().Add(Family{Entries: []Entry{entry("core.internet", "", "GET")}})
+	if err == nil {
+		t.Fatal("an unreachable case was indexed")
+	}
+}
+
+// The ordinary shapes still index: one syscall that is a single operation, and
+// one told apart by a property its cases agree on.
+func TestFamilyIndexesBothShapes(t *testing.T) {
+	table := NewTable()
+	if err := table.Add(Family{Entries: []Entry{entry("sys.ping", "", "")}}); err != nil {
+		t.Fatalf("single-operation syscall refused: %v", err)
+	}
+	if err := table.Add(Family{Entries: []Entry{
+		entry("core.internet", "method", "GET"),
+		entry("core.internet", "method", "POST"),
+	}}); err != nil {
+		t.Fatalf("discriminated syscall refused: %v", err)
+	}
+
+	resolved, err := table.resolve(sys.Syscall{Name: "core.internet", Args: []byte(`{"method":"POST"}`)})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if resolved.Key.Operation != "POST" {
+		t.Fatalf("resolved %s, want the POST case", resolved.Key)
+	}
+	if resolved.Discriminator != "method" {
+		t.Fatalf("resolved entry says it is told apart by %q, want method", resolved.Discriminator)
+	}
+}
