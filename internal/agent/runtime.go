@@ -290,7 +290,7 @@ func (r *Runtime) Drivers(resolveCtx context.Context, cred ProcessContext) (sys.
 	// rather than by the provider: the chain that serves a call and the index the
 	// monitor judges it against are then the same object by construction.
 	var base sys.Dispatcher[ProcessContext] = capability.NewDispatcher[ProcessContext](table)
-	if grant, ok := spec.Grant(manifest.TimerSyscall); ok {
+	if grant, ok := spec.FindSyscall(manifest.TimerSyscall); ok {
 		// sys.timer is the runtime's own, served below the task layer so its
 		// yield becomes a durable timer task.
 		base, err = newTimerDispatcher(base, grant, table)

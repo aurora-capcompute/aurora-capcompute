@@ -80,7 +80,7 @@ func newLifecycleDispatcher(
 	// collision here would mean that invariant broke, and it should say so
 	// loudly rather than skip the reservation and leave the Validator enforcing
 	// a driver's schema on a call the Declassifier serves.
-	if _, ok := manifest.Grant(manifestpkg.DeclassifySyscall); ok {
+	if _, ok := manifest.FindSyscall(manifestpkg.DeclassifySyscall); ok {
 		err := table.Reserve(capability.Descriptor{
 			Name:        manifestpkg.DeclassifySyscall,
 			Description: "request lifting labels from this run's taint; each crossing requires human approval and is journaled with its reason",
