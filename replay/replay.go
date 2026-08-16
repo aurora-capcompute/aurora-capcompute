@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
@@ -125,7 +126,7 @@ func (d *Dispatcher[K]) Dispatch(ctx context.Context, cred K, syscall sys.Syscal
 		return sys.SyscallResult{}, err
 	}
 
-	result, err = d.next.Dispatch(sys.WithIdempotencyKey(ctx, key), cred, syscall, auth)
+	result, err = d.next.Dispatch(capability.WithIdempotencyKey(ctx, key), cred, syscall, auth)
 	if err != nil {
 		// Outcome unknown: the intent stays open so the next replay resolves
 		// it by policy. Journaling a made-up completion here would assert an

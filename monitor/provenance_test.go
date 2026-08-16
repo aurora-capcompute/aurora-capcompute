@@ -276,7 +276,7 @@ func TestFlowGuardHandsTaintDownstream(t *testing.T) {
 	var seen []string
 	probe := handlerFunc(func(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error) {
 		if call.Name == "mail.send" {
-			seen = sys.Taint(ctx)
+			seen = capability.Taint(ctx)
 		}
 		return sys.Result(nil), nil
 	})

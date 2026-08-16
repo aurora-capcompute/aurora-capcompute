@@ -6,6 +6,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
@@ -84,7 +85,7 @@ func TestDispatcherJournalsIntentThenCompletion(t *testing.T) {
 		if !tape.begun {
 			t.Fatal("driver ran before the intent was journaled (journal-before-execute violated)")
 		}
-		sawKey, _ = sys.IdempotencyKey(ctx)
+		sawKey, _ = capability.IdempotencyKey(ctx)
 		return sys.Result(json.RawMessage(`{"ok":true}`)), nil
 	})
 	if err != nil {
@@ -141,7 +142,7 @@ func TestDispatcherRetriesOpenIntentWithOriginalKey(t *testing.T) {
 	tape := &fakeTape{nextErr: OpenIntentError{Position: 4, Key: "key-4", Syscall: sys.Syscall{Name: "step.one"}}}
 	var sawKey string
 	result, err := dispatchWith(t, tape, func(ctx context.Context, _ string, _ sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
-		sawKey, _ = sys.IdempotencyKey(ctx)
+		sawKey, _ = capability.IdempotencyKey(ctx)
 		return sys.Result(nil), nil
 	})
 	if err != nil {

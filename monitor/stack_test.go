@@ -18,7 +18,7 @@ type stackDriver struct {
 }
 
 func (d *stackDriver) Dispatch(ctx context.Context, _ testPID, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
-	key, _ := sys.IdempotencyKey(ctx)
+	key, _ := capability.IdempotencyKey(ctx)
 	d.keys = append(d.keys, key)
 	return sys.Result(json.RawMessage(`{"from":"` + syscall.Name + `"}`)), nil
 }

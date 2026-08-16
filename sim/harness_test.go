@@ -140,7 +140,7 @@ type driver struct {
 
 func (d driver) DispatchCall(ctx context.Context, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
 	d.effects.Dispatches++
-	key, ok := sys.IdempotencyKey(ctx)
+	key, ok := capability.IdempotencyKey(ctx)
 	if !ok {
 		return sys.SyscallResult{}, fmt.Errorf("driver received no idempotency key for %q", syscall.Name)
 	}

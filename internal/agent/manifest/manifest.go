@@ -232,7 +232,7 @@ func validateSyscalls(syscalls []Syscall, normalizer Normalizer) error {
 		// log/now/random/abort/declassify/begin/commit). Granting one
 		// as a leaf would hand it to a driver, which could then shadow the
 		// runtime's own protocol capability — so it is refused up front, the way
-		// the reserved "syscall:" label namespace is (sys.NormalizeLabels).
+		// the reserved "syscall:" label namespace is (capability.NormalizeLabels).
 		if strings.HasPrefix(grant.Syscall, reservedSyscallPrefix) && !grant.runtimeServed() {
 			return fmt.Errorf("%w: syscall %q is in the reserved %q namespace and may not be granted", errs.Invalid, grant.Syscall, reservedSyscallPrefix)
 		}

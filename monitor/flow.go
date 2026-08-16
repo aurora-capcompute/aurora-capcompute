@@ -98,7 +98,7 @@ func (g *flowGuard[ID, K]) Dispatch(ctx context.Context, cred K, syscall sys.Sys
 	// Hand the run's taint downstream: handlers that store guest-derived data
 	// persist it with the value, so provenance survives into later sessions
 	// instead of being laundered.
-	result, err := g.next.Dispatch(sys.WithTaint(ctx, g.flow.taints.snapshot(pid)), cred, syscall, auth)
+	result, err := g.next.Dispatch(capability.WithTaint(ctx, g.flow.taints.snapshot(pid)), cred, syscall, auth)
 	if err != nil {
 		return result, err
 	}
@@ -133,6 +133,6 @@ func (s *flowStamp[ID, K]) Dispatch(ctx context.Context, cred K, syscall sys.Sys
 	// The deriving syscall, plus the source classes the resolved operation
 	// declares: a filesystem read over a secrets root labels differently from a
 	// list of the same root.
-	labels := append([]string{sys.SyscallLabelPrefix + syscall.Name}, s.flow.table.Labels(syscall)...)
+	labels := append([]string{capability.SyscallLabelPrefix + syscall.Name}, s.flow.table.Labels(syscall)...)
 	return result.WithLabels(labels...), nil
 }
