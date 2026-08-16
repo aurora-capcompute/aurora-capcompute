@@ -304,13 +304,12 @@ func adtCall(t *testing.T, d sys.Dispatcher[testPID], operation string) sys.Sysc
 }
 
 // adtTable indexes one syscall with two cases: a read that is a source and a
-// write that is a sink, plus a family-wide bar the write cannot escape.
-func adtTable(t *testing.T, familyForbid []string) *capability.Table {
+// write that is a sink.
+func adtTable(t *testing.T) *capability.Table {
 	t.Helper()
 	table := capability.NewTable()
 	err := table.Add(capability.Family{
 		Discriminator: "operation",
-		Forbid:        familyForbid,
 		Entries: []capability.Entry{
 			{Key: capability.Key{Syscall: "core.filesystem", Operation: "read"}, Labels: []string{"untrusted_file"}, Handler: echo},
 			{Key: capability.Key{Syscall: "core.filesystem", Operation: "write"}, Forbid: []string{"untrusted_file"}, Handler: echo},
@@ -328,7 +327,7 @@ func adtTable(t *testing.T, familyForbid []string) *capability.Table {
 // This is where filesystem's own sink-guard and label tests moved to when
 // enforcement left the driver.
 func TestPerOperationFlowPolicy(t *testing.T) {
-	table := adtTable(t, nil)
+	table := adtTable(t)
 	flow, below := stamped(t, table, NewTaints[string]())
 	chain := flow.Guard(below)
 
@@ -348,29 +347,16 @@ func TestPerOperationFlowPolicy(t *testing.T) {
 	}
 }
 
-// A family-wide bar applies to every case, including one that declares no bar of
-// its own: the table folds it in at indexing time, so there is no case a call can
-// name to reach the family with less policy than the family declared.
-func TestFamilyForbidCannotBeEscapedByCase(t *testing.T) {
-	table := adtTable(t, []string{"untrusted_file"})
+// An unresolvable case must not be a way past the sink guard. No single entry's
+// bar is the right one — the table cannot tell which case the call is — so it
+// answers with every case's, unioned. Here the write's bar applies to a call
+// that named no readable operation, even though the read declares none.
+func TestUnresolvableCaseTakesTheStrictestBar(t *testing.T) {
+	table := adtTable(t)
 	flow, below := stamped(t, table, NewTaints[string]())
 	chain := flow.Guard(below)
 
 	adtCall(t, chain, "read") // taints the run with untrusted_file
-	// "read" declares no Forbid of its own, but the family does.
-	if blocked := adtCall(t, chain, "read"); blocked.Errno() != sys.ErrnoDenied {
-		t.Fatalf("errno = %v, want the family-wide bar to apply to the read case", blocked.Errno())
-	}
-}
-
-// An unresolvable case must not be a way past the sink guard: the discriminator
-// is unreadable, so no entry applies, and the family's own bar is what answers.
-func TestUnresolvableCaseFallsBackToFamilyBar(t *testing.T) {
-	table := adtTable(t, []string{"untrusted_file"})
-	flow, below := stamped(t, table, NewTaints[string]())
-	chain := flow.Guard(below)
-
-	adtCall(t, chain, "read") // taints the run
 
 	result, err := chain.Dispatch(context.Background(), testPID{id: "p1"}, sys.Syscall{
 		Abi:  sys.ABIVersion,
@@ -381,7 +367,7 @@ func TestUnresolvableCaseFallsBackToFamilyBar(t *testing.T) {
 		t.Fatalf("dispatch: %v", err)
 	}
 	if result.Errno() != sys.ErrnoDenied {
-		t.Fatalf("errno = %v, want the family bar to deny a call whose case cannot be read", result.Errno())
+		t.Fatalf("errno = %v, want the strictest case's bar to deny a call whose case cannot be read", result.Errno())
 	}
 }
 
@@ -390,7 +376,7 @@ func TestUnresolvableCaseFallsBackToFamilyBar(t *testing.T) {
 // anything it drops must actually be denied. Deriving it rather than caching it
 // is what makes that hold.
 func TestPermittedSetTracksTheGuard(t *testing.T) {
-	table := adtTable(t, nil)
+	table := adtTable(t)
 	flow, below := stamped(t, table, NewTaints[string]())
 	chain := flow.Guard(below)
 

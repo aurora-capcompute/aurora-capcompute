@@ -60,9 +60,12 @@ type Entry struct {
 	Input       json.RawMessage
 	// Labels are the source classes this operation's results carry; Forbid are
 	// the labels barred from flowing into its arguments. Both are enforced by the
-	// runtime's flow monitor — never by the handler.
+	// runtime's flow monitor — never by the handler, which is reached only once
+	// the policy has already been applied.
 	//
-	// After indexing, both include the family's own sets: see Family.
+	// Policy is per case and only per case. A bar that should cover a whole
+	// family is written on each of its entries, so there is one place to read
+	// and no second, wider set to remember.
 	Labels []string
 	Forbid []string
 	// RequireApproval parks the call until a human resolves it. It is enforced
@@ -72,8 +75,8 @@ type Entry struct {
 }
 
 // Family is everything one contributor has to say about one syscall: how to
-// tell its cases apart, the cases themselves, and what the family as a whole
-// means. A contributor returns this and touches nothing else — the table is the
+// tell its cases apart, the cases themselves, and how the syscall as a whole
+// presents itself. It carries no policy of its own — that is the Entry's. A contributor returns this and touches nothing else — the table is the
 // assembler's, so no contributor can reach past its own grant.
 type Family struct {
 	Description string
@@ -82,13 +85,14 @@ type Family struct {
 	Input json.RawMessage
 	// Hidden keeps the family dispatchable but off the guest's discoverable menu.
 	Hidden bool
-	// Labels and Forbid apply to every case. They are folded into each entry at
-	// indexing time, so a family-wide bar cannot be escaped by declaring an
-	// operation that omits it, and one lookup answers the whole policy.
-	Labels []string
-	Forbid []string
 	// Discriminator names the argument property whose value selects a case.
 	// Empty means the syscall is one operation.
+	//
+	// It lives here rather than on Entry because it is what *finds* the entry:
+	// the table must read the case out of the arguments before it knows which
+	// entry the call is, so that read can only be keyed by the syscall. Policy
+	// runs the other way round — labels and forbid sets describe a case that has
+	// already been found, and live on the Entry alone.
 	//
 	// It is read, never canonicalized: the value the guest sent is matched
 	// exactly, so a near miss is a refusal naming the alternatives rather than a
@@ -184,10 +188,6 @@ func (t *Table) Add(family Family) error {
 		if _, taken := t.entries[entry.Key]; taken {
 			return fmt.Errorf("operation %s is granted twice", entry.Key)
 		}
-		// Fold the family's policy in now, so every later question is one lookup
-		// and no case can be reached with less than the family's own bar.
-		entry.Labels = union(family.Labels, entry.Labels)
-		entry.Forbid = union(family.Forbid, entry.Forbid)
 		t.entries[entry.Key] = entry
 		indexed = append(indexed, entry)
 	}
@@ -252,14 +252,38 @@ func (e *ArgsError) Unwrap() error { return e.Err }
 // with no check applied. An unserved syscall has no policy — it is about to be
 // denied outright.
 func (t *Table) Forbidden(call sys.Syscall) (forbid []string, sink string) {
-	family, served := t.families[call.Name]
-	if !served {
+	if _, served := t.families[call.Name]; !served {
 		return nil, call.Name
 	}
 	if entry, err := t.resolve(call); err == nil {
 		return entry.Forbid, entry.Key.String()
 	}
-	return family.Forbid, call.Name
+	// The case could not be read, so no single entry's bar is the right one.
+	// Answer with every case's, unioned — the strictest reading of what the call
+	// might have been. A discriminator the table cannot parse must not be the
+	// cheapest way past a sink guard.
+	return t.strictest(call.Name), call.Name
+}
+
+// strictest is the union of every bar under one syscall: what applies when the
+// table cannot tell which case a call is.
+func (t *Table) strictest(syscall string) []string {
+	seen := make(map[string]struct{})
+	var forbid []string
+	for key, entry := range t.entries {
+		if key.Syscall != syscall {
+			continue
+		}
+		for _, label := range entry.Forbid {
+			if _, dup := seen[label]; dup {
+				continue
+			}
+			seen[label] = struct{}{}
+			forbid = append(forbid, label)
+		}
+	}
+	sort.Strings(forbid)
+	return forbid
 }
 
 // Labels reports the source classes a call's result carries. Unlike Forbidden
@@ -367,26 +391,6 @@ func (t *Table) Entries() []Entry {
 		out = append(out, entry)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key.String() < out[j].Key.String() })
-	return out
-}
-
-// union appends the entry's own set to the family's, dropping repeats. Order is
-// the family's first, which keeps a refusal's message stable.
-func union(family, own []string) []string {
-	if len(family) == 0 {
-		return own
-	}
-	seen := make(map[string]struct{}, len(family)+len(own))
-	out := make([]string, 0, len(family)+len(own))
-	for _, set := range [][]string{family, own} {
-		for _, label := range set {
-			if _, dup := seen[label]; dup {
-				continue
-			}
-			seen[label] = struct{}{}
-			out = append(out, label)
-		}
-	}
 	return out
 }
 
