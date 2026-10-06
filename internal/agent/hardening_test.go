@@ -14,7 +14,7 @@ import (
 )
 
 // L6: the guest's sys.input payload must carry role/content only — the taint
-// labels seed the FlowMonitor host-side and must never be serialized to the
+// labels seed the flow monitor host-side and must never be serialized to the
 // (untrusted) guest, so the property is host-enforced, not a guest struct shape.
 func TestSysInputOmitsHistoryLabelsFromGuestPayload(t *testing.T) {
 	history := []HistoryMessage{
@@ -33,9 +33,9 @@ func TestSysInputOmitsHistoryLabelsFromGuestPayload(t *testing.T) {
 		}
 	}
 	// The taint still seeds the run host-side: the result carries the labels for
-	// the FlowMonitor even though the guest payload does not.
+	// the flow monitor even though the guest payload does not.
 	if len(result.Labels()) == 0 {
-		t.Fatal("sys.input result must carry the history taint for the FlowMonitor")
+		t.Fatal("sys.input result must carry the history taint for the flow monitor")
 	}
 }
 

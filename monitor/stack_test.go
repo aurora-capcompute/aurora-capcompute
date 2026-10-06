@@ -72,14 +72,14 @@ func TestStackEnforcesCanonicalOrder(t *testing.T) {
 		t.Fatal("a denied call reached the journal")
 	}
 
-	// Labeler below replay: labels land in the journaled completion.
+	// Flow.Stamp below replay: labels land in the journaled completion.
 	call(t, chain, "p1", "internet.read")
 	completion, err := journal.Load(1)
 	if err != nil || completion.Result == nil || !slices.Contains(completion.Result.Labels(), "untrusted_web") {
 		t.Fatalf("journaled completion = %+v (err %v), want untrusted_web label", completion, err)
 	}
 
-	// FlowMonitor above replay: the taint denies the protected capability…
+	// Flow.Guard above replay: the taint denies the protected capability…
 	if result := call(t, chain, "p1", "k8s.delete"); result.Errno() != sys.ErrnoDenied {
 		t.Fatalf("tainted k8s.delete = %#v, want denied", result)
 	}

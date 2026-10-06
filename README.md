@@ -4,7 +4,7 @@
 Go library that turns the [`capcompute`](https://github.com/aurora-capcompute/capcompute)
 processor into a full agent runtime: it runs Wasm agent programs as long‑lived
 **processes** inside **sessions**, and makes every action they take recorded,
-resumable, reversible, and approval‑gated.
+resumable, and approval‑gated.
 
 > New here? The first two sections tell you what this is and where it fits. If you
 > just want to *run* Aurora, you don't start here — you run
@@ -18,9 +18,9 @@ resumable, reversible, and approval‑gated.
 [`capcompute`](https://github.com/aurora-capcompute/capcompute) (the processor) knows
 how to run one sandboxed Wasm program and mediate its syscalls. But a *real* agent
 needs much more: it has to survive crashes and pick up exactly where it left off,
-retry safely, roll back half‑finished work, pause for a human to approve a
-sensitive action, delegate to sub‑agents, and keep a full audit trail — all without
-you writing that plumbing yourself.
+retry safely, re‑run a half‑finished section, pause for a human to approve a
+sensitive action, and keep a full audit trail — all without you writing that
+plumbing yourself.
 
 `aurora-capcompute` is that plumbing. It owns **sessions and processes**, the
 **replay journal**, **retries**, **savepoints**, **durable approval tasks**,
@@ -117,32 +117,32 @@ dependency — construction fails if any required one is missing:
 
 ```go
 runtime, err := aurora.NewRuntime(ctx, aurora.Config{
-    Programs:     programProvider,   // supplies each agent's Wasm bytes + interface manifest
-    Dispatchers:  dispatcherProvider,// capability drivers (from aurora-dispatchers)
-    Log:          eventLog,          // the append-only event store (in-memory or SQLite)
-    Leases:       leases,            // cross-instance fencing tokens
-    ProcessTable: processTable,      // capcompute.ProcessTable[string, aurora.ProcessContext]
-    TaskSecret:   taskSecret,        // non-empty []byte, keys the task resolution tokens
+    Dispatchers: dispatcherProvider, // capability drivers (from aurora-dispatchers)
+    Log:         eventLog,           // the append-only event store (in-memory or SQLite)
+    Leases:      leases,             // cross-instance fencing tokens
+    TaskSecret:  taskSecret,         // non-empty []byte, keys the task resolution tokens
 })
 if err != nil {
     return err
 }
 
-// Then drive it:
-sess, _ := runtime.CreateSession(ctx, /* … */)
-proc, _ := runtime.CreateProcess(ctx, sess.ID, input, manifest) // manifest.Version must be 4
-events, _ := runtime.Subscribe(ctx, sess.ID)                    // watch it run
+// Load a program, then drive it:
+err = runtime.AddProgram(ctx, program)                         // Wasm bytes + interface manifest
+sess, _ := runtime.CreateSession("", nil)
+proc, _ := runtime.CreateProcess(sess.ID, input, manifest, 0) // manifest.Version must be 4; 0 = default quantum deadline
+events, cancel, _ := runtime.Subscribe(sess.ID)                // watch it run
 // … and runtime.ResolveTask(...) when a human approves a pending task.
 ```
 
-A **program provider** supplies each program's immutable Wasm bytes plus its
-interface manifest (a description and JSON Schemas for input/output). The runtime
-computes a content identity (SHA‑256 over the Wasm *and* its manifest) and binds
-each process to it forever — a process never resumes under changed code.
+A **program** is its immutable Wasm bytes plus its interface manifest (a
+description and JSON Schemas for input/output). The runtime computes a content
+identity (SHA‑256 over the Wasm *and* its manifest) and binds each process to it
+forever — a process never resumes under changed code.
 
 A **dispatcher provider** owns capability‑specific settings and builds the driver
 chain for each process. Aurora defines only the generic grant envelope (`syscall`,
-`settings`, nested `programs`); each driver publishes its own capability names.
+`hidden`; every other key is the driver's config); each driver publishes its own
+capability names.
 
 ## How it works: the processor chain
 
@@ -150,7 +150,7 @@ Every process's syscalls flow through a fixed monitor chain (assembled by this
 repo's `monitor.Stack.ForProcess`, never by hand):
 
 ```
-Validator → FlowMonitor → [replay over the journal] → Labeler → Declassifier →
+Validator → Flow.Guard → [replay over the journal] → Flow.Stamp → Declassifier →
 savepoints → world → lifecycle → tasks → progress → timer → drivers
 ```
 
@@ -180,14 +180,13 @@ how one syscall, one crash, and one approval each travel the chain — see
 
 No env vars, no files, no ports — everything is the injected struct.
 
-- **Required:** `Dispatchers`, `Log`, `Leases`, `ProcessTable`, `TaskSecret`
-  (non‑empty). Programs are not configured: a runtime boots with an empty
-  registry and gains programs through `AddProgram` / `RemoveProgram`.
-- **Optional knobs:** `TenantID`, `InstanceID`, `EventSize` (default 32),
-  `TaskTTL` (24h), `LeaseTTL` (1h), `MaxConcurrentProcesses` (16),
-  `MaxResidentProcesses` (64), `MaxAbortRetries` (10),
-  `ProcessMemoryPages` (4096 = 256 MiB), `ResumeQuantumTimeout` (2 min),
-  `QuotaOf` (per‑tenant quotas).
+- **Required:** `Dispatchers`, `Log`, `Leases`, `TaskSecret` (non‑empty).
+  Programs are not configured: a runtime boots with an empty registry and gains
+  programs through `AddProgram` / `RemoveProgram`.
+- **Optional knobs:** `TenantID`, `InstanceID`, `IDSource`, `Now`, `EventSize`
+  (default 32), `TaskTTL` (24h), `LeaseTTL` (1h), `MaxConcurrentProcesses` (16),
+  `MaxAbortRetries` (10), `NonIdempotentSyscalls`, `ProcessMemoryPages`
+  (4096 = 256 MiB), `MaxQuantumDuration` (2 min).
 - **Key constants:** `ManifestVersion = 4`.
 
 Concrete stores (in‑memory, SQLite) live in
@@ -203,13 +202,13 @@ aurora/                 the PUBLIC API — import only this
   types.go              Config and re-exported types
 internal/agent/         the runtime engine (Go's internal/ rule hides it)
   runtime.go            lifecycle + scheduler wiring
-  manifest.go           the grant model + ValidateManifest
+  manifest/             the grant model + ValidateManifest
   direct/               the only door to capcompute: compile, spawn, quantum
   lifecycle.go          sys.input/output/log/abort
   abort.go              abort/failure re-drive and section refork
   restore.go            rebuild state by replaying event streams
   eventlog/             the append-only Log interface (no concrete store)
-  host/                 per-process dispatcher stack over capcompute.Stack
+  host/                 per-process dispatcher stack over monitor.Stack
   task/                 durable approval-task store + state machine
 ```
 

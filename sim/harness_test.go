@@ -2,8 +2,8 @@
 // durability laws (FoundationDB/Antithesis-style, scaled to this processor). It
 // models the parts of the world that survive a crash — the journal and the
 // external effect store — and drives a scripted, deterministic guest program
-// through the full dispatcher chain (Validator → FlowMonitor → replay →
-// Labeler → driver) while injecting a crash at any chosen journal append.
+// through the full dispatcher chain (Validator → Flow.Guard → replay →
+// Flow.Stamp → driver) while injecting a crash at any chosen journal append.
 // Tests run the crash across *every* position and assert the invariants:
 // replay convergence, exactly-once effects under idempotency keys, an intact
 // journal structure.

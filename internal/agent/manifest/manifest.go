@@ -44,9 +44,8 @@ type Manifest struct {
 	Program string `json:"program,omitempty"`
 	// History, when false, isolates this program's process from session history:
 	// its sys.input omits the history, so it sees only its own input and inherits
-	// no taint from a prior run (at the root) or from the parent's session (when
-	// spawned). Unset (the default) shares history — the runtime's standing
-	// behavior.
+	// no taint from a prior run. Unset (the default) shares history — the
+	// runtime's standing behavior.
 	History *bool `json:"history,omitempty"`
 	// ShareCapabilities, when false, keeps this program's capability menu off its
 	// sys.input: it still holds its granted syscalls, they are merely not

@@ -629,10 +629,9 @@ func (r *Runtime) CreateProcess(sessionID string, input string, spec manifest.Ma
 	if err != nil {
 		return ProcessSnapshot{}, err
 	}
-	// A root that opts out of capability sharing keeps its grants off its own
-	// sys.input menu (it still holds them) — the same effect a spawned child gets
-	// through buildChildManifest. manifest.Validate returned a clone, so this is
-	// local. History is applied below via hideHistory.
+	// A process that opts out of capability sharing keeps its grants off its own
+	// sys.input menu (it still holds them). manifest.Validate returned a clone, so
+	// this is local. History is applied below via hideHistory.
 	if !spec.SharesCapabilities() {
 		for i := range spec.Syscalls {
 			spec.Syscalls[i].Hidden = true
@@ -938,7 +937,7 @@ func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, erro
 // transition appended and published. Called with r.mu held; unlocks it.
 func (r *Runtime) relaunchLocked(proc *processState) (ProcessSnapshot, error) {
 	// Refuse to enroll a new quantum once shutdown has begun: Close sets closed
-	// under r.mu then waits on r.wg, so a Retry/ResolveTask/child-finish racing
+	// under r.mu then waits on r.wg, so a Retry/ResolveTask racing
 	// Close must not wg.Add after the counter may already be draining (a reuse of
 	// the WaitGroup would panic) — mirrors CreateProcess.
 	if r.closed {

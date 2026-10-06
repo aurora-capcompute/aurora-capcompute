@@ -244,7 +244,7 @@ func (p *processState) key() processKey {
 type agentInput struct {
 	Input string `json:"input"`
 	// History is the guest-facing role/content projection of the session history.
-	// The provenance labels are deliberately NOT here: they seed the FlowMonitor
+	// The provenance labels are deliberately NOT here: they seed the flow monitor
 	// host-side (via historyLabels) and are never serialized to the guest, so
 	// "only role/content reach the guest input" is a host guarantee, not a
 	// property of the guest's struct shape (an untrusted guest could read a label
@@ -315,8 +315,7 @@ type ProcessSnapshot struct {
 	Manifest      manifest.Manifest     `json:"manifest"`
 	ProgramDigest string                `json:"program_digest"`
 	// Labels is the run's accumulated taint at snapshot time (the union of every
-	// source class it has observed). A completed process carries its final taint,
-	// which the spawn boundary reads to propagate a child's provenance to its
+	// source class it has observed). A completed process carries its final taint.
 	Labels []string `json:"labels,omitempty"`
 }
 

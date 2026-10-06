@@ -155,8 +155,8 @@ func (f *Factory[ID, K]) NewDispatcher(ctx context.Context, cred K) (sys.Dispatc
 		return nil, err
 	}
 	// Savepoint markers sit below replay (so they are journaled) and above the
-	// task and routing layers (so they never become durable tasks or dispatch
-	// a child).
+	// task and routing layers (so they never become durable tasks or reach a
+	// driver).
 	withSavepoints := &savepointDispatcher[K]{next: withWorld}
 
 	// The table is the complete mediation surface: everything this process's

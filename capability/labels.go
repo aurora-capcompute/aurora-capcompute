@@ -10,7 +10,7 @@ import (
 
 // SyscallLabelPrefix namespaces the automatic provenance the flow monitor stamps on
 // every result ("syscall:<name>"). It is reserved: a manifest may not declare a
-// label in this namespace, or a grant could forge the provenance the Labeler
+// label in this namespace, or a grant could forge the provenance Flow.Stamp
 // itself stamps.
 const SyscallLabelPrefix = "syscall:"
 

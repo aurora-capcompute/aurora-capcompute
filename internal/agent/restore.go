@@ -147,9 +147,9 @@ func (r *Runtime) restoreSession(proj durable.Projection, journals map[string]ma
 	}
 	// A park is only coherent with its wakeup: a waiting process whose pending
 	// task resolved (the resolution outran the crash, the resume did not) and a
-	// yielded parent whose children all finished would otherwise sleep forever —
-	// nothing re-delivers a lost wakeup. Fold them to interrupted, the
-	// re-drivable status, so recovery resumes them like any cut-off process.
+	// yielded process would otherwise sleep forever — nothing re-delivers a lost
+	// wakeup. Fold them to interrupted, the re-drivable status, so recovery
+	// resumes them like any cut-off process.
 	pending := map[string]bool{}
 	for _, record := range proj.TaskList() {
 		if record.State == durable.TaskPending {

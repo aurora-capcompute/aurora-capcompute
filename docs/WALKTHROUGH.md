@@ -76,16 +76,15 @@ Outermost (first to see a syscall) to innermost:
 
 ```
 Validator            grants + arg schemas                  ┐ above replay:
-FlowMonitor          taint vs. declared Forbid             ┘ re-derived every pass, never journaled
+Flow.Guard           taint vs. declared Forbid             ┘ re-derived every pass, never journaled
 ─────────────────────────────────────────────────────────── the replay boundary
 replay.Dispatcher    serve from tape, or intent→run→completion
 ───────────────────────────────────────────────────────────
-Labeler              stamps provenance on results          ┐ below replay:
+Flow.Stamp           stamps provenance on results          ┐ below replay:
 Declassifier         sys.declassify                        │ journaled once,
 savepoints           sys.begin / sys.commit                │ served from the tape
 world                sys.now / sys.random                  │ thereafter
-lifecycle            sys.input / sys.output / sys.compensate / sys.abort
-spawn router         sys.spawn            (only when granted)
+lifecycle            sys.input / sys.output / sys.abort
 task                 durable approval
 progress             sys.log
 timer                sys.timer            (only when granted)
@@ -115,23 +114,23 @@ why `Stack.ForProcess` exists and why nothing assembles this by hand.
   cred's grant set (else `denied`) and the args must validate against the
   capability's `InputSchema` (else `invalid_args`). Refusals are results, not
   errors: the guest sees an errno and continues.
-- **`monitor.FlowMonitor` + `Taints`** — information-flow control. A process
-  accumulates taint from every label it observes; a capability declaring
-  `Forbid` refuses when the process is carrying a forbidden label. Because the
-  guest is opaque, flow is judged conservatively: once observed, anything the
-  process emits may derive from it.
+- **`monitor.Flow` + `Taints`** — information-flow control, one object with two
+  decorators. `Flow.Guard`, above replay, refuses a call whose operation declares
+  a `Forbid` label the process is carrying, and folds every result's labels into
+  the process's taint. Because the guest is opaque, flow is judged
+  conservatively: once observed, anything the process emits may derive from it.
 - **`replay.Dispatcher`** — the durability core. If the tape already has this
   syscall recorded, serve the recorded result and never touch a driver.
   Otherwise: append an **intent**, dispatch, append a **completion**, then let
   the guest see it. That ordering is two invariants —
   *journal-before-execute* and *journal-before-observe*.
 - **`journaled.Tape` / `Journal`** — where the tape lives. Records are a fixed
-  envelope (position, kind, `prev_hash`) plus an opaque payload, hash-chained
-  for tamper evidence. A `Header` (ABI version, program digest, process) makes
-  replay refuse a journal written by a different writer up front, rather than
-  failing later as a confusing divergence. `journaled.Verify` runs the chain
-  check *before* any record is served, so tamper-evidence is fail-closed.
-- **`monitor.Labeler`** — stamps `syscall:<name>` plus the capability's declared
+  envelope (position, kind) plus an opaque payload. A `Header` (ABI version,
+  program digest, process) makes replay refuse a journal written by a different
+  writer up front, rather than failing later as a confusing divergence.
+  `journaled.Verify` checks the structure — header, positions in order,
+  alternating intent/completion — but the journal is not tamper-evident.
+- **`Flow.Stamp`** — stamps `syscall:<name>` plus the operation's declared
   source classes onto every result. Sitting below replay means provenance lands
   in the journal for free.
 - **`monitor.Declassifier`** — serves `sys.declassify`, the explicit,
@@ -144,11 +143,8 @@ why `Stack.ForProcess` exists and why nothing assembles this by hand.
   journaled once and replay verbatim; this is what makes "the clock is a
   capability" true in practice.
 - **lifecycle** — the program-facing protocol: `sys.input` (the run's payload
-  plus history and the capability menu), `sys.output` (its answer),
-  `sys.compensate`, `sys.abort`.
-- **spawn router** — serves `sys.spawn` when the manifest grants it, routing to
-  a delegated child. A child runs *inside its parent's quantum*, which is why
-  delegation can never deadlock the scheduler's concurrency cap.
+  plus history and the capability menu), `sys.output` (its answer), and
+  `sys.abort`.
 - **`task.Dispatcher`** — durable approval, described below.
 - **progress / timer / drivers** — `sys.log` publishes a progress line to live
   subscribers; `sys.timer` yields and becomes a durable timer task; the drivers
@@ -162,26 +158,26 @@ menu. There is no bypass lane.
 
 ## Trace 1: an ordinary syscall
 
-A program calls a granted capability, say `core.memory.read`.
+A program calls a granted capability, say `core.scratch` with operation `get`.
 
 1. The guest encodes an ABI v4 JSON envelope and traps through capcompute's one
    host function. The processor unmarshals a `sys.Syscall` and calls the closure
    `Resume` planted — which is this process's chain.
-2. **Validator**: is `core.memory.read` in this cred's grant set, and do the args
-   match its schema? If not, a `denied`/`invalid_args` result goes straight back
-   up. No driver is touched.
-3. **FlowMonitor**: does this capability forbid any label the process is already
+2. **Validator**: is `core.scratch` `get` in this cred's grant set, and do the
+   args match its schema? If not, a `denied`/`invalid_args` result goes straight
+   back up. No driver is touched.
+3. **Flow.Guard**: does this operation forbid any label the process is already
    carrying? If so, refused here.
 4. **replay**: is this syscall the next recorded entry on the tape? On a first
    run it is not, so the tape appends an **intent** record and returns an
    idempotency key.
 5. The call descends through the protocol layers to the driver, which does the
    real work.
-6. On the way back up, **Labeler** stamps `syscall:core.memory.read` plus the
-   capability's declared source classes onto the result.
+6. On the way back up, **Flow.Stamp** stamps `syscall:core.scratch` plus the
+   operation's declared source classes onto the result.
 7. **replay** appends the **completion** record — carrying those labels — and
    only then returns.
-8. **FlowMonitor** observes the result's labels into the process's taint.
+8. **Flow.Guard** observes the result's labels into the process's taint.
 9. The result marshals back through the gate as JSON. The guest sees it.
 
 The guest never observes an outcome that is not already durable. That is the
@@ -249,27 +245,19 @@ snapshots the public API hands out.
 
 ---
 
-## Rollback, revisions, and retries
+## Revisions and retries
 
 Savepoints (`sys.begin`/`sys.commit`) are **redo scopes**: they can only
-re-execute their contents, never undo them. Undo is separate, guest-authored,
-and explicit.
+re-execute their contents, never undo them. Nothing is undone — a section that
+must be re-runnable is the program's own contract.
 
-Right after an effect, a guest registers its inverse with `sys.compensate` — a
-deferred syscall journaled with concrete args but *not executed*. If the section
-must be abandoned, the guest calls `sys.abort`. The runtime then walks the
-registered compensations newest-first, each journaled as its own
-intent/completion pair with an idempotency key, so a crash mid-rollback resumes
-the rollback rather than restarting it. Replay refuses to run past a
-compensation record (`ProcessUnwoundError`): a rolled-back tail never replays as
-if live.
-
-After unwinding, the abort's retry policy applies — fork the journal at the
-section's begin and re-run after the declared delay, or finish as
-`compensated`. A fork mints a new **revision**: forks are copy-on-write over the
-journal, and the revision is part of the process identity (`pid@revision`), which
-is what keeps a retried attempt's idempotency keys distinct from the attempt it
-replaced.
+If the section must be abandoned, the guest calls `sys.abort`. The runtime forks
+the journal at the section's still-open `sys.begin` and re-runs the whole section
+live, bounded by `MaxAbortRetries`. With no section open there is nothing smaller
+to re-run, and the process fails. A fork mints a new **revision**: forks are
+copy-on-write over the journal, and the revision is part of the process identity
+(`pid@revision`), which is what keeps a retried attempt's idempotency keys
+distinct from the attempt it replaced.
 
 `Retry` from the public API offers the same thing at a coarser grain:
 `RetryResume` continues from where the journal stopped; `RetryRestart` starts a
@@ -279,45 +267,26 @@ fresh revision.
 
 ## Scheduling and residency
 
-`internal/sched` decides *when* a process gets the CPU. It says nothing about
-*what* runs or *how*, and reaches those through two interfaces that are its
-whole seam:
+The scheduler (`internal/agent/sched.go`) decides *when* a process gets the CPU.
+It is `direct.Registry` — the only door to capcompute — wrapped in a fixed pool
+of workers: every method passes straight through except `Spawn`, which waits for
+a free worker, bounds the quantum's wall-clock, and hands back a handle. The
+worker count is the concurrency bound, so nothing counts slots and nothing can
+overrun.
 
-```go
-type Activator[ID comparable, T any] interface {
-    Activate(ctx context.Context, pid ID) (T, error)
-}
-
-type Machine[T any] interface {
-    Resume(ctx context.Context, instance T) (Result, error)
-    Release(instance T)
-}
-```
-
-`Activator` points **up** at the application — activation is journal-replay
-wiring, and only this repo can do it. `Machine` points **down** at the execution
-hardware, which capcompute is. The queue never looks inside an instance between
-the two, so it imports capcompute not at all; `internal/agent/execution.go`
-holds the runtime's implementation of both halves.
-
-Activation happens when a quantum *starts*, not when it was submitted, and that
-ordering is load-bearing: a process whose program is withdrawn while its
-submission sits in the queue must fail activation and never run.
+The quantum's deadline starts when a worker takes the submission, not when it
+was submitted: queue time never counts against a guest. Closing the handle
+drops a submission that is still waiting, or stops a guest that has started.
 
 It is deliberately **not** fair-share: no priorities, no quotas, no owners.
-Submissions are first-come-first-served, bounded by `MaxConcurrent`, which caps
-live instances rather than apportioning them.
+Submissions are first-come-first-served, bounded by `MaxConcurrentProcesses`,
+which caps live instances rather than apportioning them.
 
 There is likewise **no residency**. Every quantum activates a fresh instance and
 releases it when the quantum ends, whatever the outcome. Keeping one warm would
 put guest globals and allocator state outside the journal — across a boundary
 syscalls are supposed to be the only path through. The cost is one instantiation
 per quantum; the gain is that a cold start is the only start.
-
-Root processes are queued quanta. Delegated children are not: `Run` executes
-them off the queue, inside the parent's quantum, so a parent waiting on a child
-cannot consume a second concurrency slot and deadlock. A child inherits its
-parent's *remaining* budget — one deadline bounds a whole spawn tree.
 
 ---
 
@@ -327,9 +296,9 @@ parent's *remaining* budget — one deadline bounds a whole spawn tree.
 API: sessions, processes, journal and call-graph reads, tasks, stop/retry, and
 `Subscribe`.
 
-The runtime owns no capabilities, dispatchers, stores, or channels. Programs,
-dispatchers, the event log, leases, and the process table are injected through
-`Config`. A shipping product is an *assembly* — a `main()` composing this runtime
+The runtime owns no capabilities, dispatchers, stores, or channels. Dispatchers,
+the event log, and leases are injected through `Config`; programs arrive through
+`AddProgram`. A shipping product is an *assembly* — a `main()` composing this runtime
 with concrete stores, drivers, and whatever channels it speaks. `aurora-dist` is
 that assembly.
 
@@ -341,13 +310,13 @@ that assembly.
 |---|---|
 | the chain order and why | `monitor/stack.go`, `internal/agent/host/host.go` |
 | complete mediation | `monitor/validate.go` |
-| taint / flow policy | `monitor/provenance.go` |
+| taint / flow policy | `monitor/flow.go`, `monitor/provenance.go` |
 | the replay protocol | `replay/replay.go` |
-| the record format, hash chain | `journaled/tape.go` |
-| rollback | `journaled/compensator.go`, `internal/agent/compensate.go` |
-| what a quantum does | `internal/agent/execution.go` |
+| the record format | `journaled/tape.go` |
+| abort and section re-run | `internal/agent/abort.go` |
+| what a quantum does | `internal/agent/executor.go` |
 | state rebuilt after restart | `internal/agent/restore.go` |
-| scheduling and residency | `internal/sched/sched.go` |
+| scheduling | `internal/agent/sched.go` |
 | the public API | `aurora/runtime.go` |
 
 ## How it is verified
@@ -357,11 +326,11 @@ The invariants are tested as invariants, not incidentally.
 `sim/` is a deterministic simulation harness in the FoundationDB/Antithesis
 style: it models the parts of the world that survive a crash — the journal and
 the external effect store — drives a scripted guest through the full chain, and
-injects a crash at *every* journal append position, asserting four things each
+injects a crash at *every* journal append position, asserting three things each
 time: replay converges, effects happen exactly once under their idempotency
-keys, the hash chain stays intact, and saga unwinding is correct.
+keys, and the journal structure stays intact.
 
-The rollback matrices in `internal/agent` cover abort/retry/crash
+The abort and savepoint tests in `internal/agent` cover abort/retry/crash
 interleavings. And capcompute's own adversarial suite builds a genuinely
 hostile guest with the standard Go toolchain, proving the processor's isolation
 and ABI boundary from the guest's side of the trap.

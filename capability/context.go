@@ -30,14 +30,14 @@ type taintContextKey struct{}
 // WithTaint attaches the process's accumulated taint — every label it has
 // observed so far — to the dispatch context. The flow monitor sets it before
 // delegating; because the guest is opaque, anything the process emits (including
-// a value it writes to shared memory) may derive from any of these labels.
+// a value it stores) may derive from any of these labels.
 func WithTaint(ctx context.Context, labels []string) context.Context {
 	return context.WithValue(ctx, taintContextKey{}, labels)
 }
 
 // Taint returns the process's accumulated taint. Drivers that *store* guest-
-// derived data (e.g. tenant memory) persist it with the value, so the data's
-// provenance survives into later sessions instead of being laundered.
+// derived data (e.g. core.scratch) persist it with the value, so a later read
+// restamps the data's provenance instead of laundering it.
 func Taint(ctx context.Context) []string {
 	labels, _ := ctx.Value(taintContextKey{}).([]string)
 	return labels

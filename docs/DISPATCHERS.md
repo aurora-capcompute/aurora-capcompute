@@ -10,8 +10,8 @@ whole system; this is the one vertical slice.
 | repo | role in this story |
 |---|---|
 | `capcompute` | the processor: the sandbox, the single host function |
-| `aurora-capcompute` | the runtime: manifests, the monitor chain, the journal |
-| `aurora-dispatchers` | the drivers: `internet`, `httptemplate`, `scratch`, `command`, `filesystem`, `openaillm` — plus `builtin`, the index they plug into |
+| `aurora-capcompute` | the runtime: manifests, the monitor chain, the journal — plus `capability`, the index the drivers plug into |
+| `aurora-dispatchers` | the drivers: `internet`, `httptemplate`, `scratch`, `command`, `filesystem`, `openaillm` — plus `registry`, which builds them |
 | `aurora-dist` | the assembly: which drivers are compiled in at all |
 
 ---
@@ -53,42 +53,39 @@ config that only the driver behind it understands:
 ```
 
 `Syscall.Config` is `json.RawMessage` — the runtime deliberately cannot read it
-([manifest.go:96](../internal/agent/manifest/manifest.go:96)). Everything outside
+([manifest.go:72](../internal/agent/manifest/manifest.go:72)). Everything outside
 `syscall` and `hidden` is the family's config.
 
-`Manifest.LeafSyscalls()` ([manifest.go:161](../internal/agent/manifest/manifest.go:161))
-splits the grants the runtime serves itself (`sys.input`, `sys.log`, `sys.timer`, …)
-from the ones a driver must serve. Only the latter reach the provider.
+`Manifest.LeafSyscalls()` ([manifest.go:130](../internal/agent/manifest/manifest.go:130))
+splits the grants the runtime serves itself (`sys.timer`, `sys.declassify`) from
+the ones a driver must serve. Only the latter reach the provider.
 
 ### 1.2 What the distribution is willing to build
 
-`aurora-dist` picks the registration set at compile time. `registry.Default()`
-(`aurora-dispatchers/registry/registry.go`) is `InternetRegistration`
-and `MemoryRegistration`; credentialed drivers like `openaillm` are added
-explicitly by the assembly. **A driver that is not registered does not exist** —
-there is no plugin path, no lookup by name at runtime, no dynamic loading.
+`aurora-dist` picks the registration set at compile time: `newProvider`
+(`aurora-dist/internal/dist/dist.go:120`) lists `internet`, `scratch`,
+`filesystem`, `httptemplate`, `command` and `openaillm`. **A driver that is not
+registered does not exist** — there is no plugin path, no lookup by name at
+runtime, no dynamic loading.
 
-A `Registration` is three methods:
+A `Registration` is two methods:
 
 ```go
 Matches(syscall string) bool
-Normalize(syscall string, config json.RawMessage) (json.RawMessage, error)
-Configure(ctx, config, services Services) (builtin.Contribution, error)
+Configure(ctx, config, services Services) (capability.Family, error)
 ```
 
-`InternetRegistration.Matches` is literally `syscall == internet.Capability`
-(`aurora-dispatchers/registry/internet.go:75`).
+`internet.Registration.Matches` is literally `syscall == Capability`
+(`aurora-dispatchers/internet/registration.go:75`).
 
 ### 1.3 Building the driver
 
-`Configure` (`aurora-dispatchers/registry/internet.go:85`)
+`Configure` (`aurora-dispatchers/internet/registration.go:77`)
 parses the grant's config into an `internet.Policy` — the (method, domain)
-allowlist — builds a client bound to that policy, and appends **two** things to
-the output:
-
-- an `internet.Handler` — the thing that can actually make requests,
-- a `capability.Family` — one `capability.Entry` per (method, domain) case,
-  each carrying its own schema, labels, forbid set and approval flag.
+allowlist — builds an `internet.Handler` bound to that policy, and returns a
+`capability.Family`: one `capability.Entry` per (method, domain) case, each
+carrying its own schema, labels, forbid set, approval flag, and the handler that
+serves it.
 
 The family is what gets indexed. A handler is never reached except through an
 entry that resolved to it, so what a call is permitted to do is a property of
@@ -101,32 +98,28 @@ an injection is bound to a specific https-or-loopback origin.
 
 ### 1.4 The leaf dispatcher
 
-`provider.NewDispatcher` (`aurora-dist/internal/dist/provider.go:34`)
-runs every matching registration and wraps the result:
+`provider.NewDispatcher` (`aurora-dist/internal/dist/provider.go:37`)
+hands every leaf grant to `Registry.Build`, which runs the matching registration
+for each and returns one `*capability.Table`. A family never sees the table:
+`Table.Add` folds each family into it, refusing a duplicate `(syscall, operation)`
+rather than letting the first one win.
 
-```go
-return builtin.New[aurora.ProcessContext](config), nil
-```
+The runtime, not the provider, builds the routing dispatcher from that table —
+`capability.NewDispatcher(table)`
+([runtime.go:292](../internal/agent/runtime.go:292)) — so the chain that serves a
+call and the index the monitor judges it against are one object. That is the
+**bottom** of the chain: there is nothing below it.
 
-`Configure` returns a `Contribution` — the discriminator property, one `Entry`
-per case of the ADT, and the capability they add up to. It never sees the table;
-`Registry.Build` folds every family's contribution into one
-`map[Key]Entry`, refusing a duplicate `(syscall, operation)` rather than letting
-the first one win. That is the **bottom** of the chain: there is nothing below
-it.
-
-One detail worth pausing on: the provider overwrites `services.SessionID`,
-`ProcessID` and `Tenant` from the *credential*, never from the manifest
-(`aurora-dist/internal/dist/provider.go:52`). A grant
-cannot name another tenant's memory because the grant is not consulted about
-identity at all.
+One detail worth pausing on: `registry.Services` carries no identity at all —
+only the secret resolver and the audit key. A grant cannot name another
+process's data because nothing the driver is built from names a process.
 
 ---
 
 ## 2. Connection — building one process's chain
 
 This happens once per quantum, in `host.Factory.NewDispatcher`
-([host.go:109](../internal/agent/host/host.go:109)).
+([host.go:113](../internal/agent/host/host.go:113)).
 
 ### 2.1 The runtime's own layers
 
@@ -151,11 +144,11 @@ Then `sys.timer` is layered on if granted, and the `progressDispatcher` (serving
 
 ### 2.2 The full stack
 
-`monitor.Stack.ForProcess` ([stack.go:42](../monitor/stack.go:42)) assembles the
+`monitor.Stack.ForProcess` ([stack.go:45](../monitor/stack.go:45)) assembles the
 canonical order — in code, not prose, so it cannot be got wrong by hand:
 
 ```
-Validator → FlowMonitor → [replay tape] → Labeler → Declassifier → drivers
+Validator → Flow.Guard → [replay tape] → Flow.Stamp → Declassifier → drivers
 ```
 
 Above the replay boundary sit decisions that must re-derive identically on every
@@ -169,9 +162,9 @@ actually walks:
 
 ```
 Validator            grant lookup + input schema      ← denies here
-FlowMonitor          taint vs. the grant's Forbid set
+Flow.Guard           taint vs. the grant's Forbid set
 replay (tape)        serve from journal, or journal the intent
-Labeler              stamp result labels
+Flow.Stamp           stamp result labels
 Declassifier         approved label crossings
 savepointDispatcher  sys.begin / sys.commit markers
 worldDispatcher      sys.now / sys.random (journaled, so they replay)
@@ -179,7 +172,7 @@ wrapProtocol         sys.input / sys.output / sys.abort
 task.Dispatcher      durable approval — yields, resumes on resolution
 progressDispatcher   sys.log
 timerDispatcher      sys.timer, if granted
-builtin.Dispatcher   (syscall, operation) → entry; approval, then handler ← the bottom
+capability.Dispatcher (syscall, operation) → entry; approval, then handler ← the bottom
 ```
 
 Everything from `savepointDispatcher` down is below replay, so its outcomes are
@@ -189,7 +182,7 @@ a durable fact rather than a question asked twice.
 ### 2.3 Where the grant set comes from
 
 This is the line that makes §4.3 airtight
-([host.go:160](../internal/agent/host/host.go:160)):
+([host.go:171](../internal/agent/host/host.go:171)):
 
 ```go
 return stack.ForProcess(tape, table, withSavepoints)
@@ -219,22 +212,22 @@ The guest calls the host function with `{"abi":4,"name":"core.internet","args":{
 1. **`dispatchSyscall`** (`capcompute/host.go:39`)
    reads the bytes out of guest memory, decodes the envelope, and calls the
    dispatcher the processor was handed. It has no idea what `core.internet` is.
-2. **Validator** ([validate.go:46](../monitor/validate.go:46)) looks the name up in
+2. **Validator** ([validate.go:44](../monitor/validate.go:44)) looks the name up in
    the grant set. Not found → `ErrnoDenied`, and the driver is never reached. Found
    → the args are validated against the capability's `InputSchema` before anything
    downstream sees them.
-3. **FlowMonitor** checks the call's taint against the grant's `Forbid` set — a
+3. **Flow.Guard** checks the call's taint against the grant's `Forbid` set — a
    tainted argument cannot reach a capability that forbids that label.
 4. **replay tape** — if this syscall is already in the journal at this position, the
    recorded result is served and *the driver is never called again*. Otherwise the
    intent is journaled **before** the call (journal-before-execute).
-5. **Labeler / Declassifier / task.Dispatcher** — below replay, so their outcomes are
+5. **Flow.Stamp / Declassifier / task.Dispatcher** — below replay, so their outcomes are
    journaled once. An approval-gated call yields here and returns as a durable task.
-6. **`builtin.Dispatcher`** reads the discriminator (`method` for `core.internet`)
+6. **`capability.Dispatcher`** reads the discriminator (`method` for `core.internet`)
    out of the args and indexes `(core.internet, "GET")`. A miss is a denial naming
    the granted operations; a hit whose entry requires approval yields here, below
    the tape, so the yield is journaled once.
-7. **`internet.Handler.DispatchCall`** (`aurora-dispatchers/internet/handler.go:78`)
+7. **`internet.Handler.DispatchCall`** (`aurora-dispatchers/internet/handler.go:77`)
    resolves the per-method policy, attaches host-held credentials if the (method,
    host) matches an injection, and calls the client.
 8. **`internet.Client.Do`** (`aurora-dispatchers/internet/internet.go:355`)
@@ -287,9 +280,8 @@ no callback the guest can register. The entire host surface is that function.
 
 ### 4.3 The door is deny-by-default, and the grant set cannot be forged
 
-The Validator ([validate.go:46](../monitor/validate.go:46)) is the reference
-monitor. Its rule is: if `FindCapability(grants(cred), syscall.Name)` misses,
-`ErrnoDenied`. Not an error, not a passthrough — a denial the guest observes as a
+The Validator ([validate.go:44](../monitor/validate.go:44)) is the reference
+monitor. Its rule is: if `table.Descriptor(syscall.Name)` misses, `ErrnoDenied`. Not an error, not a passthrough — a denial the guest observes as a
 failed syscall.
 
 Three properties make that hold:
@@ -306,7 +298,7 @@ Three properties make that hold:
   (`capcompute/processor.go:63`).
   A guest cannot name another process's identity because it cannot name its own.
 
-Note the two exemptions at [validate.go:47](../monitor/validate.go:47): `sys.begin`
+Note the two exemptions at [validate.go:46](../monitor/validate.go:46): `sys.begin`
 and `sys.commit` bypass the grant lookup. They are savepoint markers that reach no
 driver and perform no effect.
 
@@ -323,7 +315,7 @@ both after the Validator has said yes:
 
 Flow policy and approval are *not* the driver's: they ride the entry, are
 published on the capability, and are enforced by the monitor above the tape and
-by `builtin.Dispatch` below it. What a driver still stamps is provenance that is
+by `capability.Dispatcher` below it. What a driver still stamps is provenance that is
 not a property of the case — a stored value's own labels, or which credential
 injection matched.
 
@@ -350,8 +342,9 @@ Worth stating plainly, so the guarantee isn't over-read:
 | question | file |
 |---|---|
 | what grants exist | `internal/agent/manifest/manifest.go` |
-| which drivers are compiled in | `aurora-dispatchers/registry/registry.go` |
-| how a driver is built | `aurora-dispatchers/registry/internet.go` |
+| which drivers are compiled in | `aurora-dist/internal/dist/dist.go` |
+| how a driver is built | `aurora-dispatchers/internet/registration.go` |
+| the index and the leaf dispatcher | `capability/capability.go` |
 | what a driver's handler does | `aurora-dispatchers/internet/handler.go` |
 | how the leaf chain is assembled | `aurora-dist/internal/dist/provider.go` |
 | how one process's chain is built | `internal/agent/host/host.go` |
@@ -366,10 +359,10 @@ Each wall has a test that fails if it comes down:
 
 - **4.1** — `capcompute`'s integration tests: an image declaring `allowed_hosts` or
   `allowed_paths` is refused; an infinite guest is stopped at its deadline.
-- **4.3** — `monitor/validate_test.go`: `TestValidatorDeniesUngrantedCapability`,
-  `TestValidatorRejectsArgsFailingInputSchema`, and
-  `TestValidatorPassesReservedSyscallsWithoutGrant` (the `sys.begin`/`sys.commit`
-  exemption is deliberate, not an oversight).
+- **4.3** — `monitor/validate_test.go`: `TestValidatorRejectsArgsFailingInputSchema`
+  and `TestValidatorPassesReservedSyscallsWithoutGrant` (the `sys.begin`/`sys.commit`
+  exemption is deliberate, not an oversight). An ungranted name is denied, and never
+  journaled, in `monitor/stack_test.go`: `TestStackEnforcesCanonicalOrder`.
 - **4.3** — `internal/agent/reconcile_test.go`:
   `TestProcessDriversRejectsOverAdvertisingProvider`, and its twin admitting a
   faithful one.

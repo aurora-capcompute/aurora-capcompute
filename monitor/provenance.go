@@ -13,8 +13,7 @@ import (
 
 // Taints is the cross-process taint state: every label each process has
 // observed. It is shared by all of a host's per-process monitor chains (Stack
-// holds one), while the FlowMonitor decorator that consumes it is wired per
-// process — state and wiring have different lifetimes, so they are different
+// holds one), while the Flow that consumes it is wired per process — state and wiring have different lifetimes, so they are different
 // types.
 type Taints[ID comparable] struct {
 	mu       sync.Mutex
@@ -28,7 +27,7 @@ func NewTaints[ID comparable]() *Taints[ID] {
 // Declassify removes labels from a process's accumulated taint — an explicit,
 // governed crossing of a label boundary (DIFC declassification). Guests reach
 // it through the sys.declassify syscall (the Declassifier decorator), whose
-// approved result replays through the FlowMonitor and lands here; the direct
+// approved result replays through Flow.Guard and lands here; the direct
 // method remains for host-side administrative use.
 func (t *Taints[ID]) Declassify(pid ID, labels ...string) {
 	t.mu.Lock()
@@ -122,7 +121,7 @@ var declassifyInputSchema = json.RawMessage(`{
 // approval (there is no unapproved path: an unattended declassify would just
 // be flow-policy bypass), and the approved crossing is a journaled syscall
 // result, so replay re-applies it without asking again. It must sit *below*
-// the replay layer; the FlowMonitor above performs the actual taint removal
+// the replay layer; Flow.Guard above it performs the actual taint removal
 // when the result passes through it.
 type Declassifier[K any] struct {
 	next sys.Dispatcher[K]

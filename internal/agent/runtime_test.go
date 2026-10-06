@@ -610,9 +610,7 @@ func buildEchoProgram(t *testing.T) []byte {
 
 // firstAndLaterUser returns the first user message (the run's input) and whether
 // any subsequent user message exists (a tool observation the guest appends as a
-// user-role message). Mock programs distinguish child from parent by their input
-// rather than by scanning every user message, whose content includes the echoed
-// delegation args.
+// user-role message).
 func firstAndLaterUser(messages []struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
