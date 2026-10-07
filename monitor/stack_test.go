@@ -11,15 +11,14 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-// stackDriver is the leaf: it records idempotency keys so the test can prove
-// the below-replay layers actually receive them.
+// stackDriver is the leaf: it counts its calls so the test can prove replay
+// serves recorded results without reaching it.
 type stackDriver struct {
-	keys []string
+	calls int
 }
 
-func (d *stackDriver) Dispatch(ctx context.Context, _ testPID, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
-	key, _ := capability.IdempotencyKey(ctx)
-	d.keys = append(d.keys, key)
+func (d *stackDriver) Dispatch(_ context.Context, _ testPID, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
+	d.calls++
 	return sys.Result(json.RawMessage(`{"from":"` + syscall.Name + `"}`)), nil
 }
 
@@ -88,22 +87,17 @@ func TestStackEnforcesCanonicalOrder(t *testing.T) {
 	// …and a crash-rebooted host (fresh Taints, fresh tape, same journal)
 	// re-derives the same denial from replayed results alone, replaying
 	// without re-executing anything.
-	driverCalls := len(driver.keys)
+	driverCalls := driver.calls
 	rebooted := boot(t)
 	call(t, rebooted, "p1", "internet.read")
 	if result := call(t, rebooted, "p1", "k8s.delete"); result.Errno() != sys.ErrnoDenied {
 		t.Fatalf("post-crash k8s.delete = %#v, want denied (taint not rebuilt)", result)
 	}
-	if len(driver.keys) != driverCalls {
+	if driver.calls != driverCalls {
 		t.Fatal("replay re-executed a driver call")
 	}
 	if journal.Length() != recordsBeforeCrash {
 		t.Fatal("replay appended records")
-	}
-	for _, key := range driver.keys {
-		if key == "" {
-			t.Fatal("a below-replay layer ran without an idempotency key")
-		}
 	}
 	if err := journaled.Verify(journal); err != nil {
 		t.Fatalf("verify: %v", err)

@@ -14,9 +14,6 @@ package journaled
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 
 	"github.com/aurora-capcompute/aurora-capcompute/replay"
@@ -37,8 +34,7 @@ const (
 // program (e.g. an artifact digest), and the process the journal belongs
 // to. Replay against a different writer is refused up front — the
 // versioned-replay law (see docs/ARCHITECTURE.md, "Coherence under growth")
-// — instead of failing later as a confusing divergence. Process also scopes
-// the intent identity, so idempotency keys are unique across processes.
+// — instead of failing later as a confusing divergence.
 type Header struct {
 	ABI     int    `json:"abi"`
 	Program string `json:"program"`
@@ -55,11 +51,7 @@ type Record struct {
 	Kind     Kind `json:"kind"`
 	// Revision is the attempt that first wrote this record, stamped by the
 	// Journal implementation at append (zero when the journal has no attempt
-	// notion). It scopes the intent identity: a record in a fork's shared
-	// prefix keeps its origin revision, so a crash re-drive recomputes the
-	// original idempotency key — while an abandoned section's retry appends
-	// fresh records under the new revision and can never adopt the abandoned
-	// attempt's recorded effects.
+	// notion). A record in a fork's shared prefix keeps its origin revision.
 	Revision uint64 `json:"revision,omitempty"`
 
 	// Payload: exactly one of the two, by Kind.
@@ -177,19 +169,11 @@ func (t *Tape) Next(syscall sys.Syscall) (sys.SyscallResult, bool, error) {
 	}
 
 	if t.cursor+1 >= t.journal.Length() {
-		// Open intent at the tail: dispatched once, outcome unknown. Hand the
-		// original intent identity back — derived from the record, origin
-		// revision included — so a retry carries the same key however many
-		// resume forks sit between then and now.
-		key, err := intentKey(t.header, intent)
-		if err != nil {
-			return sys.SyscallResult{}, false, err
-		}
+		// Open intent at the tail: dispatched once, outcome unknown.
 		t.cursor++
 		t.pending = true
 		return sys.SyscallResult{}, false, replay.OpenIntentError{
 			Position: intent.Position,
-			Key:      key,
 			Syscall:  syscall,
 		}
 	}
@@ -205,27 +189,25 @@ func (t *Tape) Next(syscall sys.Syscall) (sys.SyscallResult, bool, error) {
 	return *completion.Result, true, nil
 }
 
-// Begin appends the intent record for a fresh syscall — before it executes —
-// and returns its idempotency key.
-func (t *Tape) Begin(syscall sys.Syscall) (string, error) {
+// Begin appends the intent record for a fresh syscall — before it executes.
+func (t *Tape) Begin(syscall sys.Syscall) error {
 	if t == nil {
-		return "", fmt.Errorf("begin on nil tape")
+		return fmt.Errorf("begin on nil tape")
 	}
 	if t.pending {
-		return "", fmt.Errorf("begin: an intent is already open at position %d", t.journal.Length()-1)
+		return fmt.Errorf("begin: an intent is already open at position %d", t.journal.Length()-1)
 	}
 	if t.cursor != t.journal.Length() {
-		return "", fmt.Errorf("begin: cursor %d has not consumed the journal (length %d)", t.cursor, t.journal.Length())
+		return fmt.Errorf("begin: cursor %d has not consumed the journal (length %d)", t.cursor, t.journal.Length())
 	}
 
 	recorded := syscall.Copy()
-	stored, err := appendRecord(t.journal, Record{Kind: KindIntent, Syscall: &recorded})
-	if err != nil {
-		return "", err
+	if err := appendRecord(t.journal, Record{Kind: KindIntent, Syscall: &recorded}); err != nil {
+		return err
 	}
 	t.cursor++
 	t.pending = true
-	return intentKey(t.header, stored)
+	return nil
 }
 
 // Commit appends the completion record for the open intent — after the
@@ -239,7 +221,7 @@ func (t *Tape) Commit(result sys.SyscallResult) error {
 	}
 
 	recorded := result.Copy()
-	if _, err := appendRecord(t.journal, Record{Kind: KindCompletion, Result: &recorded}); err != nil {
+	if err := appendRecord(t.journal, Record{Kind: KindCompletion, Result: &recorded}); err != nil {
 		return err
 	}
 	t.cursor++
@@ -310,44 +292,12 @@ func Verify(journal Journal) error {
 	return nil
 }
 
-// intentKey is the intent identity — (process, revision, position, call-hash)
-// — used as the idempotency key handed to drivers. It derives from the record
-// as written, so it is stable exactly as long as the record is: a crash
-// re-drive of an open intent (served from a fork's shared prefix, origin
-// revision intact) recomputes the original key, while a rolled-back section's
-// re-execution writes fresh records under the new revision and gets a fresh
-// key space — its effects are new effects, never the abandoned attempt's.
-func intentKey(header Header, record Record) (string, error) {
-	if record.Syscall == nil {
-		return "", CorruptJournalError{Position: record.Position, Reason: "intent identity requires a syscall"}
-	}
-	return digest(struct {
-		Header   Header      `json:"header"`
-		Revision uint64      `json:"revision"`
-		Position int         `json:"position"`
-		Syscall  sys.Syscall `json:"syscall"`
-	}{header, record.Revision, record.Position, *record.Syscall})
-}
-
 // appendRecord appends one record at the journal tail, stamped with its
-// position, and returns the record as stored — the Journal may stamp its
-// attempt scope (Revision) on the way in. Every appender goes through here, so
-// positioning cannot drift between them.
-func appendRecord(journal Journal, record Record) (Record, error) {
+// position. Every appender goes through here, so positioning cannot drift
+// between them.
+func appendRecord(journal Journal, record Record) error {
 	record.Position = journal.Length()
-	if err := journal.Append(record); err != nil {
-		return Record{}, err
-	}
-	return journal.Load(record.Position)
-}
-
-func digest(v any) (string, error) {
-	data, err := json.Marshal(v)
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:]), nil
+	return journal.Append(record)
 }
 
 func sameSyscall(left sys.Syscall, right sys.Syscall) bool {

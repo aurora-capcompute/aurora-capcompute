@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
@@ -31,10 +30,8 @@ type Tape interface {
 	// syscall was dispatched but its outcome never journaled — Next returns
 	// OpenIntentError.
 	Next(syscall sys.Syscall) (sys.SyscallResult, bool, error)
-	// Begin appends the intent record for a fresh syscall and returns its
-	// idempotency key: the intent identity (process, revision, position,
-	// call-hash) — scoped to the attempt that wrote the record.
-	Begin(syscall sys.Syscall) (string, error)
+	// Begin appends the intent record for a fresh syscall.
+	Begin(syscall sys.Syscall) error
 	// Commit appends the completion record for the open intent.
 	Commit(result sys.SyscallResult) error
 	Reset()
@@ -44,10 +41,9 @@ type Tape interface {
 // OpenIntentError reports that replay reached an intent record with no
 // completion: the syscall was dispatched once, but whether its effect happened
 // is unknown (a crash between execute and journal, or an external task still
-// pending). Key is the same idempotency key the original dispatch carried.
+// pending).
 type OpenIntentError struct {
 	Position int
-	Key      string
 	Syscall  sys.Syscall
 }
 
@@ -72,12 +68,12 @@ func (e IndeterminateError) Error() string {
 type OpenIntentDecision int
 
 const (
-	// RetryOpenIntent re-dispatches with the original idempotency key —
-	// at-least-once, deduplicated by keyed drivers. The right default: reads
-	// are harmless to repeat and pending external tasks are re-polled.
+	// RetryOpenIntent re-dispatches the call — at-least-once: an effect that
+	// happened before the crash happens again. The right default: reads are
+	// harmless to repeat and pending external tasks are re-polled.
 	RetryOpenIntent OpenIntentDecision = iota
 	// FailOpenIntent surfaces IndeterminateError instead of re-executing —
-	// for non-idempotent mutations whose driver cannot dedup.
+	// for mutations that must not run twice.
 	FailOpenIntent
 )
 
@@ -97,7 +93,7 @@ func NewDispatcher[K any](tape Tape, next sys.Dispatcher[K]) *Dispatcher[K] {
 }
 
 // WithOpenIntentPolicy sets the open-intent decision; without it every open
-// intent is retried under its original idempotency key.
+// intent is retried.
 func (d *Dispatcher[K]) WithOpenIntentPolicy(policy OpenIntentPolicy) *Dispatcher[K] {
 	d.openIntent = policy
 	return d
@@ -109,24 +105,21 @@ func (d *Dispatcher[K]) Dispatch(ctx context.Context, cred K, syscall sys.Syscal
 		return result, nil
 	}
 
-	var key string
 	var open OpenIntentError
 	switch {
 	case err == nil:
-		key, err = d.tape.Begin(syscall)
-		if err != nil {
+		if err := d.tape.Begin(syscall); err != nil {
 			return sys.SyscallResult{}, err
 		}
 	case errors.As(err, &open):
 		if d.decideOpenIntent(syscall) != RetryOpenIntent {
 			return sys.SyscallResult{}, IndeterminateError{Position: open.Position, Syscall: syscall}
 		}
-		key = open.Key
 	default:
 		return sys.SyscallResult{}, err
 	}
 
-	result, err = d.next.Dispatch(capability.WithIdempotencyKey(ctx, key), cred, syscall, auth)
+	result, err = d.next.Dispatch(ctx, cred, syscall, auth)
 	if err != nil {
 		// Outcome unknown: the intent stays open so the next replay resolves
 		// it by policy. Journaling a made-up completion here would assert an

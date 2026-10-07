@@ -5,7 +5,8 @@
 // through the full dispatcher chain (Validator → Flow.Guard → replay →
 // Flow.Stamp → driver) while injecting a crash at any chosen journal append.
 // Tests run the crash across *every* position and assert the invariants:
-// replay convergence, exactly-once effects under idempotency keys, an intact
+// replay convergence, at-least-once effects (an effect repeats only when the
+// crash fell between its execution and its completion record), an intact
 // journal structure.
 package sim
 
@@ -72,24 +73,17 @@ func (j *Journal) Append(record journaled.Record) error {
 	return nil
 }
 
-// Effects is the external world: a keyed effect store, the way a real driver
-// dedups at-least-once dispatch. It survives crashes — an effect applied
+// Effects is the external world. It survives crashes — an effect applied
 // before the process died stays applied.
 type Effects struct {
-	// results by idempotency key: the dedup table.
-	results map[string]sys.SyscallResult
-	// Applied counts real (non-deduped) executions per syscall name. The
-	// exactly-once invariant is Applied[name] == 1 for each journaled effect.
+	// Applied counts executions per syscall name.
 	Applied map[string]int
-	// Dispatches counts every driver invocation (at-least-once is allowed here).
+	// Dispatches counts every driver invocation.
 	Dispatches int
 }
 
 func NewEffects() *Effects {
-	return &Effects{
-		results: make(map[string]sys.SyscallResult),
-		Applied: make(map[string]int),
-	}
+	return &Effects{Applied: make(map[string]int)}
 }
 
 // World is everything that survives a crash.
@@ -138,19 +132,10 @@ type driver struct {
 	effects *Effects
 }
 
-func (d driver) DispatchCall(ctx context.Context, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
+func (d driver) DispatchCall(_ context.Context, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
 	d.effects.Dispatches++
-	key, ok := capability.IdempotencyKey(ctx)
-	if !ok {
-		return sys.SyscallResult{}, fmt.Errorf("driver received no idempotency key for %q", syscall.Name)
-	}
-	if result, done := d.effects.results[key]; done {
-		return result, nil // deduped: the effect already happened
-	}
 	d.effects.Applied[syscall.Name]++
-	result := sys.Result(json.RawMessage(fmt.Sprintf(`{"applied":%q,"seq":%d}`, syscall.Name, d.effects.Applied[syscall.Name])))
-	d.effects.results[key] = result
-	return result, nil
+	return sys.Result(json.RawMessage(fmt.Sprintf(`{"applied":%q,"seq":%d}`, syscall.Name, d.effects.Applied[syscall.Name]))), nil
 }
 
 // Chain builds the canonical dispatcher stack over the world, exactly as a

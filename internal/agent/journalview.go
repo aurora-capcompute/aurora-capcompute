@@ -277,10 +277,7 @@ func (j *logJournal) Append(rec journaled.Record) error {
 	}
 	stored := copyRecord(rec)
 	// Stamp the attempt: this revision wrote the record. Records served from
-	// the shared prefix keep the revision that first wrote them, which is what
-	// scopes intent identity (idempotency keys) to the attempt — a re-driven
-	// open intent keeps its original key; a rolled-back section's re-execution
-	// writes fresh records here and gets a fresh key space.
+	// the shared prefix keep the revision that first wrote them.
 	stored.Revision = j.rev
 	ev, err := durable.EncodeEvent(evSyscall, j.proc, j.rev, j.now(), syscallRecordData{
 		Revision: j.rev,

@@ -102,8 +102,7 @@ tape thereafter.
 So validation and flow denials sit above: they follow from the grant set and the
 current taint, so a replay reaches the same verdict without recording anything.
 Stamped labels and approved declassification crossings sit below: they are
-facts about what happened, they belong in the audit trail, and they need the
-tape's idempotency keys.
+facts about what happened, and they belong in the audit trail.
 
 Put one layer on the wrong side and you silently break a law. That is precisely
 why `Stack.ForProcess` exists and why nothing assembles this by hand.
@@ -169,8 +168,7 @@ A program calls a granted capability, say `core.scratch` with operation `get`.
 3. **Flow.Guard**: does this operation forbid any label the process is already
    carrying? If so, refused here.
 4. **replay**: is this syscall the next recorded entry on the tape? On a first
-   run it is not, so the tape appends an **intent** record and returns an
-   idempotency key.
+   run it is not, so the tape appends an **intent** record.
 5. The call descends through the protocol layers to the driver, which does the
    real work.
 6. On the way back up, **Flow.Stamp** stamps `syscall:core.scratch` plus the
@@ -192,14 +190,15 @@ On restart the process is re-driven from the top: the program re-executes from
 its entrypoint, and every syscall it repeats is served from the tape rather than
 re-dispatched, so it fast-forwards through work already done. When it reaches
 the position with an intent and no completion, the tape raises
-`replay.OpenIntentError`, and the **open-intent policy** decides: retry under the
-*original idempotency key* (the default — the driver can deduplicate), or
-surface it for review. A capability declared non-idempotent can be routed to the
-second answer.
+`replay.OpenIntentError`, and the **open-intent policy** decides: retry the call
+(the default — at-least-once, so an effect that happened before the crash
+happens again), or surface it for review. A capability named in
+`NonIdempotentSyscalls` gets the second answer.
 
-This is why the intent carries an identity of `(process, revision, position,
-call-hash)`. It is not just a marker that something started; it is the key a
-driver uses to recognise the retry.
+Drivers get no idempotency key: making every external effect exactly-once is
+not something the runtime can promise. What it does promise is narrower — a
+call runs again only when the crash fell between its execution and its
+completion record.
 
 ## Trace 3: an approval
 
@@ -256,8 +255,7 @@ the journal at the section's still-open `sys.begin` and re-runs the whole sectio
 live, bounded by `MaxAbortRetries`. With no section open there is nothing smaller
 to re-run, and the process fails. A fork mints a new **revision**: forks are
 copy-on-write over the journal, and the revision is part of the process identity
-(`pid@revision`), which is what keeps a retried attempt's idempotency keys
-distinct from the attempt it replaced.
+(`pid@revision`), so a retried attempt never resumes the instance it replaced.
 
 `Retry` from the public API offers the same thing at a coarser grain:
 `RetryResume` continues from where the journal stopped; `RetryRestart` starts a
@@ -327,8 +325,8 @@ The invariants are tested as invariants, not incidentally.
 style: it models the parts of the world that survive a crash — the journal and
 the external effect store — drives a scripted guest through the full chain, and
 injects a crash at *every* journal append position, asserting three things each
-time: replay converges, effects happen exactly once under their idempotency
-keys, and the journal structure stays intact.
+time: replay converges, an effect repeats only when the crash cut off its
+completion record, and the journal structure stays intact.
 
 The abort and savepoint tests in `internal/agent` cover abort/retry/crash
 interleavings. And capcompute's own adversarial suite builds a genuinely

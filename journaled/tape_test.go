@@ -51,19 +51,17 @@ func newTestTape(t *testing.T, journal journaled.Journal) *journaled.Tape {
 }
 
 // record drives one full fresh syscall through the tape: intent then completion.
-func record(t *testing.T, tape *journaled.Tape, syscall sys.Syscall, result sys.SyscallResult) string {
+func record(t *testing.T, tape *journaled.Tape, syscall sys.Syscall, result sys.SyscallResult) {
 	t.Helper()
 	if _, replayed, err := tape.Next(syscall); err != nil || replayed {
 		t.Fatalf("next before begin: replayed=%v err=%v", replayed, err)
 	}
-	key, err := tape.Begin(syscall)
-	if err != nil {
+	if err := tape.Begin(syscall); err != nil {
 		t.Fatalf("begin: %v", err)
 	}
 	if err := tape.Commit(result); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
-	return key
 }
 
 func TestNewTapeStampsFreshJournal(t *testing.T) {
@@ -102,10 +100,7 @@ func TestBeginCommitAppendsIntentCompletionPair(t *testing.T) {
 	journal := &fakeJournal{}
 	tape := newTestTape(t, journal)
 
-	key := record(t, tape, sys.Syscall{Name: "step.one"}, sys.Result(nil))
-	if key == "" {
-		t.Fatal("begin returned an empty idempotency key")
-	}
+	record(t, tape, sys.Syscall{Name: "step.one"}, sys.Result(nil))
 	if journal.Length() != 2 {
 		t.Fatalf("journal length = %d, want 2 (intent + completion)", journal.Length())
 	}
@@ -180,13 +175,12 @@ func TestReplayDivergenceDetected(t *testing.T) {
 	}
 }
 
-func TestOpenIntentSurfacedWithStableKey(t *testing.T) {
+func TestOpenIntentSurfacedAfterCrash(t *testing.T) {
 	journal := &fakeJournal{}
 	tape := newTestTape(t, journal)
 	syscall := sys.Syscall{Name: "mail.send", Args: []byte(`{"to":"ops"}`)}
 
-	key, err := tape.Begin(syscall)
-	if err != nil {
+	if err := tape.Begin(syscall); err != nil {
 		t.Fatalf("begin: %v", err)
 	}
 	// Crash before Commit: a fresh tape over the same journal meets the open intent.
@@ -201,9 +195,6 @@ func TestOpenIntentSurfacedWithStableKey(t *testing.T) {
 	}
 	if open.Position != 0 || open.Syscall.Name != "mail.send" {
 		t.Fatalf("open intent = %+v", open)
-	}
-	if open.Key != key {
-		t.Fatalf("retry key %q != original key %q; idempotency broken", open.Key, key)
 	}
 
 	// Retrying resolves the intent: Commit closes it without a second Begin.
@@ -223,8 +214,7 @@ func TestYieldLeavesIntentOpenAcrossReset(t *testing.T) {
 	tape := newTestTape(t, journal)
 	syscall := sys.Syscall{Name: "task.request"}
 
-	key, err := tape.Begin(syscall)
-	if err != nil {
+	if err := tape.Begin(syscall); err != nil {
 		t.Fatalf("begin: %v", err)
 	}
 	// Dispatch yielded: nothing committed, the run is re-driven from zero.
@@ -238,9 +228,6 @@ func TestYieldLeavesIntentOpenAcrossReset(t *testing.T) {
 	if !errors.As(err, &open) {
 		t.Fatalf("error = %v, want OpenIntentError", err)
 	}
-	if open.Key != key {
-		t.Fatalf("resumed key %q != original %q", open.Key, key)
-	}
 	if err := tape.Commit(sys.Result(nil)); err != nil {
 		t.Fatalf("commit resumed intent: %v", err)
 	}
@@ -248,10 +235,10 @@ func TestYieldLeavesIntentOpenAcrossReset(t *testing.T) {
 
 func TestBeginRefusedWhileIntentOpen(t *testing.T) {
 	tape := newTestTape(t, &fakeJournal{})
-	if _, err := tape.Begin(sys.Syscall{Name: "step.one"}); err != nil {
+	if err := tape.Begin(sys.Syscall{Name: "step.one"}); err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	if _, err := tape.Begin(sys.Syscall{Name: "step.two"}); err == nil {
+	if err := tape.Begin(sys.Syscall{Name: "step.two"}); err == nil {
 		t.Fatal("second begin with an open intent did not error")
 	}
 }
@@ -273,20 +260,5 @@ func TestVerifyDetectsStructureDamage(t *testing.T) {
 	var corrupt journaled.CorruptJournalError
 	if !errors.As(err, &corrupt) {
 		t.Fatalf("error = %v, want CorruptJournalError", err)
-	}
-}
-
-func TestIntentKeysDifferByPositionAndCall(t *testing.T) {
-	tape := newTestTape(t, &fakeJournal{})
-	one := record(t, tape, sys.Syscall{Name: "step.one"}, sys.Result(nil))
-	two := record(t, tape, sys.Syscall{Name: "step.one"}, sys.Result(nil))
-	if one == two {
-		t.Fatal("same call at different positions produced the same idempotency key")
-	}
-
-	other := newTestTape(t, &fakeJournal{})
-	otherOne := record(t, other, sys.Syscall{Name: "step.one"}, sys.Result(nil))
-	if one != otherOne {
-		t.Fatal("same run, position, and call produced different idempotency keys")
 	}
 }

@@ -1,29 +1,11 @@
-// Context handoffs across the dispatcher chain — what a Handler is given beyond
-// its arguments. The replay layer hands it the in-flight intent identity; the
-// flow monitor hands it the process's accumulated taint.
+// Context handoff across the dispatcher chain — what a Handler is given beyond
+// its arguments: the flow monitor hands it the process's accumulated taint.
 //
-// They live beside Handler rather than beside the layers that set them: a driver
-// must be able to read both without importing the journal or the monitor.
+// It lives beside Handler rather than beside the monitor that sets it: a driver
+// must be able to read it without importing the monitor.
 package capability
 
 import "context"
-
-type idempotencyKeyContextKey struct{}
-
-// WithIdempotencyKey attaches the intent identity of the in-flight syscall —
-// (process, position, call-hash) — to the dispatch context. The replay layer sets
-// it before delegating; it is stable across crash-retries of the same intent.
-func WithIdempotencyKey(ctx context.Context, key string) context.Context {
-	return context.WithValue(ctx, idempotencyKeyContextKey{}, key)
-}
-
-// IdempotencyKey returns the intent identity for the in-flight syscall.
-// Drivers performing effects should hand it to the effect side (or dedup on
-// it) so an at-least-once retry of an open intent does not double-execute.
-func IdempotencyKey(ctx context.Context) (string, bool) {
-	key, ok := ctx.Value(idempotencyKeyContextKey{}).(string)
-	return key, ok
-}
 
 type taintContextKey struct{}
 

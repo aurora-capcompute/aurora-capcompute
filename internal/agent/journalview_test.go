@@ -174,7 +174,7 @@ func TestLogJournalBacksTheKernelTape(t *testing.T) {
 		t.Fatalf("new tape: %v", err)
 	}
 	call := sys.Syscall{Abi: sys.ABIVersion, Name: "x", Args: []byte(`{"k":1}`)}
-	if _, err := tape.Begin(call); err != nil {
+	if err := tape.Begin(call); err != nil {
 		t.Fatalf("begin: %v", err)
 	}
 	if err := tape.Commit(sys.Result([]byte(`"done"`))); err != nil {

@@ -81,11 +81,10 @@ type Config struct {
 	// NonIdempotentSyscalls names capabilities whose re-execution is unsafe (a
 	// second POST charges twice; a second delete errors). On crash-resume the
 	// runtime meets an open intent — an effect journaled but with no recorded
-	// completion, so its outcome is unknown. By default it retries under the
-	// original idempotency key (at-least-once, safe when the driver dedups on the
-	// key). For a capability named here it instead surfaces the intent as
-	// indeterminate for review rather than silently re-applying it — at-most-once
-	// for effects a driver cannot make idempotent. Matched by capability name.
+	// completion, so its outcome is unknown. By default it retries the call
+	// (at-least-once). For a capability named here it instead surfaces the intent
+	// as indeterminate for review rather than silently re-applying it —
+	// at-most-once. Matched by capability name.
 	NonIdempotentSyscalls []string
 
 	// ProcessMemoryPages caps each guest process's linear memory in 64 KiB wasm

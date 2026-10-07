@@ -140,8 +140,8 @@ func reconcileGrants(advertised []capability.Descriptor, manifest manifest.Manif
 // replay open-intent policy: an open intent (a journaled effect with no recorded
 // completion, met on crash-resume) for one of those capabilities is surfaced as
 // indeterminate rather than silently re-executed, giving at-most-once for
-// effects a driver cannot dedup. Empty set → nil → retry everything (the
-// framework default, safe under idempotency keys).
+// effects that must not run twice. Empty set → nil → retry everything (the
+// framework default: at-least-once).
 func openIntentPolicy(nonIdempotent []string) replay.OpenIntentPolicy {
 	if len(nonIdempotent) == 0 {
 		return nil
@@ -915,8 +915,8 @@ func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, erro
 		r.forkJournalLocked(proc, 0)
 	} else if proc.status == durable.ProcessYielded || proc.status == durable.ProcessWaitingTask {
 		// Resume from a park: no fork. The journal's open intent at the tail is
-		// re-driven by replay under its original idempotency key, and a resolved
-		// task's stored authorization is injected by the task layer.
+		// re-driven by replay, and a resolved task's stored authorization is
+		// injected by the task layer.
 	} else if forkOffset, open := proc.journal.outermostOpenBegin(); open {
 		// Failed/stopped inside a savepoint section: fork at the section's
 		// sys.begin so the whole declared unit re-executes live. That is what

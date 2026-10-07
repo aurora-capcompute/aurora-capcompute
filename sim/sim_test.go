@@ -33,12 +33,24 @@ func totalAppends(t *testing.T) int {
 	return world.Journal.Length()
 }
 
-func requireApplied(t *testing.T, world *World, want map[string]int) {
+// requireApplied checks the at-least-once contract: every effect ran as often
+// as the program asks, plus once more for the one step whose completion record
+// the crash cut off — that step ran, its outcome was never journaled, and
+// replay re-dispatched it. A crash on an intent record repeats nothing: the
+// driver had not run yet.
+func requireApplied(t *testing.T, world *World, crashAt int) {
 	t.Helper()
+	want := make(map[string]int, len(wantApplied))
+	for name, count := range wantApplied {
+		want[name] = count
+	}
+	if crashAt%2 == 1 {
+		want[program[crashAt/2].Name]++
+	}
 	for name, count := range want {
 		if world.Effects.Applied[name] != count {
-			t.Fatalf("effect %q applied %d times, want %d (exactly-once violated)",
-				name, world.Effects.Applied[name], count)
+			t.Fatalf("crashAt=%d: effect %q applied %d times, want %d",
+				crashAt, name, world.Effects.Applied[name], count)
 		}
 	}
 }
@@ -68,7 +80,7 @@ func TestCrashMatrixConverges(t *testing.T) {
 		if world.Journal.Length() != total {
 			t.Fatalf("crashAt=%d: journal length %d, want %d", crashAt, world.Journal.Length(), total)
 		}
-		requireApplied(t, world, wantApplied)
+		requireApplied(t, world, crashAt)
 
 		// A third run must be pure replay: no new records, no driver calls.
 		records, dispatches := world.Journal.Length(), world.Effects.Dispatches

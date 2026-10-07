@@ -19,7 +19,7 @@ import (
 // flow denials replay identically from the same grant set and taint. Below
 // the replay layer sit the pieces whose outcomes must be journaled exactly
 // once and served from the tape thereafter: stamped labels and approved
-// declassification crossings — which also need the tape's idempotency keys.
+// declassification crossings.
 // Assembling this by hand and getting one layer on the wrong side silently
 // breaks a law; ForProcess cannot. That the flow cross-cut appears twice is why
 // it is one object with two decorators rather than two types: the state they
@@ -33,8 +33,7 @@ type Stack[ID comparable, K capcompute.PID[ID]] struct {
 	// is not optional in the canonical chain; grant nothing with Forbid sets
 	// and it is inert.
 	Taints *Taints[ID]
-	// OpenIntents overrides the open-intent policy (default: retry under the
-	// original idempotency key).
+	// OpenIntents overrides the open-intent policy (default: retry).
 	OpenIntents replay.OpenIntentPolicy
 }
 

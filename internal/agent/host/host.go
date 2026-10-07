@@ -69,7 +69,7 @@ type Config[ID comparable, K capcompute.PID[ID]] struct {
 	Wrap func(K, sys.Dispatcher[K], *capability.Table) (sys.Dispatcher[K], error)
 	// OpenIntents overrides the replay open-intent policy — what to do with an
 	// effect journaled without a recorded completion, met on crash-resume. Nil
-	// retries every open intent under its original idempotency key.
+	// retries every open intent.
 	OpenIntents replay.OpenIntentPolicy
 	// Now and Rand feed the journaled world sources (sys.now / sys.random);
 	// nil defaults to the real clock and crypto/rand.
