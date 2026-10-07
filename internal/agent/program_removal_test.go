@@ -73,7 +73,6 @@ func midQuantumRuntime(t *testing.T, stoppable bool) (*Runtime, *blockingDispatc
 	runtime, err := NewRuntime(context.Background(), Config{
 		Dispatchers: dispatchers,
 		Log:         store.log,
-		Leases:      store,
 		TaskSecret:  []byte("stable-secret"),
 		IDSource:    sequentialIDs(),
 	})

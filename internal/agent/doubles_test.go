@@ -1,9 +1,8 @@
 package agent
 
 // Test doubles shared by this package's tests. The module ships no concrete
-// stores — tests carry their own in-memory event log, lease table, and
-// process table, mirroring the assembly ingredients a real application
-// injects.
+// stores — tests carry their own in-memory event log and process table,
+// mirroring the assembly ingredients a real application injects.
 
 import (
 	"context"

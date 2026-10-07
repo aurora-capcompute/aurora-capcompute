@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct/process"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
@@ -23,23 +22,6 @@ func (r *Runtime) execute(processID string) {
 		r.stopProcess(processID, context.Canceled)
 		return
 	}
-	leaseResource := fmt.Sprintf("%s/%d", proc.id, proc.revision)
-	acquired, leaseErr := r.leases.Acquire(
-		context.Background(), r.tenantID, "process", leaseResource,
-		r.instanceID, r.now().UTC(), r.leaseTTL,
-	)
-	if leaseErr != nil || !acquired {
-		err := leaseErr
-		if err == nil {
-			err = errors.New("process is leased by another Aurora instance")
-		}
-		r.mu.Unlock()
-		r.finish(processID, durable.ProcessInterrupted, "", err)
-		return
-	}
-	defer r.leases.Release(
-		context.Background(), r.tenantID, "process", leaseResource, r.instanceID,
-	)
 	cred := r.processContextLocked(proc)
 	program := ProgramID(proc.manifest.Program)
 	deadline := proc.deadline

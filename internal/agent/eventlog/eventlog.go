@@ -5,8 +5,8 @@
 //
 // A stream is one session's ordered history, identified by Scope. The store
 // assigns each appended event a contiguous sequence and serializes appends per
-// stream; cross-instance coordination is handled separately by leases, so the
-// log itself needs no optimistic-concurrency guard. State is reconstructed by
+// stream. One runtime owns a log, so the log needs no optimistic-concurrency
+// guard. State is reconstructed by
 // reading a stream from the beginning and folding its events; there is no
 // in-place mutation and no separate "current row" store.
 package eventlog

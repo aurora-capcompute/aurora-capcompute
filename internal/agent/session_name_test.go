@@ -13,7 +13,6 @@ func bootSessionRuntime(t *testing.T, store *runtimeStore) *Runtime {
 	runtime, err := NewRuntime(context.Background(), Config{
 		Dispatchers: &runtimeDispatchers{},
 		Log:         store.log,
-		Leases:      store,
 		TaskSecret:  []byte("stable-secret"),
 		IDSource:    sequentialIDs(),
 	})

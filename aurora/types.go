@@ -56,15 +56,14 @@ type Config = agent.Config
 type DispatcherProvider = agent.DispatcherProvider
 
 // Event log: the single append-only source of truth. Applications provide an
-// EventLog implementation (and a Leases implementation for cross-instance
-// coordination); the runtime folds the log into session/process/task projections.
+// EventLog implementation; the runtime folds the log into session/process/task
+// projections.
 // This module ships the interfaces only — concrete stores (in-memory, SQLite)
 // are assembly ingredients that live in their own modules.
 
 type EventLog = eventlog.Log
 type LogEvent = eventlog.Event
 type LogScope = eventlog.Scope
-type Leases = agent.Leases
 type ProcessContext = agent.ProcessContext
 
 // Task types

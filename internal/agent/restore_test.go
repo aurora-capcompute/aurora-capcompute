@@ -44,7 +44,6 @@ func TestRestoreQuarantinesStaleManifests(t *testing.T) {
 	runtime, err := NewRuntime(context.Background(), Config{
 		Dispatchers: &vanishedToolDispatchers{},
 		Log:         store.log,
-		Leases:      store,
 		TaskSecret:  []byte("stable-secret"),
 		IDSource:    sequentialIDs(),
 	})

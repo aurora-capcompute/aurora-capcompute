@@ -6,10 +6,10 @@
 // append-only event log, with no mutable row store.
 //
 // It owns no capabilities, dispatchers, stores, or channels: programs,
-// dispatchers, the event log, leases, and the processor's process table are
-// injected through Config, and a final product is an assembly — a main()
-// composing this runtime with concrete stores, capability drivers, and
-// whatever communication channels that product speaks. None of those live
+// dispatchers and the event log are injected through Config, and a final
+// product is an assembly — a main() composing this runtime with concrete
+// stores, capability drivers, and whatever communication channels that product
+// speaks. None of those live
 // here. The types here are thin re-exports of the internal/agent runtime.
 package aurora
 

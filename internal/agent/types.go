@@ -54,20 +54,17 @@ type DispatcherProvider interface {
 }
 
 // Config wires a Runtime. Everything concrete is injected: programs, capability
-// drivers, the event log, leases, and the processor's process table are supplied
-// by the application — this module ships interfaces and orchestration only.
+// drivers and the event log are supplied by the application — this module ships
+// interfaces and orchestration only.
 type Config struct {
 	Dispatchers DispatcherProvider
 	Log         eventlog.Log
-	Leases      Leases
 	IDSource    func(prefix string) (string, error)
 	Now         func() time.Time
 	EventSize   int
 	TenantID    string
 	TaskSecret  []byte
 	TaskTTL     time.Duration
-	InstanceID  string
-	LeaseTTL    time.Duration
 
 	// MaxConcurrentProcesses bounds simultaneously executing process quanta across the
 	// runtime (0 = a default of 16).
@@ -115,7 +112,6 @@ type Runtime struct {
 	scheduler       Scheduler[ProgramID, ProcessContext]
 	taints          *monitor.Taints[processKey]
 	log             eventlog.Log
-	leases          Leases
 	tasks           *eventTaskStore
 	tenantID        string
 	sessions        map[string]*sessionState
@@ -125,8 +121,6 @@ type Runtime struct {
 	eventSize       int
 	taskSecret      []byte
 	taskTTL         time.Duration
-	instanceID      string
-	leaseTTL        time.Duration
 	maxAbortRetries int
 	memoryPages     uint32
 	quantumCeiling  time.Duration

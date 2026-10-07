@@ -294,8 +294,8 @@ per quantum; the gain is that a cold start is the only start.
 API: sessions, processes, journal and call-graph reads, tasks, stop/retry, and
 `Subscribe`.
 
-The runtime owns no capabilities, dispatchers, stores, or channels. Dispatchers,
-the event log, and leases are injected through `Config`; programs arrive through
+The runtime owns no capabilities, dispatchers, stores, or channels. Dispatchers
+and the event log are injected through `Config`; programs arrive through
 `AddProgram`. A shipping product is an *assembly* — a `main()` composing this runtime
 with concrete stores, drivers, and whatever channels it speaks. `aurora-dist` is
 that assembly.

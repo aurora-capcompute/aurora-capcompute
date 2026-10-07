@@ -119,7 +119,6 @@ dependency — construction fails if any required one is missing:
 runtime, err := aurora.NewRuntime(ctx, aurora.Config{
     Dispatchers: dispatcherProvider, // capability drivers (from aurora-dispatchers)
     Log:         eventLog,           // the append-only event store (in-memory or SQLite)
-    Leases:      leases,             // cross-instance fencing tokens
     TaskSecret:  taskSecret,         // non-empty []byte, keys the task resolution tokens
 })
 if err != nil {
@@ -180,11 +179,11 @@ how one syscall, one crash, and one approval each travel the chain — see
 
 No env vars, no files, no ports — everything is the injected struct.
 
-- **Required:** `Dispatchers`, `Log`, `Leases`, `TaskSecret` (non‑empty).
+- **Required:** `Dispatchers`, `Log`, `TaskSecret` (non‑empty).
   Programs are not configured: a runtime boots with an empty registry and gains
   programs through `AddProgram` / `RemoveProgram`.
-- **Optional knobs:** `TenantID`, `InstanceID`, `IDSource`, `Now`, `EventSize`
-  (default 32), `TaskTTL` (24h), `LeaseTTL` (1h), `MaxConcurrentProcesses` (16),
+- **Optional knobs:** `TenantID`, `IDSource`, `Now`, `EventSize`
+  (default 32), `TaskTTL` (24h), `MaxConcurrentProcesses` (16),
   `MaxAbortRetries` (10), `NonIdempotentSyscalls`, `ProcessMemoryPages`
   (4096 = 256 MiB), `MaxQuantumDuration` (2 min).
 - **Key constants:** `ManifestVersion = 4`.

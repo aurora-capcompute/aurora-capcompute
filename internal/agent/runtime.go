@@ -170,9 +170,6 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 	if config.Log == nil {
 		return nil, fmt.Errorf("%w: event log is required", errs.Invalid)
 	}
-	if config.Leases == nil {
-		return nil, fmt.Errorf("%w: leases are required", errs.Invalid)
-	}
 	if len(config.TaskSecret) == 0 {
 		return nil, fmt.Errorf("%w: task secret is required", errs.Invalid)
 	}
@@ -184,7 +181,6 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		cancel:          cancel,
 		taints:          monitor.NewTaints[processKey](),
 		log:             config.Log,
-		leases:          config.Leases,
 		tenantID:        strings.TrimSpace(config.TenantID),
 		sessions:        make(map[string]*sessionState),
 		processes:       make(map[string]*processState),
@@ -193,8 +189,6 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		eventSize:       config.EventSize,
 		taskSecret:      append([]byte(nil), config.TaskSecret...),
 		taskTTL:         config.TaskTTL,
-		instanceID:      strings.TrimSpace(config.InstanceID),
-		leaseTTL:        config.LeaseTTL,
 		maxAbortRetries: config.MaxAbortRetries,
 		dispatchers:     config.Dispatchers,
 	}
@@ -221,16 +215,6 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 	}
 	if runtime.maxAbortRetries <= 0 {
 		runtime.maxAbortRetries = defaultMaxAbortRetries
-	}
-	if runtime.instanceID == "" {
-		instanceID, err := randomID("instance_")
-		if err != nil {
-			return nil, err
-		}
-		runtime.instanceID = instanceID
-	}
-	if runtime.leaseTTL <= 0 {
-		runtime.leaseTTL = time.Hour
 	}
 	if err := runtime.restore(ctx); err != nil {
 		return nil, fmt.Errorf("restore runtime: %w", err)
@@ -290,20 +274,12 @@ func (r *Runtime) expireLoop() {
 // resumes the process parked on it; the task layer then hands the guest errno
 // expired, and the program decides what to do. Without this a process whose
 // approval never came would wait forever: a late resolution is refused, and
-// nothing else wakes it. Each task takes the same lease ResolveTask takes, so a
+// nothing else wakes it. The task store decides each task under its lock, so a
 // human resolving at the deadline and the sweep cannot both win.
 func (r *Runtime) expireTasks() {
 	now := r.now().UTC()
 	for _, overdue := range r.tasks.Overdue(now) {
-		acquired, err := r.leases.Acquire(
-			context.Background(), r.tenantID, "task", overdue.ID,
-			r.instanceID, now, time.Minute,
-		)
-		if err != nil || !acquired {
-			continue // being resolved now; the next sweep looks again
-		}
 		record, expired, err := r.tasks.Expire(context.Background(), r.tenantID, overdue.ID, now)
-		r.leases.Release(context.Background(), r.tenantID, "task", overdue.ID, r.instanceID)
 		if err != nil {
 			slog.Warn("expire task", "task_id", overdue.ID, "error", err)
 			continue
@@ -848,18 +824,6 @@ func (r *Runtime) ResolveTask(taskID, token string, resolution durable.TaskResol
 	if resolution.Decision == durable.TaskCompleted && !json.Valid(resolution.Data) {
 		return TaskSnapshot{}, fmt.Errorf("%w: completed task data must be valid JSON", errs.Invalid)
 	}
-	acquired, err := r.leases.Acquire(
-		context.Background(), r.tenantID, "task", taskID,
-		r.instanceID, r.now().UTC(), time.Minute,
-	)
-	if err != nil {
-		return TaskSnapshot{}, err
-	}
-	if !acquired {
-		return TaskSnapshot{}, fmt.Errorf("%w: task is being resolved", errs.Conflict)
-	}
-	defer r.leases.Release(context.Background(), r.tenantID, "task", taskID, r.instanceID)
-
 	sum := sha256.Sum256([]byte(token))
 	record, err := r.tasks.Resolve(
 		context.Background(), r.tenantID, taskID, sum[:], resolution, r.now().UTC(),

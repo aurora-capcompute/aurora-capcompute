@@ -56,34 +56,11 @@ func (finalDispatcher) Dispatch(_ context.Context, _ ProcessContext, syscall sys
 }
 
 type runtimeStore struct {
-	log    *memLog
-	mu     sync.Mutex
-	leases map[string]string
+	log *memLog
 }
 
 func newRuntimeStore() *runtimeStore {
-	return &runtimeStore{log: newMemLog(), leases: make(map[string]string)}
-}
-
-func (s *runtimeStore) Acquire(_ context.Context, tenant, kind, resource, holder string, _ time.Time, _ time.Duration) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	key := tenant + "/" + kind + "/" + resource
-	if current := s.leases[key]; current != "" && current != holder {
-		return false, nil
-	}
-	s.leases[key] = holder
-	return true, nil
-}
-
-func (s *runtimeStore) Release(_ context.Context, tenant, kind, resource, holder string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	key := tenant + "/" + kind + "/" + resource
-	if s.leases[key] == holder {
-		delete(s.leases, key)
-	}
-	return nil
+	return &runtimeStore{log: newMemLog()}
 }
 
 // seed appends proc.state events so the runtime folds them on restore.
@@ -122,8 +99,7 @@ func TestNewRuntimeRequiresImplementationDependencies(t *testing.T) {
 	store := newRuntimeStore()
 	dispatchers := &runtimeDispatchers{}
 	base := Config{
-		Dispatchers: dispatchers, Log: store.log,
-		Leases: store, TaskSecret: []byte("secret"),
+		Dispatchers: dispatchers, Log: store.log, TaskSecret: []byte("secret"),
 	}
 	tests := []struct {
 		name   string
@@ -131,7 +107,6 @@ func TestNewRuntimeRequiresImplementationDependencies(t *testing.T) {
 	}{
 		{name: "dispatcher provider", mutate: func(config *Config) { config.Dispatchers = nil }},
 		{name: "event log", mutate: func(config *Config) { config.Log = nil }},
-		{name: "leases", mutate: func(config *Config) { config.Leases = nil }},
 		{name: "task secret", mutate: func(config *Config) { config.TaskSecret = nil }},
 	}
 	for _, test := range tests {
@@ -165,7 +140,6 @@ func TestRuntimePassesManifestToDispatcherProvider(t *testing.T) {
 	runtime, err := NewRuntime(context.Background(), Config{
 		Dispatchers: dispatchers,
 		Log:         store.log,
-		Leases:      store,
 		TaskSecret:  []byte("stable-secret"),
 		IDSource:    sequentialIDs(),
 	})
@@ -227,7 +201,6 @@ func TestRuntimeProgramLifecycle(t *testing.T) {
 	runtime, err := NewRuntime(context.Background(), Config{
 		Dispatchers: dispatchers,
 		Log:         store.log,
-		Leases:      store,
 		TaskSecret:  []byte("stable-secret"),
 		IDSource:    sequentialIDs(),
 	})
@@ -316,7 +289,6 @@ func TestRemoveProgramEjectsLiveProcesses(t *testing.T) {
 	runtime, err := NewRuntime(context.Background(), Config{
 		Dispatchers: approvalDispatchers{},
 		Log:         store.log,
-		Leases:      store,
 		TaskSecret:  []byte("stable-secret"),
 		IDSource:    sequentialIDs(),
 	})
@@ -474,7 +446,6 @@ func TestAddProgramRejectsInvalidWasm(t *testing.T) {
 	runtime, err := NewRuntime(context.Background(), Config{
 		Dispatchers: &runtimeDispatchers{},
 		Log:         store.log,
-		Leases:      store,
 		TaskSecret:  []byte("stable-secret"),
 	})
 	if err != nil {
@@ -509,7 +480,8 @@ func waitForStatus(t *testing.T, runtime *Runtime, processID string, want durabl
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("run did not reach %s", want)
+	last, _ := runtime.GetProcess(processID)
+	t.Fatalf("run did not reach %s (status %s, error %q)", want, last.Status, last.Error)
 	return ProcessSnapshot{}
 }
 
@@ -679,7 +651,6 @@ func TestRuntimeApprovalCycle(t *testing.T) {
 	runtime, err := NewRuntime(context.Background(), Config{
 		Dispatchers: approvalDispatchers{},
 		Log:         store.log,
-		Leases:      store,
 		TaskSecret:  []byte("stable-secret"),
 		IDSource:    sequentialIDs(),
 	})
@@ -756,7 +727,6 @@ func TestUnansweredApprovalExpires(t *testing.T) {
 	runtime, err := NewRuntime(context.Background(), Config{
 		Dispatchers: approvalDispatchers{},
 		Log:         store.log,
-		Leases:      store,
 		TaskSecret:  []byte("stable-secret"),
 		TaskTTL:     time.Hour,
 		IDSource:    sequentialIDs(),
@@ -908,7 +878,6 @@ func TestRuntimeHardRetryForksFromBeginning(t *testing.T) {
 	runtime, err := NewRuntime(context.Background(), Config{
 		Dispatchers: &failThenSucceedDispatchers{},
 		Log:         store.log,
-		Leases:      store,
 		TaskSecret:  []byte("stable-secret"),
 		IDSource:    sequentialIDs(),
 	})
@@ -1023,7 +992,6 @@ func newEffectsRuntime(t *testing.T, disp *effectsDispatcher) *Runtime {
 	runtime, err := NewRuntime(context.Background(), Config{
 		Dispatchers: effectsDispatchers{d: disp},
 		Log:         store.log,
-		Leases:      store,
 		TaskSecret:  []byte("stable-secret"),
 		IDSource:    sequentialIDs(),
 	})

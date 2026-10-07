@@ -24,7 +24,6 @@ func deadlineRuntime(t *testing.T, deadline time.Duration) (*Runtime, *blockingD
 	runtime, err := NewRuntime(context.Background(), Config{
 		Dispatchers: dispatchers,
 		Log:         store.log,
-		Leases:      store,
 		TaskSecret:  []byte("stable-secret"),
 		IDSource:    sequentialIDs(),
 	})
