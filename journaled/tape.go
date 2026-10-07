@@ -43,7 +43,7 @@ type Header struct {
 
 // Record is one journal entry: a fixed envelope — the store's index keys —
 // plus an opaque payload. A datum lives in the envelope or in the payload,
-// never both. Scope columns above the process (tenant, session) belong to the
+// never both. Scope columns above the process (the session) belong to the
 // store that owns the Journal, keyed by Header.Process.
 type Record struct {
 	// Envelope.

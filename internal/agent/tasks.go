@@ -20,26 +20,20 @@ type eventTaskStore struct {
 	now func() time.Time
 
 	mu      sync.Mutex
-	records map[string]durable.TaskRecord // keyed by tenant/taskID
+	records map[string]durable.TaskRecord // keyed by task id
 }
 
 func newEventTaskStore(log eventlog.Log, now func() time.Time) *eventTaskStore {
 	return &eventTaskStore{log: log, now: now, records: make(map[string]durable.TaskRecord)}
 }
 
-func taskKey(tenantID, taskID string) string { return tenantID + "/" + taskID }
-
 // seed installs records folded from the log during restore.
 func (s *eventTaskStore) seed(records []durable.TaskRecord) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, record := range records {
-		s.records[taskKey(record.Scope.TenantID, record.ID)] = cloneTaskRecord(record)
+		s.records[record.ID] = cloneTaskRecord(record)
 	}
-}
-
-func (s *eventTaskStore) scope(record durable.TaskRecord) eventlog.Scope {
-	return eventlog.Scope{TenantID: record.Scope.TenantID, SessionID: record.Scope.SessionID}
 }
 
 func (s *eventTaskStore) Find(_ context.Context, scope durable.TaskScope, position int, callHash string) (durable.TaskRecord, bool, error) {
@@ -55,7 +49,7 @@ func (s *eventTaskStore) Find(_ context.Context, scope durable.TaskScope, positi
 
 func (s *eventTaskStore) Create(ctx context.Context, record durable.TaskRecord) error {
 	s.mu.Lock()
-	key := taskKey(record.Scope.TenantID, record.ID)
+	key := record.ID
 	if _, exists := s.records[key]; exists {
 		s.mu.Unlock()
 		return durable.ErrTaskConflict
@@ -65,7 +59,7 @@ func (s *eventTaskStore) Create(ctx context.Context, record durable.TaskRecord) 
 		s.mu.Unlock()
 		return err
 	}
-	if _, err := s.log.Append(ctx, s.scope(record), ev); err != nil {
+	if _, err := s.log.Append(ctx, record.Scope.SessionID, ev); err != nil {
 		s.mu.Unlock()
 		return err
 	}
@@ -74,32 +68,23 @@ func (s *eventTaskStore) Create(ctx context.Context, record durable.TaskRecord) 
 	return nil
 }
 
-func (s *eventTaskStore) Get(_ context.Context, tenantID, taskID string) (durable.TaskRecord, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	record, ok := s.records[taskKey(tenantID, taskID)]
-	if !ok {
-		return durable.TaskRecord{}, durable.ErrTaskNotFound
-	}
-	return cloneTaskRecord(record), nil
-}
-
-func (s *eventTaskStore) List(_ context.Context, tenantID, processID string) ([]durable.TaskRecord, error) {
+// List returns a process's tasks, oldest first.
+func (s *eventTaskStore) List(processID string) []durable.TaskRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out []durable.TaskRecord
 	for _, record := range s.records {
-		if record.Scope.TenantID == tenantID && (processID == "" || record.Scope.ProcessID == processID) {
+		if record.Scope.ProcessID == processID {
 			out = append(out, cloneTaskRecord(record))
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
-	return out, nil
+	return out
 }
 
-func (s *eventTaskStore) Resolve(ctx context.Context, tenantID, taskID string, tokenHash []byte, resolution durable.TaskResolution, now time.Time) (durable.TaskRecord, error) {
+func (s *eventTaskStore) Resolve(ctx context.Context, taskID string, tokenHash []byte, resolution durable.TaskResolution, now time.Time) (durable.TaskRecord, error) {
 	s.mu.Lock()
-	key := taskKey(tenantID, taskID)
+	key := taskID
 	record, ok := s.records[key]
 	if !ok {
 		s.mu.Unlock()
@@ -134,7 +119,7 @@ func (s *eventTaskStore) Resolve(ctx context.Context, tenantID, taskID string, t
 		s.mu.Unlock()
 		return durable.TaskRecord{}, err
 	}
-	if _, err := s.log.Append(ctx, s.scope(record), ev); err != nil {
+	if _, err := s.log.Append(ctx, record.Scope.SessionID, ev); err != nil {
 		s.mu.Unlock()
 		return durable.TaskRecord{}, err
 	}
@@ -159,10 +144,10 @@ func (s *eventTaskStore) Due(now time.Time) []string {
 // Settle resolves one due task the way its deadline decides: a timer fires, and
 // anything else expires. A task that is no longer pending — a resolution got
 // there first — is left alone.
-func (s *eventTaskStore) Settle(ctx context.Context, tenantID, taskID string, now time.Time) error {
+func (s *eventTaskStore) Settle(ctx context.Context, taskID string, now time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	key := taskKey(tenantID, taskID)
+	key := taskID
 	record, ok := s.records[key]
 	if !ok {
 		return durable.ErrTaskNotFound
@@ -181,7 +166,7 @@ func (s *eventTaskStore) Settle(ctx context.Context, tenantID, taskID string, no
 	if err != nil {
 		return err
 	}
-	if _, err := s.log.Append(ctx, s.scope(record), ev); err != nil {
+	if _, err := s.log.Append(ctx, record.Scope.SessionID, ev); err != nil {
 		return err
 	}
 	s.records[key] = cloneTaskRecord(record)
@@ -200,9 +185,9 @@ func due(record durable.TaskRecord, now time.Time) bool {
 	return record.ExpiresAt != nil && !now.Before(*record.ExpiresAt)
 }
 
-func (s *eventTaskStore) MarkExecuted(ctx context.Context, tenantID, taskID string, _ time.Time) error {
+func (s *eventTaskStore) MarkExecuted(ctx context.Context, taskID string, _ time.Time) error {
 	s.mu.Lock()
-	key := taskKey(tenantID, taskID)
+	key := taskID
 	record, ok := s.records[key]
 	if !ok {
 		s.mu.Unlock()
@@ -214,7 +199,7 @@ func (s *eventTaskStore) MarkExecuted(ctx context.Context, tenantID, taskID stri
 		s.mu.Unlock()
 		return err
 	}
-	if _, err := s.log.Append(ctx, s.scope(record), ev); err != nil {
+	if _, err := s.log.Append(ctx, record.Scope.SessionID, ev); err != nil {
 		s.mu.Unlock()
 		return err
 	}

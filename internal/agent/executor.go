@@ -80,11 +80,10 @@ func (r *Runtime) execute(processID string) {
 		}
 		r.finish(processID, durable.ProcessCompleted, answer, nil)
 	case capcompute.ResumeYielded:
-		tasks, taskErr := r.tasks.List(context.Background(), r.tenantID, processID)
-		if taskErr == nil && hasPendingTask(tasks) {
+		if hasPendingTask(r.tasks.List(processID)) {
 			r.finish(processID, durable.ProcessWaitingTask, "", nil)
 		} else {
-			r.finish(processID, durable.ProcessYielded, "", taskErr)
+			r.finish(processID, durable.ProcessYielded, "", nil)
 		}
 	case capcompute.ResumeStopped:
 		r.mu.Lock()

@@ -5,7 +5,6 @@ package agent
 // helpers (titles, visible capabilities, defensive copies) they lean on.
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"time"
@@ -31,7 +30,6 @@ func (r *Runtime) sessionSummaryLocked(session *sessionState) SessionSummary {
 // storedSessionLocked builds the durable identity a session.state event carries.
 func (r *Runtime) storedSessionLocked(session *sessionState) durable.Session {
 	return durable.Session{
-		TenantID:  r.tenantID,
 		ID:        session.id,
 		Name:      session.name,
 		CreatedAt: session.createdAt,
@@ -47,7 +45,7 @@ func (r *Runtime) sessionSnapshotLocked(session *sessionState) SessionSnapshot {
 		if proc == nil {
 			continue
 		}
-		records, _ := r.tasks.List(context.Background(), r.tenantID, proc.id)
+		records := r.tasks.List(proc.id)
 		tasks := make([]TaskSnapshot, 0, len(records))
 		for _, record := range records {
 			tasks = append(tasks, r.taskSnapshot(record))
@@ -103,7 +101,7 @@ func (r *Runtime) taskSnapshot(record durable.TaskRecord) TaskSnapshot {
 		CreatedAt:       record.CreatedAt,
 		ExpiresAt:       copyTime(record.ExpiresAt),
 		ResolvedAt:      copyTime(record.ResolvedAt),
-		ResolutionToken: durable.TaskToken(r.taskSecret, record.Scope.TenantID, record.ID),
+		ResolutionToken: durable.TaskToken(r.taskSecret, record.ID),
 	}
 }
 
@@ -140,7 +138,6 @@ func visibleCapabilities(caps []capability.Descriptor) []capability.Descriptor {
 
 func (r *Runtime) processContextLocked(proc *processState) ProcessContext {
 	return ProcessContext{
-		TenantID:  r.tenantID,
 		SessionID: proc.sessionID,
 		ProcessID: proc.id,
 		Revision:  proc.revision,
@@ -153,7 +150,6 @@ func (r *Runtime) storedProcessLocked(proc *processState) durable.Process {
 		tags = durable.CloneTags(session.tags)
 	}
 	return durable.Process{
-		TenantID:      r.tenantID,
 		ID:            proc.id,
 		SessionID:     proc.sessionID,
 		Revision:      proc.revision,

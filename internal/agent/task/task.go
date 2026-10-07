@@ -103,7 +103,7 @@ func (d *Dispatcher[K]) resume(ctx context.Context, cred K, record durable.TaskR
 	case durable.TaskApproved:
 		result, err := d.Next.Dispatch(ctx, cred, record.Syscall, record.Resolution)
 		if err == nil && result.Status() != sys.StatusYield {
-			_ = d.Store.MarkExecuted(ctx, record.Scope.TenantID, record.ID, d.now())
+			_ = d.Store.MarkExecuted(ctx, record.ID, d.now())
 		}
 		return result, err
 	case durable.TaskCompleted:

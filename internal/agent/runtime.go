@@ -178,7 +178,6 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		cancel:          cancel,
 		taints:          monitor.NewTaints[processKey](),
 		log:             config.Log,
-		tenantID:        strings.TrimSpace(config.TenantID),
 		sessions:        make(map[string]*sessionState),
 		processes:       make(map[string]*processState),
 		idSource:        config.IDSource,
@@ -189,9 +188,6 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		dispatchers:     config.Dispatchers,
 	}
 	runtime.memoryPages, runtime.quantumCeiling = memoryPages, quantumCeiling
-	if runtime.tenantID == "" {
-		runtime.tenantID = DefaultTenantID
-	}
 	if runtime.idSource == nil {
 		runtime.idSource = randomID
 	}
@@ -263,7 +259,7 @@ func (r *Runtime) sweepLoop() {
 func (r *Runtime) sweepTasks() {
 	now := r.now().UTC()
 	for _, taskID := range r.tasks.Due(now) {
-		if err := r.tasks.Settle(context.Background(), r.tenantID, taskID, now); err != nil {
+		if err := r.tasks.Settle(context.Background(), taskID, now); err != nil {
 			slog.Warn("settle task", "task_id", taskID, "error", err)
 		}
 	}
@@ -287,8 +283,7 @@ func (r *Runtime) parkedOnSettledTasks() []string {
 	r.mu.Unlock()
 	var settled []string
 	for _, id := range waiting {
-		records, err := r.tasks.List(context.Background(), r.tenantID, id)
-		if err == nil && !hasPendingTask(records) {
+		if !hasPendingTask(r.tasks.List(id)) {
 			settled = append(settled, id)
 		}
 	}
@@ -546,8 +541,8 @@ func (r *Runtime) unsettled(processIDs []string) []string {
 	return pending
 }
 
-// CreateSession opens a session under the tenant. An explicit name is the
-// session's handle (unique per tenant; empty means unnamed — its id is then the
+// CreateSession opens a session. An explicit name is the session's handle
+// (unique; empty means unnamed — its id is then the
 // handle). The session's identity is persisted immediately as a session.state
 // event, so a named session survives a restart even before it runs anything.
 func (r *Runtime) CreateSession(name string, tags map[string]string) (SessionSnapshot, error) {
@@ -576,7 +571,7 @@ func (r *Runtime) CreateSession(name string, tags map[string]string) (SessionSna
 }
 
 // RenameSession changes a session's explicit handle. The new name must be free
-// within the tenant; empty clears it (the id becomes the handle again).
+// empty clears it (the id becomes the handle again).
 func (r *Runtime) RenameSession(sessionID, name string) (SessionSnapshot, error) {
 	name = strings.TrimSpace(name)
 	r.mu.Lock()
@@ -602,7 +597,7 @@ func (r *Runtime) RenameSession(sessionID, name string) (SessionSnapshot, error)
 }
 
 // checkSessionNameFreeLocked rejects a name already held by another session of
-// the tenant. An empty name is always free (unnamed sessions coexist).
+// another session. An empty name is always free (unnamed sessions coexist).
 func (r *Runtime) checkSessionNameFreeLocked(name, exceptID string) error {
 	if name == "" {
 		return nil
@@ -757,7 +752,7 @@ func (r *Runtime) ResolveTask(taskID, token string, resolution durable.TaskResol
 	}
 	sum := sha256.Sum256([]byte(token))
 	record, err := r.tasks.Resolve(
-		context.Background(), r.tenantID, taskID, sum[:], resolution, r.now().UTC(),
+		context.Background(), taskID, sum[:], resolution, r.now().UTC(),
 	)
 	if err != nil {
 		return TaskSnapshot{}, err
@@ -923,7 +918,7 @@ func (r *Runtime) forkJournalLocked(proc *processState, forkOffset int) {
 	proc.forkOffset = forkOffset
 	proc.lastFailureLength = 0
 	proc.journal = newLogJournal(
-		parent.log, parent.scope, parent.proc, proc.revision,
+		parent.log, parent.session, parent.proc, proc.revision,
 		parent.history, forkOffset,
 		parent.now,
 	)

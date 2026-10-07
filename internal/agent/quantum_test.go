@@ -37,7 +37,7 @@ func seamRuntime(t *testing.T) *Runtime {
 // that quantum rather than run under whatever bytes are registered now.
 func TestQuantumRefusesAnUnboundProgram(t *testing.T) {
 	runtime := seamRuntime(t)
-	cred := ProcessContext{TenantID: DefaultTenantID, SessionID: "s1", ProcessID: "p1", Revision: 1}
+	cred := ProcessContext{SessionID: "s1", ProcessID: "p1", Revision: 1}
 
 	result := runtime.runQuantum(context.Background(), cred, "unloaded@1", "digest")
 	if result.status != capcompute.ResumeFailed || !errors.Is(result.err, errs.Conflict) {

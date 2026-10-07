@@ -30,7 +30,7 @@ func TestRestoreQuarantinesStaleManifests(t *testing.T) {
 	now := time.Now().UTC().Add(-time.Hour)
 	store.seed(
 		durable.Process{
-			TenantID: "local", ID: "run_old", SessionID: "ses_old", Revision: 1,
+			ID: "run_old", SessionID: "ses_old", Revision: 1,
 			Input: "old work", Status: durable.ProcessFailed,
 			CreatedAt: now, UpdatedAt: now,
 			Manifest: manifest.Manifest{

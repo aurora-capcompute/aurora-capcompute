@@ -3,12 +3,11 @@
 // payload owned by the layer above — so the same primitive backs lifecycle,
 // task, and capability-journal events for one session stream.
 //
-// A stream is one session's ordered history, identified by Scope. The store
-// assigns each appended event a contiguous sequence and serializes appends per
-// stream. One runtime owns a log, so the log needs no optimistic-concurrency
-// guard. State is reconstructed by
-// reading a stream from the beginning and folding its events; there is no
-// in-place mutation and no separate "current row" store.
+// A stream is one session's ordered history. The store assigns each appended
+// event a contiguous sequence and serializes appends per stream. One runtime
+// owns a log, so the log needs no optimistic-concurrency guard. State is
+// reconstructed by reading a stream from the beginning and folding its events;
+// there is no in-place mutation and no separate "current row" store.
 package eventlog
 
 import (
@@ -16,12 +15,6 @@ import (
 	"encoding/json"
 	"time"
 )
-
-// Scope identifies one append-only stream — one session's history.
-type Scope struct {
-	TenantID  string
-	SessionID string
-}
 
 // Event is one immutable record in a stream. Seq is assigned by the log on
 // append (1-based, contiguous per stream). Kind and Data are owned by the domain
@@ -36,16 +29,17 @@ type Event struct {
 	Data json.RawMessage `json:"data,omitempty"`
 }
 
-// Log is the append-only event store. Implementations must make Append atomic
-// and totally ordered per stream.
+// Log is the append-only event store: one stream per session. Implementations
+// must make Append atomic and totally ordered per stream.
 type Log interface {
-	// Append atomically writes events to a stream, assigning each a contiguous
-	// Seq, and returns the new head. Appends to one stream are serialized.
-	Append(ctx context.Context, scope Scope, events ...Event) (head uint64, err error)
+	// Append atomically writes events to a session's stream, assigning each a
+	// contiguous Seq, and returns the new head. Appends to one stream are
+	// serialized.
+	Append(ctx context.Context, sessionID string, events ...Event) (head uint64, err error)
 	// Read returns the stream's events with Seq > after, in order. after == 0
 	// reads from the beginning.
-	Read(ctx context.Context, scope Scope, after uint64) ([]Event, error)
-	// Streams lists the scopes that have at least one event for a tenant, so a
-	// runtime can enumerate sessions to fold on restore.
-	Streams(ctx context.Context, tenantID string) ([]Scope, error)
+	Read(ctx context.Context, sessionID string, after uint64) ([]Event, error)
+	// Sessions lists the sessions that have at least one event, so a runtime
+	// can enumerate the streams to fold on restore.
+	Sessions(ctx context.Context) ([]string, error)
 }

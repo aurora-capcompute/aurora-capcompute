@@ -8,13 +8,7 @@ import (
 	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
 )
-
-// scope returns the event stream key for a session.
-func (r *Runtime) scope(sessionID string) eventlog.Scope {
-	return eventlog.Scope{TenantID: r.tenantID, SessionID: sessionID}
-}
 
 func (r *Runtime) journalNow() time.Time { return r.now().UTC() }
 
@@ -38,7 +32,7 @@ func (r *Runtime) appendProcess(proc *processState) error {
 	if err != nil {
 		return err
 	}
-	_, err = r.log.Append(context.Background(), r.scope(proc.sessionID), ev)
+	_, err = r.log.Append(context.Background(), proc.sessionID, ev)
 	return err
 }
 
@@ -47,11 +41,11 @@ func (r *Runtime) appendSession(session *sessionState) error {
 	if err != nil {
 		return err
 	}
-	_, err = r.log.Append(context.Background(), r.scope(session.id), ev)
+	_, err = r.log.Append(context.Background(), session.id, ev)
 	return err
 }
 
 func (r *Runtime) newJournal(proc *processState, history *processHistory, forkOffset int) *logJournal {
-	return newLogJournal(r.log, r.scope(proc.sessionID), proc.id, proc.revision,
+	return newLogJournal(r.log, proc.sessionID, proc.id, proc.revision,
 		history, forkOffset, r.journalNow)
 }

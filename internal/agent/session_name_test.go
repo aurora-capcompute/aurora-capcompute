@@ -22,7 +22,7 @@ func bootSessionRuntime(t *testing.T, store *runtimeStore) *Runtime {
 	return runtime
 }
 
-// A session's explicit name is its handle: unique per tenant, renamable, and an
+// A session's explicit name is its handle: unique, renamable, and an
 // empty name is always allowed (the id is then the handle, and unnamed sessions
 // coexist).
 func TestSessionNameCreateRenameUniqueness(t *testing.T) {

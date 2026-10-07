@@ -35,8 +35,7 @@ const (
 // Session is a session's durable state, derived from the process projection
 // and folded back into memory on restore.
 type Session struct {
-	TenantID string
-	ID       string
+	ID string
 	// Name is the session's explicit, renamable handle (empty if unnamed). It is
 	// carried by session.state events, not derived from the process projection.
 	Name            string
@@ -54,21 +53,20 @@ type Session struct {
 // Process is a process's durable state, carried by process.state events and folded
 // back into memory on restore.
 type Process struct {
-	TenantID         string
-	ID               string
-	SessionID        string
-	Revision         uint64
-	Input            string
-	Status           ProcessStatus
-	Attempt          int
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
-	StartedAt        *time.Time
-	CompletedAt      *time.Time
-	Answer           string
-	Error            string
-	Manifest         manifest.Manifest
-	ProgramDigest    string
+	ID            string
+	SessionID     string
+	Revision      uint64
+	Input         string
+	Status        ProcessStatus
+	Attempt       int
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+	StartedAt     *time.Time
+	CompletedAt   *time.Time
+	Answer        string
+	Error         string
+	Manifest      manifest.Manifest
+	ProgramDigest string
 	// HideHistory records that this process's manifest declared history:false
 	// with history:false — its sys.input omits the session history. Persisted so
 	// a restart re-serves the same isolated input.

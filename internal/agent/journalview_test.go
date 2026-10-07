@@ -8,8 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
-
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
@@ -41,7 +39,7 @@ func loadEntries(t *testing.T, j *logJournal) []string {
 
 func TestLogJournalLinearRoundTrip(t *testing.T) {
 	log := newMemLog()
-	scope := eventlog.Scope{TenantID: "t", SessionID: "th"}
+	scope := "th"
 	now := func() time.Time { return time.Unix(0, 0).UTC() }
 	j := newLogJournal(log, scope, "proc1", 1, newProcessHistory(), 0, now)
 
@@ -83,7 +81,7 @@ func TestLogJournalLinearRoundTrip(t *testing.T) {
 // replay divergence.
 func TestLogJournalRoundTripsHTMLCharactersVerbatim(t *testing.T) {
 	log := newMemLog()
-	scope := eventlog.Scope{TenantID: "t", SessionID: "th"}
+	scope := "th"
 	now := func() time.Time { return time.Unix(0, 0).UTC() }
 	j := newLogJournal(log, scope, "proc1", 1, newProcessHistory(), 0, now)
 
@@ -119,7 +117,7 @@ func TestLogJournalRoundTripsHTMLCharactersVerbatim(t *testing.T) {
 
 func TestLogJournalForkSharesPrefixThenDiverges(t *testing.T) {
 	log := newMemLog()
-	scope := eventlog.Scope{TenantID: "t", SessionID: "th"}
+	scope := "th"
 	now := func() time.Time { return time.Unix(0, 0).UTC() }
 	history := newProcessHistory()
 
@@ -171,7 +169,7 @@ func TestLogJournalForkSharesPrefixThenDiverges(t *testing.T) {
 // helpers must be indistinguishable: both well-formed, both verifiable.
 func TestLogJournalBacksTheKernelTape(t *testing.T) {
 	log := newMemLog()
-	scope := eventlog.Scope{TenantID: "t", SessionID: "th"}
+	scope := "th"
 	now := func() time.Time { return time.Unix(0, 0).UTC() }
 	j := newLogJournal(log, scope, "proc1", 1, newProcessHistory(), 0, now)
 
@@ -215,7 +213,7 @@ func TestLogJournalBacksTheKernelTape(t *testing.T) {
 // the same position.
 func TestProcessHistoryEntriesPairWithinTheirRevision(t *testing.T) {
 	log := newMemLog()
-	scope := eventlog.Scope{TenantID: "t", SessionID: "th"}
+	scope := "th"
 	now := func() time.Time { return time.Unix(0, 0).UTC() }
 	history := newProcessHistory()
 	base := newLogJournal(log, scope, "proc1", 1, history, 0, now)

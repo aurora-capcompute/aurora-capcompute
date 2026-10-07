@@ -59,7 +59,7 @@ func (stubStore) List(context.Context, string, string) ([]durable.TaskRecord, er
 func (stubStore) Resolve(context.Context, string, string, []byte, durable.TaskResolution, time.Time) (durable.TaskRecord, error) {
 	return durable.TaskRecord{}, nil
 }
-func (stubStore) MarkExecuted(context.Context, string, string, time.Time) error { return nil }
+func (stubStore) MarkExecuted(context.Context, string, time.Time) error { return nil }
 
 // integrityEnv is the application half of the seam, stubbed: the journal and
 // header under test, and nothing else doing any work.

@@ -62,7 +62,6 @@ type DispatcherProvider = agent.DispatcherProvider
 
 type EventLog = eventlog.Log
 type LogEvent = eventlog.Event
-type LogScope = eventlog.Scope
 type ProcessContext = agent.ProcessContext
 
 // Task types
@@ -98,7 +97,6 @@ var (
 // Constants
 
 const (
-	DefaultTenantID   = agent.DefaultTenantID
 	ManifestVersion   = manifest.Version
 	TimerSyscall      = manifest.TimerSyscall
 	DeclassifySyscall = manifest.DeclassifySyscall

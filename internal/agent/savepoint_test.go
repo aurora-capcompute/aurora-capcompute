@@ -4,8 +4,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
-
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
@@ -15,7 +13,7 @@ import (
 func buildJournal(t *testing.T, steps ...step) *logJournal {
 	t.Helper()
 	log := newMemLog()
-	scope := eventlog.Scope{TenantID: "t", SessionID: "th"}
+	scope := "th"
 	now := func() time.Time { return time.Unix(0, 0).UTC() }
 	j := newLogJournal(log, scope, "proc1", 1, newProcessHistory(), 0, now)
 	for _, s := range steps {

@@ -171,11 +171,11 @@ func copyRecord(rec journaled.Record) journaled.Record {
 // A record appended at forkOffset continues the shared prefix, whose tail Load
 // serves verbatim.
 type logJournal struct {
-	log   eventlog.Log
-	scope eventlog.Scope
-	proc  string
-	rev   uint64
-	now   func() time.Time
+	log     eventlog.Log
+	session string
+	proc    string
+	rev     uint64
+	now     func() time.Time
 
 	history    *processHistory
 	forkOffset int // positions [0, forkOffset) come from history
@@ -186,7 +186,7 @@ type logJournal struct {
 
 func newLogJournal(
 	log eventlog.Log,
-	scope eventlog.Scope,
+	session string,
 	proc string,
 	rev uint64,
 	history *processHistory,
@@ -194,7 +194,7 @@ func newLogJournal(
 	now func() time.Time,
 ) *logJournal {
 	return &logJournal{
-		log: log, scope: scope, proc: proc, rev: rev,
+		log: log, session: session, proc: proc, rev: rev,
 		history: history, forkOffset: forkOffset,
 		now: now,
 	}
@@ -224,7 +224,7 @@ func (j *logJournal) SetHeader(header journaled.Header) error {
 	if err != nil {
 		return err
 	}
-	if _, err := j.log.Append(context.Background(), j.scope, ev); err != nil {
+	if _, err := j.log.Append(context.Background(), j.session, ev); err != nil {
 		return err
 	}
 	j.history.setHeader(j.rev, header)
@@ -274,7 +274,7 @@ func (j *logJournal) Append(rec journaled.Record) error {
 		j.mu.Unlock()
 		return err
 	}
-	if _, err := j.log.Append(context.Background(), j.scope, ev); err != nil {
+	if _, err := j.log.Append(context.Background(), j.session, ev); err != nil {
 		j.mu.Unlock()
 		return err
 	}
@@ -373,7 +373,7 @@ func encodeOutcome(result sys.SyscallResult) JournalOutcome {
 func foldJournals(
 	events []eventlog.Event,
 	log eventlog.Log,
-	scope eventlog.Scope,
+	session string,
 	now func() time.Time,
 ) (map[string]map[uint64]*logJournal, map[string]*processHistory, error) {
 	histories := map[string]*processHistory{}
@@ -417,7 +417,7 @@ func foldJournals(
 			if len(records) > 0 {
 				forkOffset = records[0].Position
 			}
-			j := newLogJournal(log, scope, proc, rev, history, forkOffset, now)
+			j := newLogJournal(log, session, proc, rev, history, forkOffset, now)
 			j.records = append(j.records, records...)
 			result[proc][rev] = j
 		}

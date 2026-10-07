@@ -185,8 +185,8 @@ No env vars, no files, no ports — everything is the injected struct.
 - **Required:** `Dispatchers`, `Log`, `TaskSecret` (non‑empty).
   Programs are not configured: a runtime boots with an empty registry and gains
   programs through `AddProgram` / `RemoveProgram`.
-- **Optional knobs:** `TenantID`, `IDSource`, `Now`, `EventSize`
-  (default 32), `TaskTTL` (24h), `MaxConcurrentProcesses` (16),
+- **Optional knobs:** `IDSource`, `Now`, `TaskTTL` (24h),
+  `MaxConcurrentProcesses` (16),
   `MaxAbortRetries` (10), `NonIdempotentSyscalls`, `ProcessMemoryPages`
   (4096 = 256 MiB), `MaxQuantumDuration` (2 min).
 - **Key constants:** `ManifestVersion = 4`.

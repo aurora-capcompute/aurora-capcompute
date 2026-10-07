@@ -17,8 +17,6 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 )
 
-const DefaultTenantID = "local"
-
 type RetryMode string
 
 const (
@@ -60,7 +58,6 @@ type Config struct {
 	Log         eventlog.Log
 	IDSource    func(prefix string) (string, error)
 	Now         func() time.Time
-	TenantID    string
 	TaskSecret  []byte
 	TaskTTL     time.Duration
 
@@ -112,7 +109,6 @@ type Runtime struct {
 	taints          *monitor.Taints[processKey]
 	log             eventlog.Log
 	tasks           *eventTaskStore
-	tenantID        string
 	sessions        map[string]*sessionState
 	processes       map[string]*processState
 	idSource        func(string) (string, error)
@@ -195,7 +191,6 @@ type processState struct {
 }
 
 type ProcessContext struct {
-	TenantID  string
 	SessionID string
 	ProcessID string
 	Revision  uint64
@@ -208,7 +203,6 @@ func (r ProcessContext) PID() processKey {
 // taskScope is the same credential in the task store's scope shape.
 func (r ProcessContext) taskScope() durable.TaskScope {
 	return durable.TaskScope{
-		TenantID:  r.TenantID,
 		SessionID: r.SessionID,
 		ProcessID: r.ProcessID,
 		Revision:  r.Revision,
@@ -267,7 +261,7 @@ type SessionSummary struct {
 	ID string `json:"id"`
 	// Name is the session's explicit, human-readable handle (set at creation,
 	// renamable). Empty when the session was created without one — its id is
-	// then the handle. Unique per tenant when set.
+	// then the handle. Unique when set.
 	Name            string            `json:"name,omitempty"`
 	Title           string            `json:"title"`
 	CreatedAt       time.Time         `json:"created_at"`

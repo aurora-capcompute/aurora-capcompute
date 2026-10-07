@@ -160,7 +160,7 @@ func Fold(events []eventlog.Event) (Projection, error) {
 
 // deriveSession reconstructs the process-projection half of session
 // metadata; Fold merges the authoritative session.state event over it. It derives:
-//   - identity (ID, TenantID) and Tags from the earliest process — the fallback
+//   - identity (ID) and Tags from the earliest process — the fallback
 //     for pre-session.state streams that carry no session event
 //   - Title from the first process's input, truncated to 60 runes
 //   - CreatedAt is the earliest process's CreatedAt
@@ -184,7 +184,6 @@ func deriveSession(processes map[string]Process) Session {
 	})
 
 	session := Session{
-		TenantID:  ordered[0].TenantID,
 		ID:        ordered[0].SessionID,
 		Title:     SessionTitle(ordered[0].Input),
 		CreatedAt: ordered[0].CreatedAt,

@@ -14,12 +14,12 @@ import (
 
 // Restore: rebuild in-memory state by folding each session's event stream.
 func (r *Runtime) restore(ctx context.Context) error {
-	scopes, err := r.log.Streams(ctx, r.tenantID)
+	sessions, err := r.log.Sessions(ctx)
 	if err != nil {
 		return err
 	}
-	for _, scope := range scopes {
-		events, err := r.log.Read(ctx, scope, 0)
+	for _, sessionID := range sessions {
+		events, err := r.log.Read(ctx, sessionID, 0)
 		if err != nil {
 			return err
 		}
@@ -27,7 +27,7 @@ func (r *Runtime) restore(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		journals, histories, err := foldJournals(events, r.log, scope, r.journalNow)
+		journals, histories, err := foldJournals(events, r.log, sessionID, r.journalNow)
 		if err != nil {
 			return err
 		}

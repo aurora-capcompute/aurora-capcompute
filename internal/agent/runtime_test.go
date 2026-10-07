@@ -19,7 +19,6 @@ import (
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/errs"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 )
 
@@ -69,17 +68,17 @@ func (s *runtimeStore) seed(runs ...durable.Process) {
 	now := time.Now().UTC()
 	for _, r := range runs {
 		ev, _ := durable.ProcessStateEvent(now, r)
-		_, _ = s.log.Append(context.Background(), eventlog.Scope{TenantID: r.TenantID, SessionID: r.SessionID}, ev)
+		_, _ = s.log.Append(context.Background(), r.SessionID, ev)
 	}
 }
 
 // minRev2Index returns the lowest journal record position that has a
 // revision-2 record, or -1 if none.
 func (s *runtimeStore) minRev2Index(processID string) int {
-	streams, _ := s.log.Streams(context.Background(), "local")
+	sessions, _ := s.log.Sessions(context.Background())
 	min := -1
-	for _, scope := range streams {
-		events, _ := s.log.Read(context.Background(), scope, 0)
+	for _, sessionID := range sessions {
+		events, _ := s.log.Read(context.Background(), sessionID, 0)
 		for _, ev := range events {
 			if ev.Kind != evSyscall || ev.Proc != processID || ev.Rev != 2 {
 				continue

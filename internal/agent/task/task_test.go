@@ -49,7 +49,7 @@ func (s *taskStore) Create(_ context.Context, record durable.TaskRecord) error {
 	return nil
 }
 
-func (s *taskStore) Get(_ context.Context, _ string, id string) (durable.TaskRecord, error) {
+func (s *taskStore) Get(_ context.Context, id string) (durable.TaskRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	record, ok := s.records[id]
@@ -59,7 +59,7 @@ func (s *taskStore) Get(_ context.Context, _ string, id string) (durable.TaskRec
 	return record, nil
 }
 
-func (s *taskStore) List(_ context.Context, _ string, processID string) ([]durable.TaskRecord, error) {
+func (s *taskStore) List(_ context.Context, processID string) ([]durable.TaskRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var records []durable.TaskRecord
@@ -71,7 +71,7 @@ func (s *taskStore) List(_ context.Context, _ string, processID string) ([]durab
 	return records, nil
 }
 
-func (s *taskStore) Resolve(_ context.Context, _ string, id string, tokenHash []byte, resolution durable.TaskResolution, now time.Time) (durable.TaskRecord, error) {
+func (s *taskStore) Resolve(_ context.Context, id string, tokenHash []byte, resolution durable.TaskResolution, now time.Time) (durable.TaskRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	record, ok := s.records[id]
@@ -88,7 +88,7 @@ func (s *taskStore) Resolve(_ context.Context, _ string, id string, tokenHash []
 	return record, nil
 }
 
-func (s *taskStore) MarkExecuted(_ context.Context, _ string, id string, _ time.Time) error {
+func (s *taskStore) MarkExecuted(_ context.Context, id string, _ time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	record, ok := s.records[id]
@@ -161,7 +161,7 @@ func TestDispatcherPersistsAndResumesYieldedTask(t *testing.T) {
 	store := newTaskStore()
 	journal := &journal{}
 	next := &approvalDispatcher{}
-	scope := durable.TaskScope{TenantID: "tenant", SessionID: "session", ProcessID: "proc", Revision: 1}
+	scope := durable.TaskScope{SessionID: "session", ProcessID: "proc", Revision: 1}
 	secret := []byte("test-secret")
 	header := journaled.Header{ABI: sys.ABIVersion, Program: "prog", Process: "proc"}
 	build := func() sys.Dispatcher[proc] {
@@ -188,7 +188,7 @@ func TestDispatcherPersistsAndResumesYieldedTask(t *testing.T) {
 	if result.Status() != sys.StatusYield {
 		t.Fatalf("initial status = %s", result.Status())
 	}
-	records, err := store.List(context.Background(), scope.TenantID, scope.ProcessID)
+	records, err := store.List(context.Background(), scope.ProcessID)
 	if err != nil || len(records) != 1 {
 		t.Fatalf("tasks = %+v, err=%v", records, err)
 	}
@@ -200,9 +200,9 @@ func TestDispatcherPersistsAndResumesYieldedTask(t *testing.T) {
 		t.Fatalf("journal length = %d, want 1 (open intent)", journal.Length())
 	}
 
-	token := durable.TaskToken(secret, scope.TenantID, records[0].ID)
+	token := durable.TaskToken(secret, records[0].ID)
 	sum := sha256.Sum256([]byte(token))
-	if _, err := store.Resolve(context.Background(), scope.TenantID, records[0].ID, sum[:], durable.TaskResolution{
+	if _, err := store.Resolve(context.Background(), records[0].ID, sum[:], durable.TaskResolution{
 		Decision: durable.TaskApproved,
 		Actor:    "tester",
 	}, time.Now().UTC()); err != nil {
@@ -248,7 +248,7 @@ func TestTimerTaskHasNoTTL(t *testing.T) {
 		Next:        nextFunc(yield),
 		Store:       store,
 		Journal:     journal,
-		Scope:       func(proc) durable.TaskScope { return durable.TaskScope{TenantID: "t", ProcessID: "p", Revision: 1} },
+		Scope:       func(proc) durable.TaskScope { return durable.TaskScope{ProcessID: "p", Revision: 1} },
 		TokenSecret: []byte("test-secret"),
 		TaskTTL:     time.Hour,
 	}
@@ -258,7 +258,7 @@ func TestTimerTaskHasNoTTL(t *testing.T) {
 			t.Fatalf("dispatch %s: %v", name, err)
 		}
 	}
-	records, _ := store.List(context.Background(), "t", "p")
+	records, _ := store.List(context.Background(), "p")
 	for _, record := range records {
 		switch {
 		case record.Syscall.Name == sys.SyscallTimer && record.ExpiresAt != nil:
@@ -274,7 +274,7 @@ func TestDispatcherDeniedTask(t *testing.T) {
 	store := newTaskStore()
 	journal := &journal{}
 	next := &approvalDispatcher{}
-	scope := durable.TaskScope{TenantID: "tenant", SessionID: "session", ProcessID: "proc", Revision: 1}
+	scope := durable.TaskScope{SessionID: "session", ProcessID: "proc", Revision: 1}
 	secret := []byte("test-secret")
 	header := journaled.Header{ABI: sys.ABIVersion, Program: "prog", Process: "proc"}
 	build := func() sys.Dispatcher[proc] {
@@ -297,10 +297,10 @@ func TestDispatcherDeniedTask(t *testing.T) {
 	if _, err := build().Dispatch(context.Background(), proc{}, call, sys.Authorization{}); err != nil {
 		t.Fatalf("initial dispatch: %v", err)
 	}
-	records, _ := store.List(context.Background(), scope.TenantID, scope.ProcessID)
-	token := durable.TaskToken(secret, scope.TenantID, records[0].ID)
+	records, _ := store.List(context.Background(), scope.ProcessID)
+	token := durable.TaskToken(secret, records[0].ID)
 	sum := sha256.Sum256([]byte(token))
-	if _, err := store.Resolve(context.Background(), scope.TenantID, records[0].ID, sum[:], durable.TaskResolution{
+	if _, err := store.Resolve(context.Background(), records[0].ID, sum[:], durable.TaskResolution{
 		Decision: durable.TaskDenied,
 		Reason:   "not on my watch",
 	}, time.Now().UTC()); err != nil {

@@ -19,7 +19,6 @@ import (
 )
 
 type TaskScope struct {
-	TenantID  string
 	SessionID string
 	ProcessID string
 	Revision  uint64
@@ -58,10 +57,7 @@ type TaskRecord struct {
 type TaskStore interface {
 	Find(context.Context, TaskScope, int, string) (TaskRecord, bool, error)
 	Create(context.Context, TaskRecord) error
-	Get(context.Context, string, string) (TaskRecord, error)
-	List(context.Context, string, string) ([]TaskRecord, error)
-	Resolve(context.Context, string, string, []byte, TaskResolution, time.Time) (TaskRecord, error)
-	MarkExecuted(context.Context, string, string, time.Time) error
+	MarkExecuted(context.Context, string, time.Time) error
 }
 
 var (
@@ -71,10 +67,8 @@ var (
 	ErrTaskUnauthorized = errors.New("invalid task token")
 )
 
-func TaskToken(secret []byte, tenantID, taskID string) string {
+func TaskToken(secret []byte, taskID string) string {
 	mac := hmac.New(sha256.New, secret)
-	_, _ = mac.Write([]byte(tenantID))
-	_, _ = mac.Write([]byte{0})
 	_, _ = mac.Write([]byte(taskID))
 	return hex.EncodeToString(mac.Sum(nil))
 }
@@ -84,6 +78,6 @@ func TaskToken(secret []byte, tenantID, taskID string) string {
 // ever persisted; the bearer token itself is recomputed on demand from the same
 // inputs.
 func StampTaskToken(record *TaskRecord, secret []byte) {
-	sum := sha256.Sum256([]byte(TaskToken(secret, record.Scope.TenantID, record.ID)))
+	sum := sha256.Sum256([]byte(TaskToken(secret, record.ID)))
 	record.TokenHash = sum[:]
 }
