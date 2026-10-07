@@ -130,7 +130,7 @@ func (d driver) DispatchCall(_ context.Context, syscall sys.Syscall, _ sys.Autho
 func Chain(world *World) sys.Dispatcher[durable.ProcessContext] {
 	table := Table(world.Effects)
 	// Fresh Taints per boot: a crash loses host memory.
-	return monitor.Wrap(monitor.NewTaints[durable.ProcessContext](), journaled.NewTape(world.Journal), table, nil, capability.NewDispatcher[durable.ProcessContext](table))
+	return monitor.Wrap(monitor.NewTaints[durable.ProcessContext](), journaled.NewTape(world.Journal), table, capability.NewDispatcher[durable.ProcessContext](table))
 }
 
 // Run boots a fresh host process over the surviving world and drives the

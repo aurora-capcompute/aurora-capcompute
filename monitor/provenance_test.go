@@ -136,7 +136,7 @@ func TestFlowTaintSurvivesCrashReplay(t *testing.T) {
 		t.Helper()
 		tape := journaled.NewTape(journal)
 		flow, below := stamped(t, table, NewTaints[testCred]())
-		return flow.Guard(replay.NewDispatcher(tape, below, nil))
+		return flow.Guard(replay.NewDispatcher(tape, below))
 	}
 
 	first := newChain(t)
@@ -176,7 +176,7 @@ func TestDeclassifySyscallLifecycle(t *testing.T) {
 		tape := journaled.NewTape(journal)
 		flow := NewFlow(NewTaints[testCred](), table)
 		below := flow.Stamp(NewDeclassifier(capability.NewDispatcher[testCred](table)))
-		return flow.Guard(replay.NewDispatcher(tape, below, nil))
+		return flow.Guard(replay.NewDispatcher(tape, below))
 	}
 	declassify := sys.Syscall{
 		Abi:  sys.ABIVersion,

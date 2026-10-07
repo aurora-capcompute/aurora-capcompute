@@ -76,10 +76,6 @@ type Process struct {
 	Error         string
 	Manifest      manifest.Manifest
 	ProgramDigest string
-	// HideHistory records that this process's manifest declared history:false
-	// with history:false — its sys.input omits the session history. Persisted so
-	// a restart re-serves the same isolated input.
-	HideHistory bool `json:",omitempty"`
 	// Labels is the run's final taint, persisted so the session-history entry this
 	// process contributes is rebuilt with its provenance on restore — the
 	// cross-run flow policy survives a restart.

@@ -152,7 +152,6 @@ func (r *Runtime) storedProcessLocked(proc *processState) durable.Process {
 		Error:         proc.err,
 		Manifest:      proc.manifest.Clone(),
 		ProgramDigest: proc.digest,
-		HideHistory:   proc.hideHistory,
 		Labels:        append([]string(nil), proc.labels...),
 		ForkOffset:    proc.forkOffset,
 		AbortRetries:  proc.abortRetries,

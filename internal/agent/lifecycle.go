@@ -65,7 +65,7 @@ func newLifecycleDispatcher(
 		{Name: sys.SyscallOutput, Description: "record this process's final answer on the journal", Hidden: true},
 		{Name: sys.SyscallAbort, Description: "abandon the open section and re-run it from its sys.begin", Hidden: true},
 	} {
-		if err := table.ReserveMissing(descriptor); err != nil {
+		if err := table.Reserve(descriptor); err != nil {
 			return nil, err
 		}
 	}
@@ -76,12 +76,6 @@ func newLifecycleDispatcher(
 	// advertised (not hidden) so the model can discover and request it; every
 	// crossing still yields for human approval, so the guest can propose a lift
 	// but never perform one itself.
-	//
-	// Strict Reserve, not ReserveMissing: sys.declassify is runtimeServed, so
-	// LeafSyscalls never yields it and no provider family can be named for it. A
-	// collision here would mean that invariant broke, and it should say so
-	// loudly rather than skip the reservation and leave the Validator enforcing
-	// a driver's schema on a call the Declassifier serves.
 	if _, ok := manifest.FindSyscall(manifestpkg.DeclassifySyscall); ok {
 		err := table.Reserve(capability.Descriptor{
 			Name:        manifestpkg.DeclassifySyscall,

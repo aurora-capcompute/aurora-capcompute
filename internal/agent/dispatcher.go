@@ -37,7 +37,7 @@ func (r *Runtime) newDispatcher(ctx context.Context, cred durable.ProcessContext
 	var history []HistoryMessage
 	// A manifest declaring history:false serves no session history on its
 	// sys.input — the process sees only its own input.
-	if !proc.hideHistory {
+	if spec.SharesHistory() {
 		history = append([]HistoryMessage(nil), proc.history...)
 	}
 	attempt := proc.attempt
@@ -92,5 +92,5 @@ func (r *Runtime) newDispatcher(ctx context.Context, cred durable.ProcessContext
 	if err := journaled.Verify(journal); err != nil {
 		return nil, fmt.Errorf("journal integrity check failed: %w", err)
 	}
-	return monitor.Wrap(r.taints, journaled.NewTape(journal), table, r.openIntents, chain), nil
+	return monitor.Wrap(r.taints, journaled.NewTape(journal), table, chain), nil
 }

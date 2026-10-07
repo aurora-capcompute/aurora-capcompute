@@ -14,7 +14,6 @@ func bootSessionRuntime(t *testing.T, store *runtimeStore) *Runtime {
 		Dispatchers: &runtimeDispatchers{},
 		Log:         store.log,
 		TaskSecret:  []byte("stable-secret"),
-		IDSource:    sequentialIDs(),
 	})
 	if err != nil {
 		t.Fatalf("boot runtime: %v", err)

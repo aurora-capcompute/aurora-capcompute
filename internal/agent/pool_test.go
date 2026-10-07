@@ -104,8 +104,8 @@ func await(t *testing.T, result <-chan quantumResult) quantumResult {
 func TestPoolRunsOneGuestPerWorker(t *testing.T) {
 	g := &guests{hold: 20 * time.Millisecond}
 	p := newTestPool(t, 1)
-	first, _ := submit(t, p, 0, g.run)
-	second, _ := submit(t, p, 0, g.run)
+	first, _ := submit(t, p, time.Minute, g.run)
+	second, _ := submit(t, p, time.Minute, g.run)
 	await(t, first)
 	await(t, second)
 	if started, peak := g.count(); started != 2 || peak != 1 {
@@ -119,7 +119,7 @@ func TestPoolRunsEverySubmission(t *testing.T) {
 	p := newTestPool(t, 2)
 	var results []<-chan quantumResult
 	for range 10 {
-		result, _ := submit(t, p, 0, g.run)
+		result, _ := submit(t, p, time.Minute, g.run)
 		results = append(results, result)
 	}
 	for _, result := range results {
@@ -133,22 +133,20 @@ func TestPoolRunsEverySubmission(t *testing.T) {
 }
 
 // The deadline bounds the quantum, and queue time does not count against it:
-// the clock starts when the guest does. A zero deadline leaves it unbounded.
+// the clock starts when the guest does.
 func TestPoolDeadlineStartsWithTheGuest(t *testing.T) {
 	slow := &guests{hold: 50 * time.Millisecond}
-	queued, unbounded := &guests{}, &guests{}
+	queued := &guests{}
 	p := newTestPool(t, 1)
-	first, _ := submit(t, p, 0, slow.run)
+	first, _ := submit(t, p, time.Minute, slow.run)
 	slow.waitStarted(t, 1)
 	queuedResult, _ := submit(t, p, 20*time.Millisecond, queued.run)
-	unboundedResult, _ := submit(t, p, 0, unbounded.run)
 	await(t, first)
 	if r := await(t, queuedResult); r.status != capcompute.ResumeCompleted {
 		t.Fatalf("a guest that queued past its deadline = %+v, want completed", r)
 	}
-	await(t, unboundedResult)
-	if !queued.bounded[0] || unbounded.bounded[0] {
-		t.Fatalf("deadline on the quantum: queued %v, unbounded %v; want true, false", queued.bounded, unbounded.bounded)
+	if !queued.bounded[0] {
+		t.Fatal("the quantum carried no deadline")
 	}
 }
 
@@ -157,9 +155,9 @@ func TestPoolDeadlineStartsWithTheGuest(t *testing.T) {
 func TestPoolCancelDropsAQueuedSubmission(t *testing.T) {
 	g := &guests{block: make(chan struct{})}
 	p := newTestPool(t, 1)
-	running, _ := submit(t, p, 0, g.run)
+	running, _ := submit(t, p, time.Minute, g.run)
 	g.waitStarted(t, 1)
-	queued, cancel := submit(t, p, 0, g.run)
+	queued, cancel := submit(t, p, time.Minute, g.run)
 	cancel()
 	if r := await(t, queued); r.status != capcompute.ResumeStopped || !errors.Is(r.err, errDropped) {
 		t.Fatalf("cancelled submission = %+v, want stopped and dropped", r)
@@ -175,7 +173,7 @@ func TestPoolCancelDropsAQueuedSubmission(t *testing.T) {
 func TestPoolCancelStopsARunningGuest(t *testing.T) {
 	g := &guests{block: make(chan struct{})}
 	p := newTestPool(t, 1)
-	running, cancel := submit(t, p, 0, g.run)
+	running, cancel := submit(t, p, time.Minute, g.run)
 	g.waitStarted(t, 1)
 	cancel()
 	if r := await(t, running); r.status != capcompute.ResumeStopped {
@@ -188,9 +186,9 @@ func TestPoolCancelStopsARunningGuest(t *testing.T) {
 func TestPoolCloseSettlesQueuedWork(t *testing.T) {
 	g := &guests{block: make(chan struct{})}
 	p := newPool(context.Background(), 1)
-	running, _ := submit(t, p, 0, g.run)
+	running, _ := submit(t, p, time.Minute, g.run)
 	g.waitStarted(t, 1)
-	queued, _ := submit(t, p, 0, g.run)
+	queued, _ := submit(t, p, time.Minute, g.run)
 	p.close()
 	if r := await(t, running); r.status != capcompute.ResumeStopped {
 		t.Fatalf("running at close = %+v, want stopped", r)
@@ -198,7 +196,7 @@ func TestPoolCloseSettlesQueuedWork(t *testing.T) {
 	if r := await(t, queued); r.status != capcompute.ResumeStopped || !errors.Is(r.err, errPoolClosed) {
 		t.Fatalf("queued at close = %+v, want stopped and closed", r)
 	}
-	if _, _, err := p.submit(0, g.run); !errors.Is(err, errPoolClosed) {
+	if _, _, err := p.submit(time.Minute, g.run); !errors.Is(err, errPoolClosed) {
 		t.Fatalf("submit after close = %v, want closed", err)
 	}
 }

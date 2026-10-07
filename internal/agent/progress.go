@@ -26,7 +26,7 @@ type progressArgs struct {
 func newProgressDispatcher(next sys.Dispatcher[durable.ProcessContext], table *capability.Table) (*progressDispatcher, error) {
 	// Declared where it is built: the layer that serves sys.log is the layer that
 	// puts it in the grant set, so the two cannot come apart.
-	err := table.ReserveMissing(capability.Descriptor{
+	err := table.Reserve(capability.Descriptor{
 		Name:        callSysLog,
 		Description: "report a short progress message to the user while working",
 		Hidden:      true,

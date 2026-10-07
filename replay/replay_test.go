@@ -3,7 +3,6 @@ package replay
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"testing"
 
 	"github.com/aurora-capcompute/capcompute/sys"
@@ -46,7 +45,7 @@ func (f nextFunc) Dispatch(ctx context.Context, cred string, syscall sys.Syscall
 
 func dispatchWith(t *testing.T, tape *fakeTape, next nextFunc) (sys.SyscallResult, error) {
 	t.Helper()
-	return NewDispatcher(tape, next, nil).Dispatch(
+	return NewDispatcher(tape, next).Dispatch(
 		context.Background(), "run-1", sys.Syscall{Name: "step.one"}, sys.Authorization{})
 }
 
@@ -148,27 +147,5 @@ func TestDispatcherRetriesOpenIntent(t *testing.T) {
 	}
 	if !tape.committed {
 		t.Fatal("resolved open intent was not committed")
-	}
-}
-
-func TestDispatcherFailsOpenIntentPerPolicy(t *testing.T) {
-	tape := &fakeTape{nextErr: OpenIntentError{Position: 4, Syscall: sys.Syscall{Name: "mail.send"}}}
-	dispatcher := NewDispatcher(tape, nextFunc(func(context.Context, string, sys.Syscall, sys.Authorization) (sys.SyscallResult, error) {
-		t.Fatal("policy-failed open intent reached the driver")
-		return sys.SyscallResult{}, nil
-	}), func(syscall sys.Syscall) OpenIntentDecision {
-		if syscall.Name == "mail.send" {
-			return FailOpenIntent
-		}
-		return RetryOpenIntent
-	})
-
-	_, err := dispatcher.Dispatch(context.Background(), "run-1", sys.Syscall{Name: "mail.send"}, sys.Authorization{})
-	var indeterminate IndeterminateError
-	if !errors.As(err, &indeterminate) {
-		t.Fatalf("error = %v, want IndeterminateError", err)
-	}
-	if indeterminate.Position != 4 || indeterminate.Syscall.Name != "mail.send" {
-		t.Fatalf("error = %+v", indeterminate)
 	}
 }

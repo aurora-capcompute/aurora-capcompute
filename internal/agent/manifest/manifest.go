@@ -46,21 +46,11 @@ type Manifest struct {
 	// its sys.input omits the history, so it sees only its own input and inherits
 	// no taint from a prior run. Unset (the default) shares history — the
 	// runtime's standing behavior.
-	History *bool `json:"history,omitempty"`
-	// ShareCapabilities, when false, keeps this program's capability menu off its
-	// sys.input: it still holds its granted syscalls, they are merely not
-	// advertised (the program calls them directly). Unset (the default) advertises
-	// them. (The field is `share_capabilities`, not `capabilities`, since a leaf
-	// grant's `capabilities` is its operation list.)
-	ShareCapabilities *bool     `json:"share_capabilities,omitempty"`
-	Syscalls          []Syscall `json:"syscalls,omitempty"`
+	History  *bool     `json:"history,omitempty"`
+	Syscalls []Syscall `json:"syscalls,omitempty"`
 }
 
 func (m Manifest) SharesHistory() bool { return m.History == nil || *m.History }
-
-func (m Manifest) SharesCapabilities() bool {
-	return m.ShareCapabilities == nil || *m.ShareCapabilities
-}
 
 type Syscall struct {
 	Syscall string
@@ -228,7 +218,6 @@ func normalizeTimerSettings(raw json.RawMessage) (json.RawMessage, error) {
 func (m Manifest) Clone() Manifest {
 	out := m
 	out.History = cloneBoolPtr(m.History)
-	out.ShareCapabilities = cloneBoolPtr(m.ShareCapabilities)
 	out.Syscalls = cloneSyscalls(m.Syscalls)
 	return out
 }

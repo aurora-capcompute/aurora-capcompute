@@ -8,7 +8,6 @@ import (
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-capcompute/monitor"
-	"github.com/aurora-capcompute/aurora-capcompute/replay"
 	"github.com/aurora-capcompute/capcompute/sys"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
@@ -55,7 +54,6 @@ type DispatcherProvider interface {
 type Config struct {
 	Dispatchers DispatcherProvider
 	Log         eventlog.Log
-	IDSource    func(prefix string) (string, error)
 	Now         func() time.Time
 	TaskSecret  []byte
 	TaskTTL     time.Duration
@@ -63,36 +61,13 @@ type Config struct {
 	// MaxConcurrentProcesses bounds simultaneously executing process quanta across the
 	// runtime (0 = a default of 16).
 	MaxConcurrentProcesses int
-	// MaxAbortRetries bounds how many times a process may abort and re-run the
-	// section it abandoned before the retry is refused and it finishes as failed
-	// (0 = a default of 10) — the guard against a guest that aborts forever. The
-	// budget counts abort forks (revisions minted), not quanta: crash re-drives
-	// and approval parks never spend it.
-	MaxAbortRetries int
-	// NonIdempotentSyscalls names capabilities whose re-execution is unsafe (a
-	// second POST charges twice; a second delete errors). On crash-resume the
-	// runtime meets an open intent — an effect journaled but with no recorded
-	// completion, so its outcome is unknown. By default it retries the call
-	// (at-least-once). For a capability named here it instead surfaces the intent
-	// as indeterminate for review rather than silently re-applying it —
-	// at-most-once. Matched by capability name.
-	NonIdempotentSyscalls []string
-
-	// ProcessMemoryPages caps each guest process's linear memory in 64 KiB wasm
-	// pages (0 = a default of 4096 = 256 MiB). A guest that allocates past the
-	// cap traps and its quantum fails, so a runaway allocation cannot exhaust
-	// host memory. Set a negative value to disable the cap (unbounded — a guest
-	// may then grow to the wasm 4 GiB ceiling; not recommended in production).
-	ProcessMemoryPages int
-	// MaxQuantumDuration is the host bound on one guest quantum's wall-clock
-	// time: both the default when a caller names none, and the ceiling a caller
-	// may not exceed (0 = a default of 2 minutes). A guest still running at the
-	// deadline is stopped, so an infinite loop cannot hold a slot forever.
-	// Syscalls that wait on the outside world yield (they do not spin), so this
-	// bounds only a guest's own uninterrupted compute between yields; a process
-	// stopped by the deadline is interrupted, not failed, and re-drives
-	// deterministically by replay. Set a negative value to disable it.
-	MaxQuantumDuration time.Duration
+	// QuantumDeadline bounds one guest quantum's wall-clock time (0 = a default
+	// of 2 minutes). A guest still running at the deadline is stopped, so an
+	// infinite loop cannot hold a slot forever. Syscalls that wait on the outside
+	// world yield (they do not spin), so this bounds only a guest's own
+	// uninterrupted compute between yields; a process stopped by the deadline is
+	// interrupted, not failed, and re-drives deterministically by replay.
+	QuantumDeadline time.Duration
 }
 
 type Runtime struct {
@@ -110,15 +85,11 @@ type Runtime struct {
 	tasks           *eventTaskStore
 	sessions        map[string]*sessionState
 	processes       map[string]*processState
-	idSource        func(string) (string, error)
 	now             func() time.Time
 	taskSecret      []byte
 	taskTTL         time.Duration
-	maxAbortRetries int
-	memoryPages     uint32
-	quantumCeiling  time.Duration
+	quantumDeadline time.Duration
 	dispatchers     DispatcherProvider
-	openIntents     replay.OpenIntentPolicy
 	wg              sync.WaitGroup
 	closed          bool
 }
@@ -157,18 +128,9 @@ type processState struct {
 	// returned. Nil when no quantum is in flight.
 	stop          func()
 	stopRequested bool
-	// deadline bounds each of this process's quanta, chosen at MakeProcess and
-	// clamped to the host ceiling. It is runtime policy, not process history:
-	// deliberately not journaled, so a process restored after a host restart
-	// falls back to the host default — which the ceiling bounds either way.
-	deadline time.Duration
-	manifest manifest.Manifest
-	revision uint64
-	digest   string
-	// hideHistory suppresses the session history in this process's sys.input,
-	// set when its manifest declares history:false. Persisted, so a restart
-	// re-serves the same isolated input.
-	hideHistory bool
+	manifest      manifest.Manifest
+	revision      uint64
+	digest        string
 	// forkOffset is the current revision's copy-on-write fork point (positions
 	// [0, forkOffset) are served from the shared history). It is persisted so a
 	// revision that was forked but crashed before logging any record can be
@@ -182,7 +144,7 @@ type processState struct {
 	// buys one extra re-drive); cleared when the journal forks.
 	lastFailureLength int
 	// abortRetries counts how many times this process forked to re-run a section
-	// its guest abandoned with sys.abort. Bounded by Config.MaxAbortRetries — the
+	// its guest abandoned with sys.abort. Bounded by maxAbortRetries — the
 	// guard against a guest that aborts forever. Being a budget rather than
 	// revision state, it survives both the fork it authorized and (being
 	// persisted) a host restart: a reset budget is an unbounded loop.

@@ -25,17 +25,16 @@ import (
 //
 // taints is shared across processes; the table is the one the layers beneath
 // were built from, so the monitor's view of an operation and the handler's are
-// identical. A nil openIntents retries every open intent.
+// identical.
 func Wrap[K comparable](
 	taints *Taints[K],
 	tape replay.Tape,
 	table *capability.Table,
-	openIntents replay.OpenIntentPolicy,
 	beneath sys.Dispatcher[K],
 ) sys.Dispatcher[K] {
 	flow := NewFlow(taints, table)
 	// Below the replay layer: journaled once, replayed thereafter.
-	journaled := replay.NewDispatcher(tape, flow.Stamp(NewDeclassifier(beneath)), openIntents)
+	journaled := replay.NewDispatcher(tape, flow.Stamp(NewDeclassifier(beneath)))
 	// Above the replay layer: re-derived on every pass, never journaled.
 	return NewValidator(table, flow.Guard(journaled))
 }

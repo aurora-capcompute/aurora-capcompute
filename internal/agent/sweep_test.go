@@ -73,7 +73,7 @@ func TestTimerFiresFromTheSweep(t *testing.T) {
 		Version:  manifest.Version,
 		Program:  "program@1",
 		Syscalls: cognitionGrants(manifest.TimerSyscall),
-	}, 0)
+	})
 	if err != nil {
 		t.Fatalf("create process: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestSweepWakesAProcessWhoseWakeFailed(t *testing.T) {
 		Version:  manifest.Version,
 		Program:  "program@1",
 		Syscalls: cognitionGrants("tool.y"),
-	}, 0)
+	})
 	if err != nil {
 		t.Fatalf("create process: %v", err)
 	}

@@ -78,7 +78,6 @@ assembly is [aurora-dist](https://github.com/aurora-capcompute/aurora-dist).
 | **One read** | `GetSession` returns the session, its history, and every process with its whole journal (all revisions) and its tasks |
 | **Capability security** | Only granted, schema‑checked syscalls are admitted; the runtime fails closed if a driver over‑advertises what it can do |
 | **Program contracts** | Each program ships a manifest (description + input/output JSON Schemas), validated at registration and on every call |
-| **Hot‑swap** | `AddProgram` / `RemoveProgram` change the loaded Wasm set at runtime; in‑flight processes stay bound to their original code identity, and removing a program stops and ejects the ones running under it |
 
 ## Quick start (5 minutes)
 
@@ -185,11 +184,11 @@ No env vars, no files, no ports — everything is the injected struct.
 
 - **Required:** `Dispatchers`, `Log`, `TaskSecret` (non‑empty).
   Programs are not configured: a runtime boots with an empty registry and gains
-  programs through `AddProgram` / `RemoveProgram`.
-- **Optional knobs:** `IDSource`, `Now`, `TaskTTL` (24h),
-  `MaxConcurrentProcesses` (16),
-  `MaxAbortRetries` (10), `NonIdempotentSyscalls`, `ProcessMemoryPages`
-  (4096 = 256 MiB), `MaxQuantumDuration` (2 min).
+  its programs through `AddProgram`, once, before it serves.
+- **Optional knobs:** `Now`, `TaskTTL` (24h), `MaxConcurrentProcesses` (16),
+  `QuantumDeadline` (2 min).
+- **Fixed bounds:** a guest's memory is capped at 256 MiB, and a guest may abort
+  and re‑run a section at most 10 times.
 - **Key constants:** `ManifestVersion = 4`.
 
 Concrete stores (in‑memory, SQLite) live in

@@ -191,10 +191,8 @@ On restart the process is re-driven from the top: the program re-executes from
 its entrypoint, and every syscall it repeats is served from the tape rather than
 re-dispatched, so it fast-forwards through work already done. When it reaches
 the position with an intent and no completion, the tape raises
-`replay.OpenIntentError`, and the **open-intent policy** decides: retry the call
-(the default — at-least-once, so an effect that happened before the crash
-happens again), or surface it for review. A capability named in
-`NonIdempotentSyscalls` gets the second answer.
+`replay.OpenIntentError`, and replay drives the call again: at-least-once, so
+an effect that happened before the crash happens again.
 
 Drivers get no idempotency key: making every external effect exactly-once is
 not something the runtime can promise. What it does promise is narrower — a
@@ -253,7 +251,7 @@ must be re-runnable is the program's own contract.
 
 If the section must be abandoned, the guest calls `sys.abort`. The runtime forks
 the journal at the section's still-open `sys.begin` and re-runs the whole section
-live, bounded by `MaxAbortRetries`. With no section open there is nothing smaller
+live, at most 10 times. With no section open there is nothing smaller
 to re-run, and the process fails. A fork mints a new **revision**: forks are
 copy-on-write over the journal, and the revision is part of the process identity
 (`pid@revision`), so a retried attempt never resumes the instance it replaced.

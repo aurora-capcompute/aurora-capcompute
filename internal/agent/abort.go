@@ -82,10 +82,10 @@ func (r *Runtime) retryAbortedSection(processID, reason string) {
 	case !open:
 		r.mu.Unlock()
 		r.finish(processID, durable.ProcessFailed, "", failure)
-	case proc.abortRetries >= r.maxAbortRetries:
+	case proc.abortRetries >= maxAbortRetries:
 		r.mu.Unlock()
 		r.finish(processID, durable.ProcessFailed, "",
-			fmt.Errorf("%w (no attempts left after %d)", failure, r.maxAbortRetries))
+			fmt.Errorf("%w (no attempts left after %d)", failure, maxAbortRetries))
 	default:
 		proc.abortRetries++
 		r.forkJournalLocked(proc, forkOffset)

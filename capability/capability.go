@@ -522,18 +522,3 @@ func compactArgs(raw json.RawMessage) string {
 	}
 	return out.String()
 }
-
-// ReserveMissing reserves a descriptor unless the name is already known. It
-// exists for sys.log, which an assembly may serve as an ordinary driver grant —
-// the runtime's own reservation must then defer to it rather than collide.
-//
-// Use it only where that is genuinely possible. A syscall the manifest layer
-// marks runtime-served can never arrive as a driver family, so reserving one of
-// those with Reserve makes a broken invariant fail loudly instead of silently
-// leaving a driver's schema in force.
-func (t *Table) ReserveMissing(descriptor Descriptor) error {
-	if _, known := t.Descriptor(descriptor.Name); known {
-		return nil
-	}
-	return t.Reserve(descriptor)
-}

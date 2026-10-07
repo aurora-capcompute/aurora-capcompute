@@ -2,7 +2,6 @@ package aurora
 
 import (
 	"context"
-	"time"
 )
 
 type Runtime interface {
@@ -11,9 +10,8 @@ type Runtime interface {
 	ListSessions() []SessionSummary
 	Programs() []ProgramArtifact
 	AddProgram(ctx context.Context, program ProgramData) error
-	RemoveProgram(ctx context.Context, id string) error
 	GetSession(sessionID string) (SessionSnapshot, error)
-	CreateProcess(sessionID string, input string, manifest Manifest, deadline time.Duration) (ProcessSnapshot, error)
+	CreateProcess(sessionID string, input string, manifest Manifest) (ProcessSnapshot, error)
 	GetProcess(processID string) (ProcessSnapshot, error)
 	ResolveTask(taskID string, token string, resolution Resolution) (TaskSnapshot, error)
 	Stop(processID string) (ProcessSnapshot, error)

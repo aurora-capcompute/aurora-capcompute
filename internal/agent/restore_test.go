@@ -45,7 +45,6 @@ func TestRestoreQuarantinesStaleManifests(t *testing.T) {
 		Dispatchers: &vanishedToolDispatchers{},
 		Log:         store.log,
 		TaskSecret:  []byte("stable-secret"),
-		IDSource:    sequentialIDs(),
 	})
 	if err != nil {
 		t.Fatalf("boot with stale manifest: %v", err)

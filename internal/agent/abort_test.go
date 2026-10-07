@@ -95,7 +95,7 @@ func TestAbortBudgetExhaustedFails(t *testing.T) {
 	runtime := seamRuntime(t)
 	processID := abortProcess(t, runtime, begin(), ok("billing.charge"))
 	runtime.mu.Lock()
-	runtime.processes[processID].abortRetries = runtime.maxAbortRetries
+	runtime.processes[processID].abortRetries = maxAbortRetries
 	runtime.mu.Unlock()
 
 	runtime.retryAbortedSection(processID, "still stuck")
@@ -137,7 +137,7 @@ func TestAbortBudgetSurvivesRestore(t *testing.T) {
 // retry can never make progress — which is what the brackets exist to prevent.
 func TestResumeForksAtTheOpenBegin(t *testing.T) {
 	disp := &effectsDispatcher{}
-	runtime := newEffectsRuntime(t, disp)
+	runtime := newEffectsRuntime(t, disp, newMemLog())
 	processID := startEffectsProcess(t, runtime).ID
 
 	failed := waitForStatus(t, runtime, processID, durable.ProcessFailed)

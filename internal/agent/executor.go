@@ -25,10 +25,9 @@ func (r *Runtime) execute(processID string) {
 	cred := proc.context()
 	program := ProgramID(proc.manifest.Program)
 	digest := proc.digest
-	deadline := proc.deadline
 	r.mu.Unlock()
 
-	results, stop, err := r.pool.submit(deadline, func(ctx context.Context) quantumResult {
+	results, stop, err := r.pool.submit(r.quantumDeadline, func(ctx context.Context) quantumResult {
 		return r.runQuantum(ctx, cred, program, digest)
 	})
 	if err != nil {
@@ -37,16 +36,6 @@ func (r *Runtime) execute(processID string) {
 	}
 
 	r.mu.Lock()
-	proc = r.processes[processID]
-	if proc == nil {
-		// The process was removed while its quantum was starting (a withdrawn
-		// program drains its processes). Abort the quantum rather than record a
-		// running state for a process that is gone; the result is buffered, so
-		// leaving it unread strands nothing.
-		r.mu.Unlock()
-		stop()
-		return
-	}
 	now := r.now().UTC()
 	proc.stop = stop
 	proc.status = durable.ProcessRunning
@@ -61,9 +50,7 @@ func (r *Runtime) execute(processID string) {
 
 	result := <-results
 	r.mu.Lock()
-	if proc = r.processes[processID]; proc != nil {
-		proc.stop = nil
-	}
+	proc.stop = nil
 	r.mu.Unlock()
 	switch result.status {
 	case capcompute.ResumeCompleted:

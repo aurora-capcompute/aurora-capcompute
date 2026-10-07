@@ -48,7 +48,7 @@ func TestWrapEnforcesCanonicalOrder(t *testing.T) {
 		t.Helper()
 		tape := journaled.NewTape(journal)
 		// Fresh Taints per boot: a crash loses host memory.
-		return Wrap(NewTaints[testCred](), tape, stackTable, nil, driver)
+		return Wrap(NewTaints[testCred](), tape, stackTable, driver)
 	}
 
 	chain := boot(t)

@@ -106,7 +106,6 @@ func (r *Runtime) restoreSession(proj durable.Projection, journals map[string]ma
 			err:          sr.Error,
 			manifest:     em.Clone(),
 			digest:       sr.ProgramDigest,
-			hideHistory:  sr.HideHistory,
 			labels:       append([]string(nil), sr.Labels...),
 			forkOffset:   sr.ForkOffset,
 			abortRetries: sr.AbortRetries,

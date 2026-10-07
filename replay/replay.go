@@ -2,9 +2,9 @@
 // results it saw the first time: each syscall is served from a Tape if already
 // recorded, otherwise journaled as an intent, delegated to the underlying
 // dispatcher, and journaled as a completion. It owns the replay-cursor
-// protocol (the Tape interface), the divergence checks, and the open-intent
-// policy; it does not own where the tape is stored — a concrete Tape such as
-// the journaled package supplies that.
+// protocol (the Tape interface) and the divergence checks; it does not own
+// where the tape is stored — a concrete Tape such as the journaled package
+// supplies that.
 package replay
 
 import (
@@ -45,47 +45,14 @@ func (e OpenIntentError) Error() string {
 	return fmt.Sprintf("open intent at position %d: syscall %q was dispatched but its outcome was never journaled", e.Position, e.Syscall.Name)
 }
 
-// IndeterminateError means an open intent was met on replay and policy refused
-// to retry it: the effect may or may not have happened, and a human (or the
-// app) must review the journal to resolve it.
-type IndeterminateError struct {
-	Position int
-	Syscall  sys.Syscall
-}
-
-func (e IndeterminateError) Error() string {
-	return fmt.Sprintf("syscall %q outcome is indeterminate: open intent at position %d requires review", e.Syscall.Name, e.Position)
-}
-
-// OpenIntentDecision is the per-syscall policy answer for an open intent met
-// on replay.
-type OpenIntentDecision int
-
-const (
-	// RetryOpenIntent re-dispatches the call — at-least-once: an effect that
-	// happened before the crash happens again. The right default: reads are
-	// harmless to repeat and pending external tasks are re-polled.
-	RetryOpenIntent OpenIntentDecision = iota
-	// FailOpenIntent surfaces IndeterminateError instead of re-executing —
-	// for mutations that must not run twice.
-	FailOpenIntent
-)
-
-// OpenIntentPolicy decides, per syscall, what to do with an open intent met
-// on replay. Nil means RetryOpenIntent for everything.
-type OpenIntentPolicy func(syscall sys.Syscall) OpenIntentDecision
-
 // Dispatcher serves recorded results before delegating new syscalls.
 type Dispatcher[K any] struct {
-	tape       Tape
-	next       sys.Dispatcher[K]
-	openIntent OpenIntentPolicy
+	tape Tape
+	next sys.Dispatcher[K]
 }
 
-// NewDispatcher journals next's syscalls on tape. A nil openIntent retries
-// every open intent.
-func NewDispatcher[K any](tape Tape, next sys.Dispatcher[K], openIntent OpenIntentPolicy) *Dispatcher[K] {
-	return &Dispatcher[K]{tape: tape, next: next, openIntent: openIntent}
+func NewDispatcher[K any](tape Tape, next sys.Dispatcher[K]) *Dispatcher[K] {
+	return &Dispatcher[K]{tape: tape, next: next}
 }
 
 func (d *Dispatcher[K]) Dispatch(ctx context.Context, cred K, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
@@ -101,18 +68,18 @@ func (d *Dispatcher[K]) Dispatch(ctx context.Context, cred K, syscall sys.Syscal
 			return sys.SyscallResult{}, err
 		}
 	case errors.As(err, &open):
-		if d.decideOpenIntent(syscall) != RetryOpenIntent {
-			return sys.SyscallResult{}, IndeterminateError{Position: open.Position, Syscall: syscall}
-		}
+		// An open intent is driven again: at-least-once. An effect that happened
+		// before the crash happens again; reads repeat harmlessly and a pending
+		// external task is polled again.
 	default:
 		return sys.SyscallResult{}, err
 	}
 
 	result, err = d.next.Dispatch(ctx, cred, syscall, auth)
 	if err != nil {
-		// Outcome unknown: the intent stays open so the next replay resolves
-		// it by policy. Journaling a made-up completion here would assert an
-		// outcome nobody observed.
+		// Outcome unknown: the intent stays open, so the next replay drives it
+		// again. Journaling a made-up completion here would assert an outcome
+		// nobody observed.
 		return sys.SyscallResult{}, err
 	}
 	if result.Status() == sys.StatusYield {
@@ -123,11 +90,4 @@ func (d *Dispatcher[K]) Dispatch(ctx context.Context, cred K, syscall sys.Syscal
 		return sys.SyscallResult{}, err
 	}
 	return result, nil
-}
-
-func (d *Dispatcher[K]) decideOpenIntent(syscall sys.Syscall) OpenIntentDecision {
-	if d.openIntent == nil {
-		return RetryOpenIntent
-	}
-	return d.openIntent(syscall)
 }

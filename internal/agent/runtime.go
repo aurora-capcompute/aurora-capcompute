@@ -7,8 +7,7 @@
 // replaying each stream from the beginning.
 //
 // It does not own capability implementations, program bytes, or any concrete
-// store: dispatchers, programs, the event log, leases, and the processor's process
-// table are all injected. The aurora package re-exports this package's types
+// store: dispatchers, programs and the event log are injected. The aurora package re-exports this package's types
 // as the module's public surface.
 package agent
 
@@ -25,8 +24,6 @@ import (
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-capcompute/monitor"
-	"github.com/aurora-capcompute/aurora-capcompute/replay"
-	"github.com/aurora-capcompute/capcompute/sys"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/errs"
@@ -35,68 +32,16 @@ import (
 
 const (
 	defaultMaxConcurrentProcesses = 16
-	// defaultProcessMemoryPages caps a guest's linear memory at 256 MiB by
-	// default, so no single guest can walk the runtime toward the 4 GiB wasm
-	// ceiling. defaultMaxQuantumDuration stops a guest that spins without
-	// yielding after two minutes of wall-clock. Both are host-safety bounds the
-	// distribution can raise, lower, or disable via Config.
-	defaultProcessMemoryPages = 4096
-	defaultMaxQuantumDuration = 2 * time.Minute
-	// defaultMaxAbortRetries bounds how many times a process may abort and re-run
-	// the section it abandoned before the retry is refused.
-	defaultMaxAbortRetries = 10
+	// processMemoryPages caps a guest's linear memory at 256 MiB, so no single
+	// guest can walk the runtime toward the 4 GiB wasm ceiling.
+	processMemoryPages = 4096
+	// defaultQuantumDeadline stops a guest that spins without yielding after two
+	// minutes of wall-clock.
+	defaultQuantumDeadline = 2 * time.Minute
+	// maxAbortRetries bounds how many times a process may abort and re-run the
+	// section it abandoned before the retry is refused.
+	maxAbortRetries = 10
 )
-
-// evictionDrainTimeout bounds how long RemoveProgram waits for the processes it
-// stopped to reach a terminal state before it releases the program image
-// anyway. A driver that ignores its cancellation must not hold a withdrawal
-// hostage.
-const evictionDrainTimeout = 5 * time.Second
-
-// evictionPollInterval is how often the drain re-reads the state of the
-// processes it is waiting on.
-const evictionPollInterval = 10 * time.Millisecond
-
-// resolveGuestLimits maps the Config knobs to the host's per-process bounds:
-// zero requests the safe default, a positive value is used verbatim, and a
-// negative value disables the bound (0 = unbounded). Keeping this pure makes the
-// "bounded by default, never accidentally unbounded" policy directly testable
-// without compiling a guest. The returned duration is the quantum ceiling: the
-// default when a caller names no deadline, and the most any caller may ask for.
-func resolveGuestLimits(memoryPages int, maxQuantum time.Duration) (pages uint32, ceiling time.Duration) {
-	switch {
-	case memoryPages < 0:
-		pages = 0 // explicitly unbounded
-	case memoryPages == 0:
-		pages = defaultProcessMemoryPages
-	default:
-		pages = uint32(memoryPages)
-	}
-	switch {
-	case maxQuantum < 0:
-		ceiling = 0 // explicitly unbounded
-	case maxQuantum == 0:
-		ceiling = defaultMaxQuantumDuration
-	default:
-		ceiling = maxQuantum
-	}
-	return pages, ceiling
-}
-
-// clampDeadline resolves a caller's requested quantum bound against the host's.
-// The host ceiling is a bound, never a grant: a caller may ask for less than the
-// host allows and never for more, and asking for nothing takes the host's own
-// value. A host that disabled the bound (ceiling 0) honours the request
-// verbatim, since there is nothing to clamp to.
-func (r *Runtime) clampDeadline(requested time.Duration) time.Duration {
-	if requested <= 0 {
-		return r.quantumCeiling
-	}
-	if r.quantumCeiling > 0 && requested > r.quantumCeiling {
-		return r.quantumCeiling
-	}
-	return requested
-}
 
 // reconcileGrants fails closed when the dispatcher provider advertises a
 // capability the manifest did not grant. The grant set the processor Validator
@@ -131,33 +76,6 @@ func reconcileGrants(advertised []capability.Descriptor, manifest manifest.Manif
 	return nil
 }
 
-// openIntentPolicy turns the operator's non-idempotent capability set into a
-// replay open-intent policy: an open intent (a journaled effect with no recorded
-// completion, met on crash-resume) for one of those capabilities is surfaced as
-// indeterminate rather than silently re-executed, giving at-most-once for
-// effects that must not run twice. Empty set → nil → retry everything (the
-// framework default: at-least-once).
-func openIntentPolicy(nonIdempotent []string) replay.OpenIntentPolicy {
-	if len(nonIdempotent) == 0 {
-		return nil
-	}
-	set := make(map[string]struct{}, len(nonIdempotent))
-	for _, name := range nonIdempotent {
-		if name = strings.TrimSpace(name); name != "" {
-			set[name] = struct{}{}
-		}
-	}
-	if len(set) == 0 {
-		return nil
-	}
-	return func(syscall sys.Syscall) replay.OpenIntentDecision {
-		if _, ok := set[syscall.Name]; ok {
-			return replay.FailOpenIntent
-		}
-		return replay.RetryOpenIntent
-	}
-}
-
 func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 	if config.Dispatchers == nil {
 		return nil, fmt.Errorf("%w: dispatcher provider is required", errs.Invalid)
@@ -169,7 +87,6 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		return nil, fmt.Errorf("%w: task secret is required", errs.Invalid)
 	}
 	baseCtx, cancel := context.WithCancel(context.Background())
-	memoryPages, quantumCeiling := resolveGuestLimits(config.ProcessMemoryPages, config.MaxQuantumDuration)
 	runtime := &Runtime{
 		baseCtx:         baseCtx,
 		cancel:          cancel,
@@ -177,17 +94,11 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		log:             config.Log,
 		sessions:        make(map[string]*sessionState),
 		processes:       make(map[string]*processState),
-		idSource:        config.IDSource,
 		now:             config.Now,
 		taskSecret:      append([]byte(nil), config.TaskSecret...),
 		taskTTL:         config.TaskTTL,
-		maxAbortRetries: config.MaxAbortRetries,
+		quantumDeadline: config.QuantumDeadline,
 		dispatchers:     config.Dispatchers,
-		openIntents:     openIntentPolicy(config.NonIdempotentSyscalls),
-	}
-	runtime.memoryPages, runtime.quantumCeiling = memoryPages, quantumCeiling
-	if runtime.idSource == nil {
-		runtime.idSource = randomID
 	}
 	if runtime.now == nil {
 		runtime.now = time.Now
@@ -196,8 +107,8 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 	if runtime.taskTTL <= 0 {
 		runtime.taskTTL = 24 * time.Hour
 	}
-	if runtime.maxAbortRetries <= 0 {
-		runtime.maxAbortRetries = defaultMaxAbortRetries
+	if runtime.quantumDeadline <= 0 {
+		runtime.quantumDeadline = defaultQuantumDeadline
 	}
 	if err := runtime.restore(ctx); err != nil {
 		return nil, fmt.Errorf("restore runtime: %w", err)
@@ -207,7 +118,7 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 	if maxConcurrent <= 0 {
 		maxConcurrent = defaultMaxConcurrentProcesses
 	}
-	runtime.programs = newProgramRegistry(memoryPages)
+	runtime.programs = newProgramRegistry(processMemoryPages)
 	runtime.pool = newPool(baseCtx, maxConcurrent)
 
 	go runtime.sweepLoop()
@@ -288,124 +199,11 @@ func (r *Runtime) wake(processID string) error {
 	return err
 }
 
-// AddProgram registers one program and compiles its wasm. Registering is always
-// a replace: a taken id is withdrawn first — settling the processes bound to it
-// — and the incoming program takes its place. A program is never swapped under a
-// live process, because processes are immutably bound to the (name, identity)
-// they were created from; the withdrawal is what settles them.
+// AddProgram compiles one program and registers it. Programs are added once,
+// before the runtime serves, and stay for its life; a process restored from an
+// earlier life runs only if its program comes back with the same identity.
 func (r *Runtime) AddProgram(ctx context.Context, data ProgramData) error {
-	if _, taken := r.programs.get(data.ID); taken {
-		if err := r.RemoveProgram(ctx, string(data.ID)); err != nil {
-			return err
-		}
-	}
-	if err := r.programs.add(ctx, data); err != nil {
-		return err
-	}
-	// A Close that raced this registration has already drained the registry, so
-	// check after publishing and undo: otherwise the image this call compiled
-	// would stay open with nothing left to close it.
-	r.mu.Lock()
-	closed := r.closed
-	r.mu.Unlock()
-	if closed {
-		if release, ok := r.programs.remove(data.ID); ok {
-			_ = release(context.Background())
-		}
-		return fmt.Errorf("%w: runtime is closed", errs.Conflict)
-	}
-	return nil
-}
-
-// RemoveProgram unregisters a program and settles the processes bound to it: each
-// is stopped and ejected, so nothing keeps running against code the app has
-// withdrawn. They stay auditable, and they stay bound to the identity they were
-// created from — re-adding the same bytes and the same contract lets them retry,
-// while a changed program leaves them stranded (the immutability law, enforced on
-// every execution attempt).
-//
-// A process that cannot be stopped — one parked mid-rollback, which has to settle
-// its effects first — is left alone and logged. It can still never execute under a
-// changed program.
-func (r *Runtime) RemoveProgram(ctx context.Context, id string) error {
-	id = strings.TrimSpace(id)
-	release, ok := r.programs.remove(ProgramID(id))
-	if !ok {
-		return fmt.Errorf("%w: program %q is not registered", errs.NotFound, id)
-	}
-	r.mu.Lock()
-	var bound []string
-	for processID, proc := range r.processes {
-		if proc.manifest.Program == id && !isTerminal(proc.status) {
-			bound = append(bound, processID)
-		}
-	}
-	r.mu.Unlock()
-
-	sort.Strings(bound)
-	for _, processID := range bound {
-		if _, err := r.Stop(processID); err != nil {
-			slog.Warn("eject process on program removal", "program", id, "process", processID, "error", err)
-		}
-	}
-	// A stop is asynchronous: it asks, the process goroutine settles. Wait for
-	// that before releasing the image, so an evicted process records the stop it
-	// was given rather than whatever the processor reports when its compiled
-	// module is closed mid-quantum. Both are terminal — closing an image under a
-	// live module is recovered by the processor, not a crash — but a process is an
-	// audit target and its final state must not turn on which of the two won.
-	r.drainProcesses(ctx, id, bound)
-	_ = release(context.Background())
-	return nil
-}
-
-// drainProcesses waits, bounded, for stopped processes to reach a terminal
-// state. The bound is what keeps a driver that ignores its cancellation from
-// holding a program withdrawal hostage: whatever is still unwinding when the
-// caller's context is done — or when the standing bound expires, whichever comes
-// first — is logged and left to settle on its own. It polls rather than
-// subscribing because the processes span sessions and the wait is short.
-func (r *Runtime) drainProcesses(ctx context.Context, programID string, processIDs []string) {
-	if len(processIDs) == 0 {
-		return
-	}
-	// Wall-clock, not r.now: this waits on real goroutines, and an injected test
-	// clock that never advances would wait forever.
-	expired := time.After(evictionDrainTimeout)
-	ticker := time.NewTicker(evictionPollInterval)
-	defer ticker.Stop()
-	pending := processIDs
-	for {
-		if pending = r.unsettled(pending); len(pending) == 0 {
-			return
-		}
-		select {
-		case <-ticker.C:
-		case <-ctx.Done():
-			slog.Warn("program withdrawal stopped waiting on unwinding processes",
-				"program", programID, "processes", pending, "error", ctx.Err())
-			return
-		case <-expired:
-			slog.Warn("program withdrawn with processes still unwinding",
-				"program", programID, "processes", pending)
-			return
-		}
-	}
-}
-
-// unsettled filters process ids down to those that have not reached a terminal
-// state (an id the runtime no longer holds counts as settled). It returns a new
-// slice rather than filtering in place, so a caller's list survives the call.
-func (r *Runtime) unsettled(processIDs []string) []string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	pending := make([]string, 0, len(processIDs))
-	for _, processID := range processIDs {
-		if proc := r.processes[processID]; proc != nil && !isTerminal(proc.status) {
-			pending = append(pending, processID)
-		}
-	}
-	return pending
+	return r.programs.add(ctx, data)
 }
 
 // CreateSession opens a session. An explicit name is the session's handle
@@ -414,7 +212,7 @@ func (r *Runtime) unsettled(processIDs []string) []string {
 // event, so a named session survives a restart even before it runs anything.
 func (r *Runtime) CreateSession(name string, tags map[string]string) (SessionSnapshot, error) {
 	name = strings.TrimSpace(name)
-	id, err := r.idSource("ses_")
+	id, err := randomID("ses_")
 	if err != nil {
 		return SessionSnapshot{}, err
 	}
@@ -509,26 +307,14 @@ func (r *Runtime) GetSession(sessionID string) (SessionSnapshot, error) {
 // one place that rule is written down.
 func (r *Runtime) enrollLocked() { r.wg.Add(1) }
 
-// MakeProcess starts a process on a session. deadline bounds each of its
-// quanta — the guest's own uninterrupted compute between syscalls, and anything
-// between syscalls. Zero takes the host default; anything above
-// the host ceiling is clamped down to it, so a caller can only ever ask for less
-// than the host allows.
-func (r *Runtime) CreateProcess(sessionID string, input string, spec manifest.Manifest, deadline time.Duration) (ProcessSnapshot, error) {
+// CreateProcess starts a process on a session.
+func (r *Runtime) CreateProcess(sessionID string, input string, spec manifest.Manifest) (ProcessSnapshot, error) {
 	if input == "" {
 		return ProcessSnapshot{}, fmt.Errorf("%w: input is required", errs.Invalid)
 	}
 	spec, err := manifest.Validate(spec, r.dispatchers)
 	if err != nil {
 		return ProcessSnapshot{}, err
-	}
-	// A process that opts out of capability sharing keeps its grants off its own
-	// sys.input menu (it still holds them). manifest.Validate returned a clone, so
-	// this is local. History is applied below via hideHistory.
-	if !spec.SharesCapabilities() {
-		for i := range spec.Syscalls {
-			spec.Syscalls[i].Hidden = true
-		}
 	}
 	program, ok := r.programs.get(ProgramID(spec.Program))
 	if !ok {
@@ -537,7 +323,7 @@ func (r *Runtime) CreateProcess(sessionID string, input string, spec manifest.Ma
 	if err := program.validateInput(input); err != nil {
 		return ProcessSnapshot{}, err
 	}
-	processID, err := r.idSource("proc_")
+	processID, err := randomID("proc_")
 	if err != nil {
 		return ProcessSnapshot{}, err
 	}
@@ -569,11 +355,6 @@ func (r *Runtime) CreateProcess(sessionID string, input string, spec manifest.Ma
 		manifest:  spec,
 		revision:  1,
 		digest:    program.Digest,
-		deadline:  r.clampDeadline(deadline),
-		// A root manifest with history:false opts out of session-history sharing —
-		// each run sees only its own input and inherits no cross-run taint. Reuses
-		// the hideHistory delivery gate (and its persistence).
-		hideHistory: !spec.SharesHistory(),
 	}
 	proc.journal = r.newJournal(proc, newProcessHistory(), 0)
 	r.processes[processID] = proc

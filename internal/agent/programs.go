@@ -183,21 +183,6 @@ func compileSchema(what string, document json.RawMessage) (json.RawMessage, *jso
 	return json.RawMessage(compact.Bytes()), schema, nil
 }
 
-// remove unregisters a program and hands back the release of its image.
-// Unregistering and releasing are two steps because the caller settles the
-// processes bound to it in between: nothing can spawn once the id is gone, and
-// the image must outlive the ones still unwinding.
-func (r *programRegistry) remove(id ProgramID) (release func(context.Context) error, ok bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	program, ok := r.programs[id]
-	if !ok {
-		return nil, false
-	}
-	delete(r.programs, id)
-	return program.image.Close, true
-}
-
 func (r *programRegistry) get(id ProgramID) (compiledProgram, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

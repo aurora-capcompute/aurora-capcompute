@@ -146,7 +146,7 @@ func TestDispatcherPersistsAndResumesYieldedTask(t *testing.T) {
 			TaskTTL:     time.Hour,
 		}
 		tape := journaled.NewTape(journal)
-		return replay.NewDispatcher(tape, taskDispatcher, nil)
+		return replay.NewDispatcher(tape, taskDispatcher)
 	}
 	call := sys.Syscall{Abi: sys.ABIVersion, Name: "net.http", Args: json.RawMessage(`{"url":"https://example.com"}`)}
 
@@ -255,7 +255,7 @@ func TestDispatcherDeniedTask(t *testing.T) {
 			TaskTTL:     time.Hour,
 		}
 		tape := journaled.NewTape(journal)
-		return replay.NewDispatcher(tape, taskDispatcher, nil)
+		return replay.NewDispatcher(tape, taskDispatcher)
 	}
 	call := sys.Syscall{Abi: sys.ABIVersion, Name: "net.http", Args: json.RawMessage(`{"url":"https://example.com"}`)}
 

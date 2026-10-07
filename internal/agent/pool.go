@@ -53,8 +53,8 @@ func newPool(parent context.Context, size int) *pool {
 // submit runs a quantum as soon as a worker is free. It returns before the
 // quantum starts: the outcome arrives on the channel, and cancel drops the
 // submission while it waits or stops the quantum once it has started. deadline
-// bounds the quantum's wall-clock once it starts (0 = unbounded) — queue time
-// never counts against it.
+// bounds the quantum's wall-clock once it starts — queue time never counts
+// against it.
 //
 // The quantum's lifetime hangs off the pool's root: no caller's context reaches
 // it, so one caller can never cancel work it did not submit. cancel is the only
@@ -97,13 +97,8 @@ func (p *pool) runOne(q quantum) quantumResult {
 	if q.ctx.Err() != nil {
 		return p.dropped()
 	}
-	// The worker is held, so the wall-clock bound starts now. A zero deadline is
-	// the host's opt-out (Config.MaxQuantumDuration negative) and must stay
-	// unbounded — a zero timeout would expire before the guest ran.
-	ctx, done := context.WithCancel(q.ctx)
-	if q.deadline > 0 {
-		ctx, done = context.WithTimeout(q.ctx, q.deadline)
-	}
+	// The worker is held, so the wall-clock bound starts now.
+	ctx, done := context.WithTimeout(q.ctx, q.deadline)
 	defer done()
 	return q.run(ctx)
 }

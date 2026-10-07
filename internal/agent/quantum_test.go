@@ -18,7 +18,6 @@ func seamRuntime(t *testing.T) *Runtime {
 		Dispatchers: &runtimeDispatchers{},
 		Log:         newMemLog(),
 		TaskSecret:  []byte("seam-secret"),
-		IDSource:    sequentialIDs(),
 	})
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)

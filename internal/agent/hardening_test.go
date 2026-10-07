@@ -10,7 +10,6 @@ import (
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
-	"github.com/aurora-capcompute/aurora-capcompute/replay"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
@@ -40,16 +39,15 @@ func TestSysInputOmitsHistoryLabelsFromGuestPayload(t *testing.T) {
 	}
 }
 
-// L4: cloneManifest deep-copies the History/ShareCapabilities pointers, so a
-// caller that retains the input manifest cannot mutate a stored clone.
+// L4: Clone deep-copies the History pointer, so a caller that retains the
+// input manifest cannot mutate a stored clone.
 func TestCloneManifestDeepCopiesPointers(t *testing.T) {
 	yes := true
-	original := manifest.Manifest{History: &yes, ShareCapabilities: &yes}
+	original := manifest.Manifest{History: &yes}
 	clone := original.Clone()
 	*original.History = false
-	*original.ShareCapabilities = false
-	if !clone.SharesHistory() || !clone.SharesCapabilities() {
-		t.Fatal("mutating the original manifest's pointers changed the clone's settings")
+	if !clone.SharesHistory() {
+		t.Fatal("mutating the original manifest's pointer changed the clone's setting")
 	}
 }
 
@@ -92,28 +90,6 @@ func TestLifecyclePublishesDeclassifyWhenGranted(t *testing.T) {
 	_, ungrantedTable := mustLifecycle(t, nopNext{}, "msg", nil, manifest.Manifest{}, 1, nil)
 	if _, ok := ungrantedTable.Descriptor(manifest.DeclassifySyscall); ok {
 		t.Fatal("sys.declassify must not appear unless the manifest grants it (opt-in)")
-	}
-}
-
-// Decision #3: a non-idempotent capability's open intent is failed (surfaced
-// for review) rather than silently retried on crash-resume; everything else
-// retries; an empty set disables the policy (framework default).
-func TestOpenIntentPolicy(t *testing.T) {
-	if openIntentPolicy(nil) != nil {
-		t.Fatal("empty set should yield nil (retry everything)")
-	}
-	if openIntentPolicy([]string{"", "  "}) != nil {
-		t.Fatal("only-blank names should yield nil")
-	}
-	policy := openIntentPolicy([]string{"payments.charge"})
-	if policy == nil {
-		t.Fatal("a non-empty set should yield a policy")
-	}
-	if got := policy(sys.Syscall{Name: "payments.charge"}); got != replay.FailOpenIntent {
-		t.Fatalf("non-idempotent syscall = %v, want FailOpenIntent (no silent at-least-once)", got)
-	}
-	if got := policy(sys.Syscall{Name: "core.read"}); got != replay.RetryOpenIntent {
-		t.Fatalf("ordinary syscall = %v, want RetryOpenIntent", got)
 	}
 }
 
