@@ -1,7 +1,7 @@
 // Package agent is the runtime: it owns session and process lifecycle, the
 // scheduler-driven quanta that resume Wasm programs on the capcompute processor,
-// durable approval tasks, retries, event subscriptions, and the read
-// projections (snapshots, journal, call graph) the public API exposes. All
+// durable approval tasks and timers, retries, and the session read the public
+// API exposes. All
 // durable state is a fold of one append-only event stream per session — the
 // runtime keeps no mutable row store, and restore rebuilds in-memory state by
 // replaying each stream from the beginning.
@@ -21,7 +21,6 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
@@ -33,7 +32,6 @@ import (
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/errs"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
 	internalhost "github.com/aurora-capcompute/aurora-capcompute/internal/agent/host"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 )
@@ -186,7 +184,6 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		processes:       make(map[string]*processState),
 		idSource:        config.IDSource,
 		now:             config.Now,
-		eventSize:       config.EventSize,
 		taskSecret:      append([]byte(nil), config.TaskSecret...),
 		taskTTL:         config.TaskTTL,
 		maxAbortRetries: config.MaxAbortRetries,
@@ -202,13 +199,6 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 	if runtime.now == nil {
 		runtime.now = time.Now
 	}
-	if runtime.eventSize <= 0 {
-		runtime.eventSize = 32
-	}
-	// Everything below writes through the tap, so a subscription needs no wiring
-	// of its own: it sees a session's stream because that is where the writes go.
-	runtime.subs = newSubscriptions(runtime.eventSize)
-	runtime.log = &tappedLog{Log: runtime.log, subs: runtime.subs}
 	runtime.tasks = newEventTaskStore(runtime.log, runtime.now)
 	if runtime.taskTTL <= 0 {
 		runtime.taskTTL = 24 * time.Hour
@@ -775,72 +765,6 @@ func (r *Runtime) GetProcess(processID string) (ProcessSnapshot, error) {
 	return r.processSnapshotLocked(proc), nil
 }
 
-// Journal returns the process's current-revision journal as per-syscall entries:
-// each intent folded together with its completion, open intents rendered as
-// in-flight. Entry positions are intent-record positions in the hash-chained
-// journal.
-func (r *Runtime) Journal(processID string) ([]JournalEntry, error) {
-	r.mu.Lock()
-	proc := r.processes[processID]
-	r.mu.Unlock()
-	if proc == nil {
-		return nil, fmt.Errorf("%w: process %s", errs.NotFound, processID)
-	}
-	if proc.journal == nil {
-		return nil, fmt.Errorf("%w: process %s has no readable journal", errs.NotFound, processID)
-	}
-	return proc.journal.entries()
-}
-
-// JournalRevisions returns a per-revision snapshot of the process's journal.
-// For each revision r the snapshot contains, at every position, the record with
-// the highest revision ≤ r — i.e. the effective state of the process at that point.
-// Each entry's Revision field reflects when it was first written, so callers can
-// distinguish steps carried forward from earlier revisions versus steps first
-// executed at revision r.
-func (r *Runtime) JournalRevisions(processID string) (map[uint64][]JournalEntry, error) {
-	r.mu.Lock()
-	proc := r.processes[processID]
-	r.mu.Unlock()
-	if proc == nil {
-		return nil, fmt.Errorf("%w: process %s", errs.NotFound, processID)
-	}
-	if proc.journal == nil {
-		return nil, fmt.Errorf("%w: process %s has no readable journal", errs.NotFound, processID)
-	}
-	journal := proc.journal
-	revs := journal.history.allRevisions()
-	result := make(map[uint64][]JournalEntry, len(revs))
-	for _, rev := range revs {
-		view := newLogJournal(journal.log, journal.scope, journal.proc, rev,
-			journal.history, journal.history.lengthAt(rev), journal.now)
-		entries, err := view.entries()
-		if err != nil {
-			return nil, err
-		}
-		result[rev] = entries
-	}
-	return result, nil
-}
-
-func (r *Runtime) Tasks(processID string) ([]TaskSnapshot, error) {
-	r.mu.Lock()
-	proc := r.processes[processID]
-	r.mu.Unlock()
-	if proc == nil {
-		return nil, fmt.Errorf("%w: process %s", errs.NotFound, processID)
-	}
-	records, err := r.tasks.List(context.Background(), r.tenantID, processID)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]TaskSnapshot, 0, len(records))
-	for _, record := range records {
-		out = append(out, r.taskSnapshot(record))
-	}
-	return out, nil
-}
-
 func (r *Runtime) ResolveTask(taskID, token string, resolution durable.TaskResolution) (TaskSnapshot, error) {
 	switch resolution.Decision {
 	case durable.TaskApproved, durable.TaskCompleted, durable.TaskFailed, durable.TaskDenied, durable.TaskCancelled:
@@ -1032,22 +956,6 @@ func (r *Runtime) forkJournalLocked(proc *processState, forkOffset int) {
 		parent.history, forkOffset,
 		parent.now,
 	)
-}
-
-// Subscribe follows a session's durable stream from now on. The events are the
-// log's own — a subscriber that wants the history before it arrived reads the
-// stream, which is the same thing restore reads. Today the tap forwards only
-// the guest's sys.log reports; see subscriberVisible.
-func (r *Runtime) Subscribe(sessionID string) (<-chan eventlog.Event, func(), error) {
-	r.mu.Lock()
-	session := r.sessions[sessionID]
-	r.mu.Unlock()
-	if session == nil {
-		return nil, nil, fmt.Errorf("%w: session %s", errs.NotFound, sessionID)
-	}
-	id, ch := r.subs.add(sessionID)
-	var once sync.Once
-	return ch, func() { once.Do(func() { r.subs.remove(sessionID, id) }) }, nil
 }
 
 func (r *Runtime) Close(ctx context.Context) error {

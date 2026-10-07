@@ -80,7 +80,7 @@ func TestTimerFiresFromTheSweep(t *testing.T) {
 	waitForStatus(t, runtime, proc.ID, durable.ProcessWaitingTask)
 
 	runtime.sweepTasks()
-	if tasks, _ := runtime.Tasks(proc.ID); len(tasks) != 1 || tasks[0].State != durable.TaskPending {
+	if tasks := processLog(t, runtime, proc.ID).Tasks; len(tasks) != 1 || tasks[0].State != durable.TaskPending {
 		t.Fatalf("timer fired before its time: %+v", tasks)
 	}
 
@@ -93,7 +93,7 @@ func TestTimerFiresFromTheSweep(t *testing.T) {
 	if done.Answer != "woke up" {
 		t.Fatalf("answer = %q", done.Answer)
 	}
-	tasks, _ := runtime.Tasks(proc.ID)
+	tasks := processLog(t, runtime, proc.ID).Tasks
 	if len(tasks) != 1 || tasks[0].State != durable.TaskCompleted || tasks[0].Resolution.Actor != "timer" {
 		t.Fatalf("timer task = %+v", tasks)
 	}
@@ -145,9 +145,9 @@ func TestSweepWakesAProcessWhoseWakeFailed(t *testing.T) {
 		defer cancel()
 		_ = second.Close(ctx)
 	})
-	tasks, err := second.Tasks(proc.ID)
-	if err != nil || len(tasks) != 1 {
-		t.Fatalf("tasks = %+v, err = %v", tasks, err)
+	tasks := processLog(t, second, proc.ID).Tasks
+	if len(tasks) != 1 {
+		t.Fatalf("tasks = %+v", tasks)
 	}
 	if _, err := second.ResolveTask(tasks[0].ID, tasks[0].ResolutionToken, durable.TaskResolution{
 		Decision: durable.TaskApproved,

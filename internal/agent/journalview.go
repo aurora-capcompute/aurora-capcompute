@@ -98,40 +98,6 @@ func (h *processHistory) header(rev uint64) (journaled.Header, bool) {
 	return out, found
 }
 
-// allRevisions returns all distinct revision numbers in the history, sorted ascending.
-func (h *processHistory) allRevisions() []uint64 {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	seen := make(map[uint64]struct{})
-	for _, entries := range h.byPos {
-		for _, e := range entries {
-			seen[e.revision] = struct{}{}
-		}
-	}
-	out := make([]uint64, 0, len(seen))
-	for r := range seen {
-		out = append(out, r)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
-	return out
-}
-
-// lengthAt returns the journal length effective at revision rev: one past the
-// highest position holding a record with revision ≤ rev.
-func (h *processHistory) lengthAt(rev uint64) int {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	length := 0
-	for position, entries := range h.byPos {
-		for _, e := range entries {
-			if e.revision <= rev && position+1 > length {
-				length = position + 1
-			}
-		}
-	}
-	return length
-}
-
 // getAt returns a copy of the record at position with the highest revision ≤ maxRev.
 func (h *processHistory) getAt(position int, maxRev uint64) (journaled.Record, bool) {
 	h.mu.Lock()
@@ -149,20 +115,41 @@ func (h *processHistory) getAt(position int, maxRev uint64) (journaled.Record, b
 	return copyRecord(best.record), true
 }
 
-// revAt returns the revision number of the record at position with the highest
-// revision ≤ maxRev. Used to annotate shared-prefix entries with their origin revision.
-func (h *processHistory) revAt(position int, maxRev uint64) (uint64, bool) {
+// entries pairs every intent the process ever journaled, in every revision,
+// with its completion: the record its own revision wrote one position later. A
+// revision writes only from its fork offset on, so its intent's completion is
+// never another revision's. An intent with no completion — a crash window, a
+// pending task, an abandoned attempt — is in flight.
+func (h *processHistory) entries() []JournalEntry {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	var best uint64
-	found := false
-	for _, e := range h.byPos[position] {
-		if e.revision <= maxRev && (!found || e.revision > best) {
-			best = e.revision
-			found = true
+	entries := []JournalEntry{}
+	for position, written := range h.byPos {
+		for _, intent := range written {
+			if intent.record.Syscall == nil {
+				continue // completions fold into their intent's entry
+			}
+			entry := JournalEntry{
+				Position: position,
+				Revision: intent.revision,
+				Syscall:  intent.record.Syscall.Copy(),
+				Outcome:  JournalOutcome{Status: sys.StatusYield, Message: "in flight"},
+			}
+			for _, completion := range h.byPos[position+1] {
+				if completion.revision == intent.revision && completion.record.Result != nil {
+					entry.Outcome = encodeOutcome(completion.record.Result.Copy())
+				}
+			}
+			entries = append(entries, entry)
 		}
 	}
-	return best, found
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Position != entries[j].Position {
+			return entries[i].Position < entries[j].Position
+		}
+		return entries[i].Revision < entries[j].Revision
+	})
+	return entries
 }
 
 func copyRecord(rec journaled.Record) journaled.Record {
@@ -364,45 +351,6 @@ func (j *logJournal) outermostOpenBegin() (int, bool) {
 		return start + 1, true
 	}
 	return 0, false
-}
-
-// entries pairs the journal's intent/completion records into per-syscall
-// entries. An intent with no completion (an open intent — a crash window or a
-// pending external task) yields an entry with a yield outcome; callers render
-// it as in-flight.
-func (j *logJournal) entries() ([]JournalEntry, error) {
-	length := j.Length()
-	entries := make([]JournalEntry, 0, length/2+1)
-	for i := range length {
-		rec, err := j.Load(i)
-		if err != nil {
-			return nil, err
-		}
-		if rec.Syscall == nil {
-			continue // completions fold into their intent's entry below
-		}
-		rev := j.rev
-		if r, ok := j.history.revAt(i, j.rev); ok {
-			rev = r
-		}
-		entry := JournalEntry{
-			Position: rec.Position,
-			Revision: rev,
-			Syscall:  *rec.Syscall,
-			Outcome:  JournalOutcome{Status: sys.StatusYield, Message: "in flight"},
-		}
-		if i+1 < length {
-			completion, err := j.Load(i + 1)
-			if err != nil {
-				return nil, err
-			}
-			if completion.Result != nil {
-				entry.Outcome = encodeOutcome(*completion.Result)
-			}
-		}
-		entries = append(entries, entry)
-	}
-	return entries, nil
 }
 
 func encodeOutcome(result sys.SyscallResult) JournalOutcome {

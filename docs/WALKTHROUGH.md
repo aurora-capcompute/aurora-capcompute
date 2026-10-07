@@ -145,8 +145,8 @@ why `Stack.ForProcess` exists and why nothing assembles this by hand.
   plus history and the capability menu), `sys.output` (its answer), and
   `sys.abort`.
 - **`task.Dispatcher`** — durable approval, described below.
-- **progress / timer / drivers** — `sys.log` publishes a progress line to live
-  subscribers; `sys.timer` yields and becomes a durable timer task; the drivers
+- **progress / timer / drivers** — `sys.log` journals a progress line for a
+  watcher to read; `sys.timer` yields and becomes a durable timer task; the drivers
   are the application's actual capabilities and are injected, never owned here.
 
 Note that the runtime's own protocol calls are *granted explicitly* — they pass
@@ -230,7 +230,7 @@ knows is a fold over those streams:
 
 - session and process state (`restore.go`, `snapshots.go`)
 - tasks (`tasks.go`)
-- the capability journal views (`journalview.go`, `callgraph.go`)
+- the capability journal views (`journalview.go`)
 
 There is no mutable row store to drift out of sync, and no migration to write
 when a projection changes shape. `restore.go` rebuilds in-memory state on
@@ -291,8 +291,8 @@ per quantum; the gain is that a cold start is the only start.
 ## The public surface
 
 `aurora/` is a thin re-export of `internal/agent`. `aurora.Runtime` is the whole
-API: sessions, processes, journal and call-graph reads, tasks, stop/retry, and
-`Subscribe`.
+API: sessions, processes, the session read (journals and tasks included), task
+resolution, and stop/retry.
 
 The runtime owns no capabilities, dispatchers, stores, or channels. Dispatchers
 and the event log are injected through `Config`; programs arrive through

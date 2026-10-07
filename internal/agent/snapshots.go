@@ -5,6 +5,7 @@ package agent
 // helpers (titles, visible capabilities, defensive copies) they lean on.
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"time"
@@ -40,11 +41,22 @@ func (r *Runtime) storedSessionLocked(session *sessionState) durable.Session {
 }
 
 func (r *Runtime) sessionSnapshotLocked(session *sessionState) SessionSnapshot {
-	procs := make([]ProcessSnapshot, 0, len(session.processIDs))
+	procs := make([]ProcessLog, 0, len(session.processIDs))
 	for _, processID := range session.processIDs {
-		if proc := r.processes[processID]; proc != nil {
-			procs = append(procs, r.processSnapshotLocked(proc))
+		proc := r.processes[processID]
+		if proc == nil {
+			continue
 		}
+		records, _ := r.tasks.List(context.Background(), r.tenantID, proc.id)
+		tasks := make([]TaskSnapshot, 0, len(records))
+		for _, record := range records {
+			tasks = append(tasks, r.taskSnapshot(record))
+		}
+		procs = append(procs, ProcessLog{
+			ProcessSnapshot: r.processSnapshotLocked(proc),
+			Entries:         proc.journal.history.entries(),
+			Tasks:           tasks,
+		})
 	}
 	return SessionSnapshot{
 		SessionSummary: r.sessionSummaryLocked(session),

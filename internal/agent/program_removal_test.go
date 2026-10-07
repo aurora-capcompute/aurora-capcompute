@@ -136,8 +136,8 @@ func TestRemoveProgramDrainsEvictedProcesses(t *testing.T) {
 	if strings.Contains(snapshot.Error, "wazero") || strings.Contains(snapshot.Error, "module closed") {
 		t.Fatalf("eviction leaked a processor-level error into the audit record: %q", snapshot.Error)
 	}
-	if _, err := runtime.Journal(processID); err != nil {
-		t.Fatalf("journal of an evicted process: %v", err)
+	if len(processLog(t, runtime, processID).Entries) == 0 {
+		t.Fatal("no journal for an evicted process")
 	}
 }
 
@@ -164,8 +164,8 @@ func TestRemoveProgramWithUnstoppableProcess(t *testing.T) {
 	close(dispatchers.release)
 
 	settled := waitForTerminal(t, runtime, processID)
-	if _, err := runtime.Journal(processID); err != nil {
-		t.Fatalf("journal of a settled process: %v", err)
+	if len(processLog(t, runtime, processID).Entries) == 0 {
+		t.Fatal("no journal for a settled process")
 	}
 	t.Logf("unstoppable process settled as %s (%q)", settled.Status, settled.Error)
 }

@@ -15,15 +15,8 @@ type Runtime interface {
 	GetSession(sessionID string) (SessionSnapshot, error)
 	CreateProcess(sessionID string, input string, manifest Manifest, deadline time.Duration) (ProcessSnapshot, error)
 	GetProcess(processID string) (ProcessSnapshot, error)
-	Journal(processID string) ([]JournalEntry, error)
-	JournalRevisions(processID string) (map[uint64][]JournalEntry, error)
-	SessionGraph(sessionID string) (SessionGraph, error)
-	Tasks(processID string) ([]TaskSnapshot, error)
 	ResolveTask(taskID string, token string, resolution Resolution) (TaskSnapshot, error)
 	Stop(processID string) (ProcessSnapshot, error)
 	Retry(processID string, mode RetryMode) (ProcessSnapshot, error)
-	// Subscribe follows a session's durable stream from now on; the events are
-	// the log's own. The history before the call is read from the log itself.
-	Subscribe(sessionID string) (<-chan LogEvent, func(), error)
 	Close(ctx context.Context) error
 }

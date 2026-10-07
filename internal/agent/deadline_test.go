@@ -71,8 +71,8 @@ func TestDeadlineInterruptsRatherThanStops(t *testing.T) {
 	}
 	// The journal survives: an interruption is external, so nothing about the
 	// process's recorded history is abandoned.
-	if _, err := runtime.Journal(processID); err != nil {
-		t.Fatalf("journal after a deadline abort: %v", err)
+	if len(processLog(t, runtime, processID).Entries) == 0 {
+		t.Fatal("no journal after a deadline abort")
 	}
 
 	// And it is resumable. Let the third party answer this time.

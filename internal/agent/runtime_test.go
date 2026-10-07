@@ -120,13 +120,30 @@ func TestNewRuntimeRequiresImplementationDependencies(t *testing.T) {
 	}
 }
 
+// processLog is one process's part of its session read.
+func processLog(t *testing.T, runtime *Runtime, processID string) ProcessLog {
+	t.Helper()
+	proc, err := runtime.GetProcess(processID)
+	if err != nil {
+		t.Fatalf("get process: %v", err)
+	}
+	session, err := runtime.GetSession(proc.SessionID)
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	for _, logged := range session.Processes {
+		if logged.ID == processID {
+			return logged
+		}
+	}
+	t.Fatalf("process %s is not in its session", processID)
+	return ProcessLog{}
+}
+
 // journalNames projects a run's journal into its syscall names.
 func journalNames(t *testing.T, runtime *Runtime, processID string) []string {
 	t.Helper()
-	entries, err := runtime.Journal(processID)
-	if err != nil {
-		t.Fatalf("load journal: %v", err)
-	}
+	entries := processLog(t, runtime, processID).Entries
 	names := make([]string, 0, len(entries))
 	for _, e := range entries {
 		names = append(names, e.Syscall.Name)
@@ -327,8 +344,8 @@ func TestRemoveProgramEjectsLiveProcesses(t *testing.T) {
 		t.Fatalf("process after program removal = %s, want stopped", ejected.Status)
 	}
 	// It stays auditable — its journal is still readable.
-	if _, err := runtime.Journal(proc.ID); err != nil {
-		t.Fatalf("journal of an ejected process: %v", err)
+	if len(processLog(t, runtime, proc.ID).Entries) == 0 {
+		t.Fatal("no journal for an ejected process")
 	}
 	// And it stays bound to the identity it was created from: a different program
 	// under the same name leaves it stranded.
@@ -680,9 +697,9 @@ func TestRuntimeApprovalCycle(t *testing.T) {
 	}
 
 	waitForStatus(t, runtime, proc.ID, durable.ProcessWaitingTask)
-	tasks, err := runtime.Tasks(proc.ID)
-	if err != nil || len(tasks) != 1 {
-		t.Fatalf("tasks = %+v, err=%v", tasks, err)
+	tasks := processLog(t, runtime, proc.ID).Tasks
+	if len(tasks) != 1 {
+		t.Fatalf("tasks = %+v", tasks)
 	}
 	pending := tasks[0]
 	if pending.Syscall.Name != "tool.y" || pending.State != "pending" {
@@ -704,7 +721,7 @@ func TestRuntimeApprovalCycle(t *testing.T) {
 		t.Fatalf("answer = %q, want approved-done", completed.Answer)
 	}
 	// The approved execution was journaled once and marked executed.
-	tasks, _ = runtime.Tasks(proc.ID)
+	tasks = processLog(t, runtime, proc.ID).Tasks
 	if len(tasks) != 1 || tasks[0].State != "executed" {
 		t.Fatalf("final task state = %+v", tasks)
 	}
@@ -757,15 +774,15 @@ func TestUnansweredApprovalExpires(t *testing.T) {
 		t.Fatalf("create run: %v", err)
 	}
 	waitForStatus(t, runtime, proc.ID, durable.ProcessWaitingTask)
-	tasks, err := runtime.Tasks(proc.ID)
-	if err != nil || len(tasks) != 1 {
-		t.Fatalf("tasks = %+v, err=%v", tasks, err)
+	tasks := processLog(t, runtime, proc.ID).Tasks
+	if len(tasks) != 1 {
+		t.Fatalf("tasks = %+v", tasks)
 	}
 	pending := tasks[0]
 
 	// Before the deadline the sweep leaves the task alone.
 	runtime.sweepTasks()
-	if tasks, _ := runtime.Tasks(proc.ID); tasks[0].State != "pending" {
+	if tasks := processLog(t, runtime, proc.ID).Tasks; tasks[0].State != "pending" {
 		t.Fatalf("task swept before its deadline: %+v", tasks[0])
 	}
 
@@ -775,16 +792,13 @@ func TestUnansweredApprovalExpires(t *testing.T) {
 	runtime.sweepTasks()
 
 	waitForStatus(t, runtime, proc.ID, durable.ProcessCompleted)
-	tasks, _ = runtime.Tasks(proc.ID)
+	logged := processLog(t, runtime, proc.ID)
+	tasks = logged.Tasks
 	if len(tasks) != 1 || tasks[0].State != "expired" {
 		t.Fatalf("task after the deadline = %+v, want expired", tasks)
 	}
-	journal, err := runtime.Journal(proc.ID)
-	if err != nil {
-		t.Fatalf("journal: %v", err)
-	}
 	sawExpired := false
-	for _, entry := range journal {
+	for _, entry := range logged.Entries {
 		if entry.Syscall.Name == "tool.y" && entry.Outcome.Code == sys.ErrnoExpired {
 			sawExpired = true
 		}
@@ -918,20 +932,20 @@ func TestRuntimeHardRetryForksFromBeginning(t *testing.T) {
 	if recovered.Answer != "recovered" {
 		t.Fatalf("answer = %q, want recovered", recovered.Answer)
 	}
-	// The session graph exposes a flat entry list where each entry carries its
+	// The session read exposes a flat entry list where each entry carries its
 	// revision. Revision 2 must start at record 0 (hard restart, no shared prefix).
-	graph, err := runtime.SessionGraph(session.ID)
+	read, err := runtime.GetSession(session.ID)
 	if err != nil {
-		t.Fatalf("session graph: %v", err)
+		t.Fatalf("get session: %v", err)
 	}
-	if len(graph.Processes) != 1 {
-		t.Fatalf("graph runs = %d, want 1", len(graph.Processes))
+	if len(read.Processes) != 1 {
+		t.Fatalf("session processes = %d, want 1", len(read.Processes))
 	}
-	gr := graph.Processes[0]
-	if gr.CurrentRevision != 2 {
-		t.Fatalf("current revision = %d, want 2", gr.CurrentRevision)
+	gr := read.Processes[0]
+	if gr.Revision != 2 {
+		t.Fatalf("current revision = %d, want 2", gr.Revision)
 	}
-	forkIdx := store.minRev2Index(gr.ProcessID)
+	forkIdx := store.minRev2Index(gr.ID)
 	if forkIdx != 0 {
 		t.Fatalf("fork index = %d, want 0 (hard retry always restarts from the beginning)", forkIdx)
 	}
@@ -947,10 +961,10 @@ func TestRuntimeHardRetryForksFromBeginning(t *testing.T) {
 		}
 	}
 	if rev1Count == 0 {
-		t.Fatal("expected revision-1 entries in graph (first run preserved in log)")
+		t.Fatal("expected revision-1 entries in the session read (first run preserved in log)")
 	}
 	if rev2Count == 0 {
-		t.Fatal("expected revision-2 entries in graph (hard retry re-ran from the beginning)")
+		t.Fatal("expected revision-2 entries in the session read (hard retry re-ran from the beginning)")
 	}
 }
 

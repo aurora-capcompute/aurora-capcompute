@@ -2,7 +2,9 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,17 +20,21 @@ func pair(name, result string) (sys.Syscall, sys.SyscallResult) {
 		sys.Result([]byte(strconv.Quote(result)))
 }
 
-// loadEntries projects a journal into `name="result"` strings, one per
+// loadEntries projects a journal view into `name="result"` strings, one per
 // completed syscall.
 func loadEntries(t *testing.T, j *logJournal) []string {
 	t.Helper()
-	entries, err := j.entries()
-	if err != nil {
-		t.Fatalf("entries: %v", err)
-	}
 	var out []string
-	for _, e := range entries {
-		out = append(out, e.Syscall.Name+"="+string(e.Outcome.Result))
+	for i := 0; i+1 < j.Length(); i += 2 {
+		intent, err := j.Load(i)
+		if err != nil {
+			t.Fatalf("load %d: %v", i, err)
+		}
+		completion, err := j.Load(i + 1)
+		if err != nil {
+			t.Fatalf("load %d: %v", i+1, err)
+		}
+		out = append(out, intent.Syscall.Name+"="+string(completion.Result.Result()))
 	}
 	return out
 }
@@ -203,27 +209,31 @@ func TestLogJournalBacksTheKernelTape(t *testing.T) {
 	}
 }
 
-// An open intent at the tail (a crash window or pending approval) surfaces as
-// an in-flight entry and does not break folding.
-func TestLogJournalOpenIntentEntry(t *testing.T) {
+// The history pairs every revision's intents with that revision's own
+// completions. An open intent (a crash window, a pending approval, an attempt
+// abandoned by a fork) is in flight, even where an earlier revision completed
+// the same position.
+func TestProcessHistoryEntriesPairWithinTheirRevision(t *testing.T) {
 	log := newMemLog()
 	scope := eventlog.Scope{TenantID: "t", SessionID: "th"}
 	now := func() time.Time { return time.Unix(0, 0).UTC() }
-	j := newLogJournal(log, scope, "proc1", 1, newProcessHistory(), 0, now)
-
-	syscall, result := pair("a", "a")
-	appendPair(t, j, syscall, result)
-	open, _ := pair("b", "")
-	appendIntent(t, j, open)
-
-	entries, err := j.entries()
-	if err != nil {
-		t.Fatalf("entries: %v", err)
+	history := newProcessHistory()
+	base := newLogJournal(log, scope, "proc1", 1, history, 0, now)
+	for _, name := range []string{"a", "b", "c"} {
+		syscall, result := pair(name, name)
+		appendPair(t, base, syscall, result)
 	}
-	if len(entries) != 2 {
-		t.Fatalf("entries = %d, want 2", len(entries))
+	// Revision 2 forks after a, and leaves its b2 open.
+	child := newLogJournal(log, scope, "proc1", 2, history, 2, now)
+	open, _ := pair("b2", "")
+	appendIntent(t, child, open)
+
+	var got []string
+	for _, e := range history.entries() {
+		got = append(got, fmt.Sprintf("%d@%d %s %s", e.Position, e.Revision, e.Syscall.Name, e.Outcome.Status))
 	}
-	if entries[1].Syscall.Name != "b" || entries[1].Outcome.Status != sys.StatusYield {
-		t.Fatalf("open entry = %+v, want in-flight b", entries[1])
+	want := []string{"0@1 a result", "2@1 b result", "2@2 b2 yield", "4@1 c result"}
+	if strings.Join(got, ", ") != strings.Join(want, ", ") {
+		t.Fatalf("entries = %v, want %v", got, want)
 	}
 }

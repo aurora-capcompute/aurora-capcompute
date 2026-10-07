@@ -61,7 +61,6 @@ type Config struct {
 	Log         eventlog.Log
 	IDSource    func(prefix string) (string, error)
 	Now         func() time.Time
-	EventSize   int
 	TenantID    string
 	TaskSecret  []byte
 	TaskTTL     time.Duration
@@ -118,7 +117,6 @@ type Runtime struct {
 	processes       map[string]*processState
 	idSource        func(string) (string, error)
 	now             func() time.Time
-	eventSize       int
 	taskSecret      []byte
 	taskTTL         time.Duration
 	maxAbortRetries int
@@ -128,11 +126,6 @@ type Runtime struct {
 	factory         *internalhost.Factory[processKey, ProcessContext]
 	wg              sync.WaitGroup
 	closed          bool
-
-	// subs is the watcher side of the durable log: it holds no runtime state and
-	// takes no runtime lock, because a subscription is a tap on the stream
-	// rather than a second channel to keep in step with it.
-	subs *subscriptions
 }
 
 type sessionState struct {
@@ -285,10 +278,23 @@ type SessionSummary struct {
 	Tags            map[string]string `json:"tags,omitempty"`
 }
 
+// SessionSnapshot is the one session read: the session, its conversation
+// history, and every process with its whole journal and its tasks. Every
+// narrower view — one revision's journal, a task list — is a grouping of it.
 type SessionSnapshot struct {
-	SessionSummary
-	History   []HistoryMessage
-	Processes []ProcessSnapshot
+	SessionSummary `json:"session"`
+	History        []HistoryMessage `json:"history,omitempty"`
+	Processes      []ProcessLog     `json:"processes"`
+}
+
+// ProcessLog is one process's complete durable state: its snapshot, every
+// journal entry ever written across all its revisions (each carries its
+// position and the revision that wrote it, so the fork structure is
+// recoverable), and its tasks.
+type ProcessLog struct {
+	ProcessSnapshot
+	Entries []JournalEntry `json:"entries"`
+	Tasks   []TaskSnapshot `json:"tasks,omitempty"`
 }
 
 type ProcessSnapshot struct {

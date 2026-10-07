@@ -23,8 +23,8 @@ sensitive action, and keep a full audit trail — all without you writing that
 plumbing yourself.
 
 `aurora-capcompute` is that plumbing. It owns **sessions and processes**, the
-**replay journal**, **retries**, **savepoints**, **durable approval tasks**,
-**scheduling**, and **event subscriptions**. Its
+**replay journal**, **retries**, **savepoints**, **durable approval tasks and
+timers**, and **scheduling**. Its
 trick: there is **no database of mutable rows**. All durable state is a *fold of a
 single append‑only event log per session* (event sourcing) — so the state is always
 reconstructible, auditable, and replayable.
@@ -75,7 +75,7 @@ assembly is [aurora-dist](https://github.com/aurora-capcompute/aurora-dist).
 | **Savepoints** | `sys.begin`/`sys.commit` bracket a critical section; `sys.abort` — or a failure that leaves the bracket open — forks the journal there and re‑runs the whole section live |
 | **Human‑in‑the‑loop** | A yielded syscall becomes a durable **task** with a secret resolution token; `ResolveTask` re‑drives the original intent |
 | **Bounded concurrency** | A fixed worker pool caps how many guests run at once; each quantum carries its own wall‑clock deadline |
-| **Subscriptions** | `Subscribe(sessionID)` taps the session's durable log; today it forwards the guest's `sys.log` reports |
+| **One read** | `GetSession` returns the session, its history, and every process with its whole journal (all revisions) and its tasks |
 | **Capability security** | Only granted, schema‑checked syscalls are admitted; the runtime fails closed if a driver over‑advertises what it can do |
 | **Program contracts** | Each program ships a manifest (description + input/output JSON Schemas), validated at registration and on every call |
 | **Hot‑swap** | `AddProgram` / `RemoveProgram` change the loaded Wasm set at runtime; in‑flight processes stay bound to their original code identity, and removing a program stops and ejects the ones running under it |
@@ -129,7 +129,7 @@ if err != nil {
 err = runtime.AddProgram(ctx, program)                         // Wasm bytes + interface manifest
 sess, _ := runtime.CreateSession("", nil)
 proc, _ := runtime.CreateProcess(sess.ID, input, manifest, 0) // manifest.Version must be 4; 0 = default quantum deadline
-events, cancel, _ := runtime.Subscribe(sess.ID)                // watch it run
+read, _ := runtime.GetSession(sess.ID)                        // its journal and tasks
 // … and runtime.ResolveTask(...) when a human approves a pending task.
 ```
 
