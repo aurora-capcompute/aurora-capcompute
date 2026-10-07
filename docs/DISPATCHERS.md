@@ -111,8 +111,10 @@ call and the index the monitor judges it against are one object. That is the
 **bottom** of the chain: there is nothing below it.
 
 One detail worth pausing on: `registry.Services` carries no identity at all —
-only the secret resolver and the audit key. A grant cannot name another
-process's data because nothing the driver is built from names a process.
+the secret resolver, the audit key, and `Scratch`, a store the provider has
+already bound to the calling session from the *credential*. A grant cannot
+name another session's data because nothing the driver is built from names a
+session.
 
 ---
 
