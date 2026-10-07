@@ -18,8 +18,8 @@ import (
 // newDispatcher builds one process's dispatcher chain for one quantum,
 // outermost first:
 //
-//	Validator → Flow.Guard → replay → Flow.Stamp → Declassifier  (monitor.Wrap)
-//	  → savepoints → world → lifecycle → task → progress → timer → drivers
+//	Validator → Flow.Guard → replay → Flow.Stamp  (monitor.Wrap)
+//	  → savepoints → world → lifecycle → task → Declassifier → progress → timer → drivers
 //
 // Everything beneath the replay layer is journaled: the savepoint markers, the
 // world sources (sys.now, sys.random), the lifecycle calls, and every effect.
@@ -69,6 +69,8 @@ func (r *Runtime) newDispatcher(ctx context.Context, cred durable.ProcessContext
 	if chain, err = newProgressDispatcher(chain, table); err != nil {
 		return nil, err
 	}
+	// Beneath the task layer, so its approval yield becomes a durable task.
+	chain = monitor.NewDeclassifier(chain)
 	chain = &task.Dispatcher{
 		Next:        chain,
 		Store:       r.tasks,

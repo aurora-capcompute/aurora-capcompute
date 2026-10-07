@@ -125,8 +125,9 @@ var DeclassifyInputSchema = json.RawMessage(`{
 // approval (there is no unapproved path: an unattended declassify would just
 // be flow-policy bypass), and the approved crossing is a journaled syscall
 // result, so replay re-applies it without asking again. It must sit *below*
-// the replay layer; Flow.Guard above it performs the actual taint removal
-// when the result passes through it.
+// the replay layer and below the layer that turns a yield into a durable task,
+// so the human's approval reaches it; Flow.Guard above performs the actual
+// taint removal when the result passes through it.
 type Declassifier[K any] struct {
 	next sys.Dispatcher[K]
 }
