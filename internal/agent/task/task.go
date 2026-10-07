@@ -80,8 +80,8 @@ func (d *Dispatcher[K]) Dispatch(ctx context.Context, cred K, syscall sys.Syscal
 		CreatedAt:       now,
 	}
 	// The TTL bounds a wait on someone's decision. A timer waits on nobody: its
-	// fire time is its deadline, and the timer service resolves it then, however
-	// late (an elapsed timer fires at boot), so a TTL could only race it.
+	// fire time is its deadline, and the runtime's task sweep resolves it then,
+	// however late (an elapsed timer fires at boot), so a TTL could only race it.
 	if d.TaskTTL > 0 && syscall.Name != sys.SyscallTimer {
 		expires := now.Add(d.TaskTTL)
 		record.ExpiresAt = &expires

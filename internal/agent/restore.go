@@ -145,36 +145,19 @@ func (r *Runtime) restoreSession(proj durable.Projection, journals map[string]ma
 			}
 		}
 	}
-	// A park is only coherent with its wakeup: a waiting process whose pending
-	// task resolved (the resolution outran the crash, the resume did not) and a
-	// yielded process would otherwise sleep forever — nothing re-delivers a lost
-	// wakeup. Fold them to interrupted, the re-drivable status, so recovery
-	// resumes them like any cut-off process.
-	pending := map[string]bool{}
-	for _, record := range proj.TaskList() {
-		if record.State == durable.TaskPending {
-			pending[record.Scope.ProcessID] = true
-		}
-	}
+	// A yielded process parked on no task, so nothing will wake it. Fold it to
+	// interrupted, the re-drivable status, so recovery resumes it like any
+	// cut-off process. A process waiting on a task the crash left resolved is
+	// woken by the task sweep.
 	for _, processID := range session.processIDs {
 		proc := r.processes[processID]
-		if proc == nil {
+		if proc == nil || proc.status != durable.ProcessYielded {
 			continue
 		}
-		lost := false
-		switch proc.status {
-		case durable.ProcessWaitingTask:
-			lost = !pending[proc.id]
-		case durable.ProcessYielded:
-			lost = true
-		}
-		if lost {
-			slog.Info("parked process lost its wakeup in a crash; folding to interrupted",
-				"process_id", proc.id, "status", proc.status)
-			proc.status = durable.ProcessInterrupted
-			if err := r.appendProcess(proc); err != nil {
-				return err
-			}
+		slog.Info("yielded process lost its wakeup in a crash; folding to interrupted", "process_id", proc.id)
+		proc.status = durable.ProcessInterrupted
+		if err := r.appendProcess(proc); err != nil {
+			return err
 		}
 	}
 

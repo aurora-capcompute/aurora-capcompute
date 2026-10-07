@@ -247,21 +247,21 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		return nil, err
 	}
 
-	go runtime.expireLoop()
+	go runtime.sweepLoop()
 	return runtime, nil
 }
 
-// taskExpiryInterval is how often the runtime looks for overdue tasks. Task
-// deadlines are hours long, so a minute of lateness is noise.
-const taskExpiryInterval = time.Minute
+// taskSweepInterval is how often the runtime settles due tasks and wakes the
+// processes parked on settled ones. A timer fires within this of its time.
+const taskSweepInterval = time.Second
 
-// expireLoop sweeps overdue tasks once at start — deadlines can pass while the
-// host is down — and then on every interval, until the runtime closes.
-func (r *Runtime) expireLoop() {
-	ticker := time.NewTicker(taskExpiryInterval)
+// sweepLoop sweeps once at start — deadlines can pass while the host is down —
+// and then on every interval, until the runtime closes.
+func (r *Runtime) sweepLoop() {
+	ticker := time.NewTicker(taskSweepInterval)
 	defer ticker.Stop()
 	for {
-		r.expireTasks()
+		r.sweepTasks()
 		select {
 		case <-r.baseCtx.Done():
 			return
@@ -270,34 +270,60 @@ func (r *Runtime) expireLoop() {
 	}
 }
 
-// expireTasks resolves every pending task past its deadline as expired and
-// resumes the process parked on it; the task layer then hands the guest errno
-// expired, and the program decides what to do. Without this a process whose
-// approval never came would wait forever: a late resolution is refused, and
-// nothing else wakes it. The task store decides each task under its lock, so a
-// human resolving at the deadline and the sweep cannot both win.
-func (r *Runtime) expireTasks() {
+// sweepTasks settles every pending task whose deadline passed — a timer fires,
+// an unanswered approval expires and the guest gets errno expired — and then
+// wakes every process parked on a task that is no longer pending. The wake is
+// read from state rather than carried by the resolution, so a wake that fails
+// (at boot, before the programs are loaded) happens on a later sweep. The task
+// store decides each task under its lock, so a human resolving at the deadline
+// and the sweep cannot both win.
+func (r *Runtime) sweepTasks() {
 	now := r.now().UTC()
-	for _, overdue := range r.tasks.Overdue(now) {
-		record, expired, err := r.tasks.Expire(context.Background(), r.tenantID, overdue.ID, now)
-		if err != nil {
-			slog.Warn("expire task", "task_id", overdue.ID, "error", err)
-			continue
-		}
-		if !expired {
-			continue
-		}
-		r.mu.Lock()
-		proc := r.processes[record.Scope.ProcessID]
-		waiting := proc != nil && proc.status == durable.ProcessWaitingTask
-		r.mu.Unlock()
-		if !waiting {
-			continue
-		}
-		if _, err := r.Retry(record.Scope.ProcessID, RetryResume); err != nil {
-			slog.Warn("resume process after task expiry", "process_id", record.Scope.ProcessID, "task_id", record.ID, "error", err)
+	for _, taskID := range r.tasks.Due(now) {
+		if err := r.tasks.Settle(context.Background(), r.tenantID, taskID, now); err != nil {
+			slog.Warn("settle task", "task_id", taskID, "error", err)
 		}
 	}
+	for _, processID := range r.parkedOnSettledTasks() {
+		if err := r.wake(processID); err != nil {
+			slog.Debug("wake process", "process_id", processID, "error", err)
+		}
+	}
+}
+
+// parkedOnSettledTasks lists the processes waiting on a task that no longer
+// waits on anyone.
+func (r *Runtime) parkedOnSettledTasks() []string {
+	r.mu.Lock()
+	var waiting []string
+	for id, proc := range r.processes {
+		if proc.status == durable.ProcessWaitingTask {
+			waiting = append(waiting, id)
+		}
+	}
+	r.mu.Unlock()
+	var settled []string
+	for _, id := range waiting {
+		records, err := r.tasks.List(context.Background(), r.tenantID, id)
+		if err == nil && !hasPendingTask(records) {
+			settled = append(settled, id)
+		}
+	}
+	return settled
+}
+
+// wake resumes a process parked on a task. It leaves a process in any other
+// state alone, so the resolver and the sweep may both call it.
+func (r *Runtime) wake(processID string) error {
+	r.mu.Lock()
+	proc := r.processes[processID]
+	waiting := proc != nil && proc.status == durable.ProcessWaitingTask
+	r.mu.Unlock()
+	if !waiting {
+		return nil
+	}
+	_, err := r.Retry(processID, RetryResume)
+	return err
 }
 
 // Drivers builds the driver chain below the task layer for one process: the
@@ -832,14 +858,10 @@ func (r *Runtime) ResolveTask(taskID, token string, resolution durable.TaskResol
 		return TaskSnapshot{}, err
 	}
 
-	r.mu.Lock()
-	proc := r.processes[record.Scope.ProcessID]
-	shouldResume := proc != nil && proc.status == durable.ProcessWaitingTask
-	r.mu.Unlock()
-	if shouldResume {
-		if _, retryErr := r.Retry(record.Scope.ProcessID, RetryResume); retryErr != nil {
-			return TaskSnapshot{}, retryErr
-		}
+	// The resolution stands whether or not the wake works: a process that cannot
+	// resume now (its program is not loaded) is woken by a later sweep.
+	if err := r.wake(record.Scope.ProcessID); err != nil {
+		slog.Warn("wake process after task resolution", "process_id", record.Scope.ProcessID, "task_id", record.ID, "error", err)
 	}
 	return r.taskSnapshot(record), nil
 }

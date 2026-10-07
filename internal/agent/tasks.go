@@ -143,45 +143,61 @@ func (s *eventTaskStore) Resolve(ctx context.Context, tenantID, taskID string, t
 	return cloneTaskRecord(record), nil
 }
 
-// Overdue lists the pending tasks whose deadline is at or before now.
-func (s *eventTaskStore) Overdue(now time.Time) []durable.TaskRecord {
+// Due lists the ids of the pending tasks whose deadline is at or before now.
+func (s *eventTaskStore) Due(now time.Time) []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var out []durable.TaskRecord
+	var out []string
 	for _, record := range s.records {
-		if record.State == durable.TaskPending && record.ExpiresAt != nil && !now.Before(*record.ExpiresAt) {
-			out = append(out, cloneTaskRecord(record))
+		if due(record, now) {
+			out = append(out, record.ID)
 		}
 	}
 	return out
 }
 
-// Expire resolves one overdue pending task as expired. ok is false when the
-// task is no longer pending or not yet due — a resolution got there first.
-func (s *eventTaskStore) Expire(ctx context.Context, tenantID, taskID string, now time.Time) (durable.TaskRecord, bool, error) {
+// Settle resolves one due task the way its deadline decides: a timer fires, and
+// anything else expires. A task that is no longer pending — a resolution got
+// there first — is left alone.
+func (s *eventTaskStore) Settle(ctx context.Context, tenantID, taskID string, now time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := taskKey(tenantID, taskID)
 	record, ok := s.records[key]
 	if !ok {
-		return durable.TaskRecord{}, false, durable.ErrTaskNotFound
+		return durable.ErrTaskNotFound
 	}
-	if record.State != durable.TaskPending || record.ExpiresAt == nil || now.Before(*record.ExpiresAt) {
-		return durable.TaskRecord{}, false, nil
+	if !due(record, now) {
+		return nil
 	}
-	record.State = durable.TaskExpired
 	record.Resolution = durable.TaskResolution{Decision: durable.TaskExpired, Actor: "aurora", Reason: "no resolution before the task's deadline"}
+	if fired, ok := timerFired(record); ok {
+		record.Resolution = durable.TaskResolution{Decision: durable.TaskCompleted, Actor: "timer", Data: fired}
+	}
+	record.State = record.Resolution.Decision
 	resolvedAt := now
 	record.ResolvedAt = &resolvedAt
 	ev, err := durable.TaskResolvedEvent(s.now().UTC(), record)
 	if err != nil {
-		return durable.TaskRecord{}, false, err
+		return err
 	}
 	if _, err := s.log.Append(ctx, s.scope(record), ev); err != nil {
-		return durable.TaskRecord{}, false, err
+		return err
 	}
 	s.records[key] = cloneTaskRecord(record)
-	return cloneTaskRecord(record), true, nil
+	return nil
+}
+
+// due reports whether a pending task's deadline has passed: a timer's fire
+// time, or an approval's expiry.
+func due(record durable.TaskRecord, now time.Time) bool {
+	if record.State != durable.TaskPending {
+		return false
+	}
+	if fireAt, ok := timerFireAt(record); ok {
+		return !now.Before(fireAt)
+	}
+	return record.ExpiresAt != nil && !now.Before(*record.ExpiresAt)
 }
 
 func (s *eventTaskStore) MarkExecuted(ctx context.Context, tenantID, taskID string, _ time.Time) error {

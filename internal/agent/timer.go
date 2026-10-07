@@ -2,7 +2,7 @@ package agent
 
 // The sys.timer syscall, served by the runtime below the task layer: a valid
 // call yields, and the task layer above turns the yield into a durable task
-// the application's scheduler fires once the duration elapses — resuming the
+// the runtime's task sweep fires once the duration elapses — resuming the
 // process from the same point. The dispatcher is only ever invoked for the
 // initial yield; on resume the resolved task data is served by the task
 // layer without re-dispatching here.
@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
@@ -61,6 +62,35 @@ func newTimerDispatcher(next sys.Dispatcher[ProcessContext], grant manifest.Sysc
 		return nil, err
 	}
 	return &timerDispatcher{next: next, maxDuration: maxDuration, hidden: grant.Hidden}, nil
+}
+
+// timerFireAt is when a timer task fires: its creation plus the duration the
+// guest asked for. The call was validated before it yielded, so a task that
+// does not decode is not a timer.
+func timerFireAt(record durable.TaskRecord) (time.Time, bool) {
+	request, ok := timerTaskRequest(record)
+	if !ok {
+		return time.Time{}, false
+	}
+	return record.CreatedAt.Add(time.Duration(request.DurationSeconds) * time.Second), true
+}
+
+// timerFired is the result a fired timer hands the guest.
+func timerFired(record durable.TaskRecord) (json.RawMessage, bool) {
+	request, ok := timerTaskRequest(record)
+	if !ok {
+		return nil, false
+	}
+	fired, err := json.Marshal(map[string]string{"status": "fired", "label": request.Label})
+	return fired, err == nil
+}
+
+func timerTaskRequest(record durable.TaskRecord) (timerRequest, bool) {
+	var request timerRequest
+	if record.Syscall.Name != manifest.TimerSyscall || json.Unmarshal(record.Syscall.Args, &request) != nil {
+		return timerRequest{}, false
+	}
+	return request, true
 }
 
 // Dispatch validates the request and yields a durable task. A valid call

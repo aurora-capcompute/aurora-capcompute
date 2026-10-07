@@ -764,7 +764,7 @@ func TestUnansweredApprovalExpires(t *testing.T) {
 	pending := tasks[0]
 
 	// Before the deadline the sweep leaves the task alone.
-	runtime.expireTasks()
+	runtime.sweepTasks()
 	if tasks, _ := runtime.Tasks(proc.ID); tasks[0].State != "pending" {
 		t.Fatalf("task swept before its deadline: %+v", tasks[0])
 	}
@@ -772,7 +772,7 @@ func TestUnansweredApprovalExpires(t *testing.T) {
 	mu.Lock()
 	now = now.Add(2 * time.Hour)
 	mu.Unlock()
-	runtime.expireTasks()
+	runtime.sweepTasks()
 
 	waitForStatus(t, runtime, proc.ID, durable.ProcessCompleted)
 	tasks, _ = runtime.Tasks(proc.ID)

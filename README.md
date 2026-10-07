@@ -172,6 +172,9 @@ how one syscall, one crash, and one approval each travel the chain — see
   the program's own contract.
 - **Approval** — a yielded syscall becomes a durable task with its intent left
   open; resolving it re‑drives the intent with the stored resolution.
+- **Deadlines** — a sweep runs every second. It fires each timer task whose
+  time has passed, expires each approval older than `TaskTTL`, and wakes every
+  process parked on a task that is no longer pending.
 - **Scheduling** — a process runs as a quantum on a fixed worker pool; the pool
   size is the concurrency bound, and a quantum's deadline bounds its wall‑clock.
 
