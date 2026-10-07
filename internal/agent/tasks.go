@@ -143,6 +143,47 @@ func (s *eventTaskStore) Resolve(ctx context.Context, tenantID, taskID string, t
 	return cloneTaskRecord(record), nil
 }
 
+// Overdue lists the pending tasks whose deadline is at or before now.
+func (s *eventTaskStore) Overdue(now time.Time) []durable.TaskRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []durable.TaskRecord
+	for _, record := range s.records {
+		if record.State == durable.TaskPending && record.ExpiresAt != nil && !now.Before(*record.ExpiresAt) {
+			out = append(out, cloneTaskRecord(record))
+		}
+	}
+	return out
+}
+
+// Expire resolves one overdue pending task as expired. ok is false when the
+// task is no longer pending or not yet due — a resolution got there first.
+func (s *eventTaskStore) Expire(ctx context.Context, tenantID, taskID string, now time.Time) (durable.TaskRecord, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := taskKey(tenantID, taskID)
+	record, ok := s.records[key]
+	if !ok {
+		return durable.TaskRecord{}, false, durable.ErrTaskNotFound
+	}
+	if record.State != durable.TaskPending || record.ExpiresAt == nil || now.Before(*record.ExpiresAt) {
+		return durable.TaskRecord{}, false, nil
+	}
+	record.State = durable.TaskExpired
+	record.Resolution = durable.TaskResolution{Decision: durable.TaskExpired, Actor: "aurora", Reason: "no resolution before the task's deadline"}
+	resolvedAt := now
+	record.ResolvedAt = &resolvedAt
+	ev, err := durable.TaskResolvedEvent(s.now().UTC(), record)
+	if err != nil {
+		return durable.TaskRecord{}, false, err
+	}
+	if _, err := s.log.Append(ctx, s.scope(record), ev); err != nil {
+		return durable.TaskRecord{}, false, err
+	}
+	s.records[key] = cloneTaskRecord(record)
+	return cloneTaskRecord(record), true, nil
+}
+
 func (s *eventTaskStore) MarkExecuted(ctx context.Context, tenantID, taskID string, _ time.Time) error {
 	s.mu.Lock()
 	key := taskKey(tenantID, taskID)

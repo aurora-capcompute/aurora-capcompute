@@ -263,7 +263,65 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		return nil, err
 	}
 
+	go runtime.expireLoop()
 	return runtime, nil
+}
+
+// taskExpiryInterval is how often the runtime looks for overdue tasks. Task
+// deadlines are hours long, so a minute of lateness is noise.
+const taskExpiryInterval = time.Minute
+
+// expireLoop sweeps overdue tasks once at start — deadlines can pass while the
+// host is down — and then on every interval, until the runtime closes.
+func (r *Runtime) expireLoop() {
+	ticker := time.NewTicker(taskExpiryInterval)
+	defer ticker.Stop()
+	for {
+		r.expireTasks()
+		select {
+		case <-r.baseCtx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// expireTasks resolves every pending task past its deadline as expired and
+// resumes the process parked on it; the task layer then hands the guest errno
+// expired, and the program decides what to do. Without this a process whose
+// approval never came would wait forever: a late resolution is refused, and
+// nothing else wakes it. Each task takes the same lease ResolveTask takes, so a
+// human resolving at the deadline and the sweep cannot both win.
+func (r *Runtime) expireTasks() {
+	now := r.now().UTC()
+	for _, overdue := range r.tasks.Overdue(now) {
+		acquired, err := r.leases.Acquire(
+			context.Background(), r.tenantID, "task", overdue.ID,
+			r.instanceID, now, time.Minute,
+		)
+		if err != nil || !acquired {
+			continue // being resolved now; the next sweep looks again
+		}
+		record, expired, err := r.tasks.Expire(context.Background(), r.tenantID, overdue.ID, now)
+		r.leases.Release(context.Background(), r.tenantID, "task", overdue.ID, r.instanceID)
+		if err != nil {
+			slog.Warn("expire task", "task_id", overdue.ID, "error", err)
+			continue
+		}
+		if !expired {
+			continue
+		}
+		r.mu.Lock()
+		proc := r.processes[record.Scope.ProcessID]
+		waiting := proc != nil && proc.status == durable.ProcessWaitingTask
+		r.mu.Unlock()
+		if !waiting {
+			continue
+		}
+		if _, err := r.Retry(record.Scope.ProcessID, RetryResume); err != nil {
+			slog.Warn("resume process after task expiry", "process_id", record.Scope.ProcessID, "task_id", record.ID, "error", err)
+		}
+	}
 }
 
 // Drivers builds the driver chain below the task layer for one process: the

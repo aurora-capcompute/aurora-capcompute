@@ -739,6 +739,97 @@ func TestRuntimeApprovalCycle(t *testing.T) {
 	}
 }
 
+// An approval nobody answers does not park the process forever: once its
+// deadline passes, the sweep marks the task expired and resumes the process,
+// the guest observes errno expired instead of the tool result, and the program
+// carries on to its answer. A resolution that arrives after the deadline is
+// refused — the decision was already taken.
+func TestUnansweredApprovalExpires(t *testing.T) {
+	var mu sync.Mutex
+	now := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return now
+	}
+	store := newRuntimeStore()
+	runtime, err := NewRuntime(context.Background(), Config{
+		Dispatchers: approvalDispatchers{},
+		Log:         store.log,
+		Leases:      store,
+		TaskSecret:  []byte("stable-secret"),
+		TaskTTL:     time.Hour,
+		IDSource:    sequentialIDs(),
+		Now:         clock,
+	})
+	if err != nil {
+		t.Fatalf("new runtime: %v", err)
+	}
+	addTestProgram(t, runtime, "program@1", buildProgram(t))
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := runtime.Close(ctx); err != nil {
+			t.Errorf("close runtime: %v", err)
+		}
+	})
+
+	session, err := runtime.CreateSession("", nil)
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	proc, err := runtime.CreateProcess(session.ID, "do the guarded thing", manifest.Manifest{
+		Version:  manifest.Version,
+		Program:  "program@1",
+		Syscalls: cognitionGrants("tool.y"),
+	}, 0)
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	waitForStatus(t, runtime, proc.ID, durable.ProcessWaitingTask)
+	tasks, err := runtime.Tasks(proc.ID)
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("tasks = %+v, err=%v", tasks, err)
+	}
+	pending := tasks[0]
+
+	// Before the deadline the sweep leaves the task alone.
+	runtime.expireTasks()
+	if tasks, _ := runtime.Tasks(proc.ID); tasks[0].State != "pending" {
+		t.Fatalf("task swept before its deadline: %+v", tasks[0])
+	}
+
+	mu.Lock()
+	now = now.Add(2 * time.Hour)
+	mu.Unlock()
+	runtime.expireTasks()
+
+	waitForStatus(t, runtime, proc.ID, durable.ProcessCompleted)
+	tasks, _ = runtime.Tasks(proc.ID)
+	if len(tasks) != 1 || tasks[0].State != "expired" {
+		t.Fatalf("task after the deadline = %+v, want expired", tasks)
+	}
+	journal, err := runtime.Journal(proc.ID)
+	if err != nil {
+		t.Fatalf("journal: %v", err)
+	}
+	sawExpired := false
+	for _, entry := range journal {
+		if entry.Syscall.Name == "tool.y" && entry.Outcome.Code == sys.ErrnoExpired {
+			sawExpired = true
+		}
+	}
+	if !sawExpired {
+		t.Fatal("the guest did not observe errno expired for the unanswered call")
+	}
+	if _, err := runtime.ResolveTask(pending.ID, pending.ResolutionToken, durable.TaskResolution{
+		Decision: durable.TaskApproved,
+		Actor:    "late",
+	}); err == nil {
+		t.Fatal("a resolution after the deadline was accepted")
+	}
+}
+
 // failThenSucceedDispatchers drives a run that does a tool call, then on its
 // second turn requests an unavailable capability (failing the proc) on the first
 // attempt and finishes on the second. The shared counter persists across the
