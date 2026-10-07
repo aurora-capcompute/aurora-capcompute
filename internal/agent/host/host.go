@@ -139,6 +139,7 @@ func (f *Factory[ID, K]) NewDispatcher(ctx context.Context, cred K) (sys.Dispatc
 		Store:       f.config.Tasks,
 		Journal:     journal,
 		Scope:       f.config.Environment.TaskScope,
+		Now:         f.config.Now,
 		TokenSecret: f.config.TaskSecret,
 		TaskTTL:     f.config.TaskTTL,
 	}
