@@ -130,15 +130,11 @@ func TestFlowGuardDeclassify(t *testing.T) {
 // replayed results alone.
 func TestFlowTaintSurvivesCrashReplay(t *testing.T) {
 	journal := newMemJournal()
-	header := journaled.Header{ABI: sys.ABIVersion, Program: "sha256:test", Process: "p1"}
 	table := flowTable(t, echo)
 
 	newChain := func(t *testing.T) sys.Dispatcher[testCred] {
 		t.Helper()
-		tape, err := journaled.NewTape(journal, header)
-		if err != nil {
-			t.Fatalf("new tape: %v", err)
-		}
+		tape := journaled.NewTape(journal)
 		flow, below := stamped(t, table, NewTaints[testCred]())
 		return flow.Guard(replay.NewDispatcher(tape, below, nil))
 	}
@@ -174,14 +170,10 @@ func TestFlowTaintSurvivesCrashReplay(t *testing.T) {
 // journaled; a crash-replay re-applies it without asking again.
 func TestDeclassifySyscallLifecycle(t *testing.T) {
 	journal := newMemJournal()
-	header := journaled.Header{ABI: sys.ABIVersion, Program: "sha256:test", Process: "p1"}
 	table := flowTable(t, echo)
 	newChain := func(t *testing.T) sys.Dispatcher[testCred] {
 		t.Helper()
-		tape, err := journaled.NewTape(journal, header)
-		if err != nil {
-			t.Fatalf("new tape: %v", err)
-		}
+		tape := journaled.NewTape(journal)
 		flow := NewFlow(NewTaints[testCred](), table)
 		below := flow.Stamp(NewDeclassifier(capability.NewDispatcher[testCred](table)))
 		return flow.Guard(replay.NewDispatcher(tape, below, nil))

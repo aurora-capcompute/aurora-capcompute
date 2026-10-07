@@ -8,10 +8,10 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/errs"
-	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
-	"github.com/aurora-capcompute/aurora-capcompute/monitor"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
+	"github.com/aurora-capcompute/aurora-capcompute/journaled"
+	"github.com/aurora-capcompute/aurora-capcompute/monitor"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
@@ -86,15 +86,11 @@ func (r *Runtime) newDispatcher(ctx context.Context, cred durable.ProcessContext
 	chain = &savepointDispatcher{next: chain}
 
 	// A malformed journal is refused before any record is served to replay
-	// rather than replayed as truth: records without a header, positions out of
-	// order, or intents and completions that do not alternate mean the store
-	// handed back something replay cannot reason about.
+	// rather than replayed as truth: positions out of order, or intents and
+	// completions that do not alternate, mean the store handed back something
+	// replay cannot reason about.
 	if err := journaled.Verify(journal); err != nil {
 		return nil, fmt.Errorf("journal integrity check failed: %w", err)
 	}
-	tape, err := journaled.NewTape(journal, journaled.Header{ABI: sys.ABIVersion, Program: program.Digest, Process: cred.ProcessID})
-	if err != nil {
-		return nil, err
-	}
-	return monitor.Wrap(r.taints, tape, table, r.openIntents, chain), nil
+	return monitor.Wrap(r.taints, journaled.NewTape(journal), table, r.openIntents, chain), nil
 }

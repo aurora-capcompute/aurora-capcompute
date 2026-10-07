@@ -15,20 +15,10 @@ type testCred struct{ id string }
 
 // memJournal is an in-memory journaled.Journal.
 type memJournal struct {
-	header    journaled.Header
-	hasHeader bool
-	records   []journaled.Record
+	records []journaled.Record
 }
 
 func newMemJournal() *memJournal { return &memJournal{} }
-
-func (j *memJournal) Header() (journaled.Header, bool, error) { return j.header, j.hasHeader, nil }
-
-func (j *memJournal) SetHeader(header journaled.Header) error {
-	j.header = header
-	j.hasHeader = true
-	return nil
-}
 
 func (j *memJournal) Load(idx int) (journaled.Record, error) {
 	if idx < 0 || idx >= len(j.records) {

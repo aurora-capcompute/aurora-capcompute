@@ -30,21 +30,10 @@ const (
 	KindCompletion Kind = "completion"
 )
 
-// Header identifies what wrote a journal: the syscall ABI version, the
-// program (e.g. an artifact digest), and the process the journal belongs
-// to. Replay against a different writer is refused up front — the
-// versioned-replay law (see docs/ARCHITECTURE.md, "Coherence under growth")
-// — instead of failing later as a confusing divergence.
-type Header struct {
-	ABI     int    `json:"abi"`
-	Program string `json:"program"`
-	Process string `json:"process,omitempty"`
-}
-
 // Record is one journal entry: a fixed envelope — the store's index keys —
 // plus an opaque payload. A datum lives in the envelope or in the payload,
 // never both. Scope columns above the process (the session) belong to the
-// store that owns the Journal, keyed by Header.Process.
+// store that owns the Journal.
 type Record struct {
 	// Envelope.
 	Position int  `json:"position"`
@@ -59,11 +48,9 @@ type Record struct {
 	Result  *sys.SyscallResult `json:"result,omitempty"`
 }
 
-// Journal stores durable records for a tape, plus the header identifying
-// their writer. Append must persist the record at index Length().
+// Journal stores durable records for a tape. Append must persist the record at
+// index Length().
 type Journal interface {
-	Header() (header Header, ok bool, err error)
-	SetHeader(Header) error
 	Load(idx int) (Record, error)
 	Append(Record) error
 	Length() int
@@ -80,18 +67,6 @@ func (e ReplayDivergedError) Error() string {
 	return fmt.Sprintf("replay diverged at syscall %d: want %q got %q", e.Index, e.Want.Name, e.Got.Name)
 }
 
-// ReplayIncompatibleError means the journal was written by a different program
-// or ABI than the one attempting to replay it.
-type ReplayIncompatibleError struct {
-	Recorded Header
-	Current  Header
-}
-
-func (e ReplayIncompatibleError) Error() string {
-	return fmt.Sprintf("journal written by program %q (abi %d); cannot replay as program %q (abi %d)",
-		e.Recorded.Program, e.Recorded.ABI, e.Current.Program, e.Current.ABI)
-}
-
 // CorruptJournalError means the journal's record structure is invalid — not a
 // divergence (guest behavior) but damage or a buggy store.
 type CorruptJournalError struct {
@@ -106,30 +81,15 @@ func (e CorruptJournalError) Error() string {
 // Tape is a journal-backed replay tape.
 type Tape struct {
 	journal Journal
-	header  Header
 	cursor  int
 	pending bool // an intent is open and owned by the in-flight dispatch
 }
 
 // NewTape creates a journal-backed replay tape whose cursor starts at the
-// beginning. The header identifies the program about to run: a fresh journal
-// is stamped with it; a journal written by a different program, ABI, or
-// process is refused with ReplayIncompatibleError.
-func NewTape(journal Journal, header Header) (*Tape, error) {
-	recorded, ok, err := journal.Header()
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		if err := journal.SetHeader(header); err != nil {
-			return nil, err
-		}
-		return &Tape{journal: journal, header: header}, nil
-	}
-	if recorded != header {
-		return nil, ReplayIncompatibleError{Recorded: recorded, Current: header}
-	}
-	return &Tape{journal: journal, header: header}, nil
+// beginning. The journal belongs to one process, and the process is bound to
+// one program for life, so the tape replays only what that program wrote.
+func NewTape(journal Journal) *Tape {
+	return &Tape{journal: journal}
 }
 
 // loadExecution reads the record at position: it must be the expected kind, or
@@ -237,22 +197,10 @@ func (t *Tape) Reset() {
 	t.pending = false
 }
 
-// Verify walks the whole journal and checks its structure: a header where
-// there are records, positions in order, and alternating intent/completion
-// with at most one open intent at the tail. It returns CorruptJournalError at
-// the first damage found.
+// Verify walks the whole journal and checks its structure: positions in
+// order, and alternating intent/completion with at most one open intent at the
+// tail. It returns CorruptJournalError at the first damage found.
 func Verify(journal Journal) error {
-	_, ok, err := journal.Header()
-	if err != nil {
-		return err
-	}
-	if !ok {
-		if journal.Length() > 0 {
-			return CorruptJournalError{Position: 0, Reason: "records present without a header"}
-		}
-		return nil
-	}
-
 	// Structure: intent/completion pairs, with at most one trailing open
 	// intent — an abandoned revision may leave its last intent open forever
 	// (the failing dispatch never completed), and that is legal history.

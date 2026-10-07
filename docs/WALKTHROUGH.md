@@ -125,11 +125,11 @@ why `monitor.Wrap` exists and why nothing assembles this by hand.
   the guest see it. That ordering is two invariants —
   *journal-before-execute* and *journal-before-observe*.
 - **`journaled.Tape` / `Journal`** — where the tape lives. Records are a fixed
-  envelope (position, kind) plus an opaque payload. A `Header` (ABI version,
-  program digest, process) makes replay refuse a journal written by a different
-  writer up front, rather than failing later as a confusing divergence.
-  `journaled.Verify` checks the structure — header, positions in order,
-  alternating intent/completion — but the journal is not tamper-evident.
+  envelope (position, kind) plus an opaque payload. A journal belongs to one
+  process, and the process is bound to one program digest for life, so a tape
+  replays only what that program wrote. `journaled.Verify` checks the
+  structure — positions in order, alternating intent/completion — but the
+  journal is not tamper-evident.
 - **`Flow.Stamp`** — stamps `syscall:<name>` plus the operation's declared
   source classes onto every result. Sitting below replay means provenance lands
   in the journal for free.

@@ -104,21 +104,6 @@ type testingT interface {
 	Fatalf(string, ...any)
 }
 
-func testHeader() journaled.Header {
-	return journaled.Header{ABI: sys.ABIVersion, Program: "test-program", Process: "proc1"}
-}
-
-func ensureHeader(t testingT, journal journaled.Journal) {
-	t.Helper()
-	if _, ok, err := journal.Header(); err != nil {
-		t.Fatalf("header: %v", err)
-	} else if !ok {
-		if err := journal.SetHeader(testHeader()); err != nil {
-			t.Fatalf("set header: %v", err)
-		}
-	}
-}
-
 // appendPair appends one completed syscall — an intent/completion record pair.
 func appendPair(t testingT, journal journaled.Journal, syscall sys.Syscall, result sys.SyscallResult) {
 	t.Helper()
@@ -128,7 +113,6 @@ func appendPair(t testingT, journal journaled.Journal, syscall sys.Syscall, resu
 
 func appendIntent(t testingT, journal journaled.Journal, syscall sys.Syscall) {
 	t.Helper()
-	ensureHeader(t, journal)
 	position := journal.Length()
 	recorded := syscall.Copy()
 	appendRecord(t, journal, journaled.Record{

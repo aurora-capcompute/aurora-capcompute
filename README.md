@@ -70,7 +70,7 @@ assembly is [aurora-dist](https://github.com/aurora-capcompute/aurora-dist).
 | --- | --- |
 | **Sessions & processes** | `CreateSession`, `CreateProcess`, `Stop`, `Retry`, `RenameSession`, list/read — the full agent lifecycle |
 | **Replay journal** | Every syscall is written to the log as an *intent* then a *completion*, so a crashed process re‑drives deterministically |
-| **Versioned replay** | A `journal.header` pins the program's identity per revision; replaying under changed code is refused |
+| **Versioned replay** | A process is bound to its program's digest for life; resuming or restarting it under changed code is refused |
 | **Retries** | Resume the same revision, or restart into a fresh copy‑on‑write revision; bounded abort‑retry budget |
 | **Savepoints** | `sys.begin`/`sys.commit` bracket a critical section; `sys.abort` — or a failure that leaves the bracket open — forks the journal there and re‑runs the whole section live |
 | **Human‑in‑the‑loop** | A yielded syscall becomes a durable **task** with a secret resolution token; `ResolveTask` re‑drives the original intent |

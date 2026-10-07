@@ -32,23 +32,13 @@ var ErrCrash = errors.New("simulated crash")
 // processor itself ships only the Journal interface; the harness owns this
 // simulated store the way consumer modules own the durable ones.
 type Journal struct {
-	header    journaled.Header
-	hasHeader bool
-	records   []journaled.Record
-	appends   int
-	CrashAt   int // -1 = never
+	records []journaled.Record
+	appends int
+	CrashAt int // -1 = never
 }
 
 func NewJournal() *Journal {
 	return &Journal{CrashAt: -1}
-}
-
-func (j *Journal) Header() (journaled.Header, bool, error) { return j.header, j.hasHeader, nil }
-
-func (j *Journal) SetHeader(header journaled.Header) error {
-	j.header = header
-	j.hasHeader = true
-	return nil
 }
 
 func (j *Journal) Load(idx int) (journaled.Record, error) {
@@ -136,20 +126,11 @@ func (d driver) DispatchCall(_ context.Context, syscall sys.Syscall, _ sys.Autho
 
 // Chain builds the canonical dispatcher stack over the world, exactly as a
 // real deployment does — via monitor.Wrap, so the sim's crash matrix
-// exercises the same layer order production runs. Fails with
-// journaled.ReplayIncompatibleError etc. via the returned error.
-func Chain(world *World, process string) (sys.Dispatcher[durable.ProcessContext], error) {
-	tape, err := journaled.NewTape(world.Journal, journaled.Header{
-		ABI:     sys.ABIVersion,
-		Program: "sha256:sim",
-		Process: process,
-	})
-	if err != nil {
-		return nil, err
-	}
+// exercises the same layer order production runs.
+func Chain(world *World) sys.Dispatcher[durable.ProcessContext] {
 	table := Table(world.Effects)
 	// Fresh Taints per boot: a crash loses host memory.
-	return monitor.Wrap(monitor.NewTaints[durable.ProcessContext](), tape, table, nil, capability.NewDispatcher[durable.ProcessContext](table)), nil
+	return monitor.Wrap(monitor.NewTaints[durable.ProcessContext](), journaled.NewTape(world.Journal), table, nil, capability.NewDispatcher[durable.ProcessContext](table))
 }
 
 // Run boots a fresh host process over the surviving world and drives the
@@ -157,10 +138,7 @@ func Chain(world *World, process string) (sys.Dispatcher[durable.ProcessContext]
 // new; only World persisted). It returns ErrCrash if the injected fault
 // fired, nil when the program ran to completion.
 func Run(world *World, process string, program Program) error {
-	chain, err := Chain(world, process)
-	if err != nil {
-		return err
-	}
+	chain := Chain(world)
 	ctx := context.Background()
 	for _, step := range program {
 		syscall := sys.Syscall{Abi: sys.ABIVersion, Name: step.Name}

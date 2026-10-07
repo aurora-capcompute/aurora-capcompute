@@ -11,9 +11,9 @@ import (
 	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/aurora-capcompute/replay"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
@@ -100,20 +100,7 @@ func (s *taskStore) MarkExecuted(_ context.Context, id string, _ time.Time) erro
 
 // journal is a minimal in-memory journaled.Journal double.
 type journal struct {
-	header  *journaled.Header
 	records []journaled.Record
-}
-
-func (j *journal) Header() (journaled.Header, bool, error) {
-	if j.header == nil {
-		return journaled.Header{}, false, nil
-	}
-	return *j.header, true, nil
-}
-
-func (j *journal) SetHeader(header journaled.Header) error {
-	j.header = &header
-	return nil
 }
 
 func (j *journal) Load(index int) (journaled.Record, error) {
@@ -161,7 +148,6 @@ func TestDispatcherPersistsAndResumesYieldedTask(t *testing.T) {
 	next := &approvalDispatcher{}
 	scope := durable.ProcessContext{SessionID: "session", ProcessID: "proc", Revision: 1}
 	secret := []byte("test-secret")
-	header := journaled.Header{ABI: sys.ABIVersion, Program: "prog", Process: "proc"}
 	build := func() sys.Dispatcher[durable.ProcessContext] {
 		taskDispatcher := &task.Dispatcher{
 			Next:        next,
@@ -171,10 +157,7 @@ func TestDispatcherPersistsAndResumesYieldedTask(t *testing.T) {
 			TokenSecret: secret,
 			TaskTTL:     time.Hour,
 		}
-		tape, err := journaled.NewTape(journal, header)
-		if err != nil {
-			t.Fatalf("new tape: %v", err)
-		}
+		tape := journaled.NewTape(journal)
 		return replay.NewDispatcher(tape, taskDispatcher, nil)
 	}
 	call := sys.Syscall{Abi: sys.ABIVersion, Name: "net.http", Args: json.RawMessage(`{"url":"https://example.com"}`)}
@@ -274,7 +257,6 @@ func TestDispatcherDeniedTask(t *testing.T) {
 	next := &approvalDispatcher{}
 	scope := durable.ProcessContext{SessionID: "session", ProcessID: "proc", Revision: 1}
 	secret := []byte("test-secret")
-	header := journaled.Header{ABI: sys.ABIVersion, Program: "prog", Process: "proc"}
 	build := func() sys.Dispatcher[durable.ProcessContext] {
 		taskDispatcher := &task.Dispatcher{
 			Next:        next,
@@ -284,10 +266,7 @@ func TestDispatcherDeniedTask(t *testing.T) {
 			TokenSecret: secret,
 			TaskTTL:     time.Hour,
 		}
-		tape, err := journaled.NewTape(journal, header)
-		if err != nil {
-			t.Fatalf("new tape: %v", err)
-		}
+		tape := journaled.NewTape(journal)
 		return replay.NewDispatcher(tape, taskDispatcher, nil)
 	}
 	call := sys.Syscall{Abi: sys.ABIVersion, Name: "net.http", Args: json.RawMessage(`{"url":"https://example.com"}`)}

@@ -42,15 +42,11 @@ var stackTable = func() *capability.Table {
 // boundary. One test per load-bearing ordering property.
 func TestWrapEnforcesCanonicalOrder(t *testing.T) {
 	journal := newMemJournal()
-	header := journaled.Header{ABI: sys.ABIVersion, Program: "sha256:test", Process: "p1"}
 	driver := &stackDriver{}
 
 	boot := func(t *testing.T) sys.Dispatcher[testCred] {
 		t.Helper()
-		tape, err := journaled.NewTape(journal, header)
-		if err != nil {
-			t.Fatalf("new tape: %v", err)
-		}
+		tape := journaled.NewTape(journal)
 		// Fresh Taints per boot: a crash loses host memory.
 		return Wrap(NewTaints[testCred](), tape, stackTable, nil, driver)
 	}

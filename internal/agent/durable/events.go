@@ -17,7 +17,7 @@ import (
 // rather than derived), tags, and creation time; the rest of a session's summary
 // (title, active process) is still derived from the process projection. Task
 // events are semantic (created / resolved / executed). Capability-journal events
-// (syscall.recorded, journal.header) are defined alongside the journal view.
+// (syscall.recorded) are defined alongside the journal view.
 const (
 	evSessionState = "session.state"
 	evProcessState = "process.state"
@@ -138,7 +138,7 @@ func Fold(events []eventlog.Event) (Projection, error) {
 				proj.Tasks[x.TaskID] = rec
 			}
 		}
-		// syscall.recorded / journal.header belong to the journal view
+		// syscall.recorded belongs to the journal view
 		// (foldJournals); any other kind is skipped.
 	}
 	proj.Session = deriveSession(proj.Processes)

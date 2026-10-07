@@ -68,10 +68,6 @@ func TestLogJournalLinearRoundTrip(t *testing.T) {
 	if err := journaled.Verify(rebuilt); err != nil {
 		t.Fatalf("verify rebuilt: %v", err)
 	}
-	header, ok, err := rebuilt.Header()
-	if err != nil || !ok || header != testHeader() {
-		t.Fatalf("rebuilt header = %+v ok=%v err=%v", header, ok, err)
-	}
 }
 
 // manifest.Syscall args and results must round-trip through the event log
@@ -132,11 +128,6 @@ func TestLogJournalForkSharesPrefixThenDiverges(t *testing.T) {
 	if child.Length() != 4 {
 		t.Fatalf("forked length = %d, want 4 (shared prefix records)", child.Length())
 	}
-	// The fork inherits the parent's writer identity with its shared prefix.
-	header, ok, err := child.Header()
-	if err != nil || !ok || header != testHeader() {
-		t.Fatalf("forked header = %+v ok=%v err=%v", header, ok, err)
-	}
 	syscall, result := pair("c2", "c2")
 	appendPair(t, child, syscall, result)
 	if got := loadEntries(t, child); len(got) != 3 || got[0] != `a="a"` || got[1] != `b="b"` || got[2] != `c2="c2"` {
@@ -173,10 +164,7 @@ func TestLogJournalBacksTheKernelTape(t *testing.T) {
 	now := func() time.Time { return time.Unix(0, 0).UTC() }
 	j := newLogJournal(log, scope, "proc1", 1, newProcessHistory(), 0, now)
 
-	tape, err := journaled.NewTape(j, testHeader())
-	if err != nil {
-		t.Fatalf("new tape: %v", err)
-	}
+	tape := journaled.NewTape(j)
 	call := sys.Syscall{Abi: sys.ABIVersion, Name: "x", Args: []byte(`{"k":1}`)}
 	if err := tape.Begin(call); err != nil {
 		t.Fatalf("begin: %v", err)
@@ -189,21 +177,13 @@ func TestLogJournalBacksTheKernelTape(t *testing.T) {
 	}
 
 	// A fresh tape over the same journal replays the recorded pair.
-	replayTape, err := journaled.NewTape(j, testHeader())
-	if err != nil {
-		t.Fatalf("replay tape: %v", err)
-	}
+	replayTape := journaled.NewTape(j)
 	result, replayed, err := replayTape.Next(call)
 	if err != nil || !replayed {
 		t.Fatalf("next: replayed=%v err=%v", replayed, err)
 	}
 	if string(result.Result()) != `"done"` {
 		t.Fatalf("replayed result = %s", result.Result())
-	}
-
-	// A different program identity is refused up front.
-	if _, err := journaled.NewTape(j, journaled.Header{ABI: sys.ABIVersion, Program: "other", Process: "proc1"}); err == nil {
-		t.Fatal("expected ReplayIncompatibleError for a different program")
 	}
 }
 

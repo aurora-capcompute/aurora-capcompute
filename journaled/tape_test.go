@@ -13,19 +13,7 @@ import (
 // contract, so the package's own tests supply it directly rather than depending
 // on a concrete store from a consumer module.
 type fakeJournal struct {
-	header    journaled.Header
-	hasHeader bool
-	records   []journaled.Record
-}
-
-func (j *fakeJournal) Header() (journaled.Header, bool, error) {
-	return j.header, j.hasHeader, nil
-}
-
-func (j *fakeJournal) SetHeader(header journaled.Header) error {
-	j.header = header
-	j.hasHeader = true
-	return nil
+	records []journaled.Record
 }
 
 func (j *fakeJournal) Load(idx int) (journaled.Record, error) {
@@ -39,15 +27,9 @@ func (j *fakeJournal) Append(record journaled.Record) error {
 
 func (j *fakeJournal) Length() int { return len(j.records) }
 
-var testHeader = journaled.Header{ABI: sys.ABIVersion, Program: "sha256:test", Process: "run-1"}
-
 func newTestTape(t *testing.T, journal journaled.Journal) *journaled.Tape {
 	t.Helper()
-	tape, err := journaled.NewTape(journal, testHeader)
-	if err != nil {
-		t.Fatalf("new tape: %v", err)
-	}
-	return tape
+	return journaled.NewTape(journal)
 }
 
 // record drives one full fresh syscall through the tape: intent then completion.
@@ -61,38 +43,6 @@ func record(t *testing.T, tape *journaled.Tape, syscall sys.Syscall, result sys.
 	}
 	if err := tape.Commit(result); err != nil {
 		t.Fatalf("commit: %v", err)
-	}
-}
-
-func TestNewTapeStampsFreshJournal(t *testing.T) {
-	journal := &fakeJournal{}
-	newTestTape(t, journal)
-
-	header, ok, err := journal.Header()
-	if err != nil || !ok {
-		t.Fatalf("header = %v, ok = %v, err = %v", header, ok, err)
-	}
-	if header != testHeader {
-		t.Fatalf("header = %+v, want %+v", header, testHeader)
-	}
-}
-
-func TestNewTapeAcceptsMatchingHeader(t *testing.T) {
-	journal := &fakeJournal{header: testHeader, hasHeader: true}
-	newTestTape(t, journal)
-}
-
-func TestNewTapeRefusesIncompatibleJournal(t *testing.T) {
-	recorded := journaled.Header{ABI: sys.ABIVersion, Program: "sha256:other", Process: "run-1"}
-	journal := &fakeJournal{header: recorded, hasHeader: true}
-
-	_, err := journaled.NewTape(journal, testHeader)
-	var incompatible journaled.ReplayIncompatibleError
-	if !errors.As(err, &incompatible) {
-		t.Fatalf("error = %v, want ReplayIncompatibleError", err)
-	}
-	if incompatible.Recorded != recorded || incompatible.Current != testHeader {
-		t.Fatalf("error = %+v", incompatible)
 	}
 }
 
