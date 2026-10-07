@@ -22,7 +22,9 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/aurora-capcompute/capcompute/sys"
 )
@@ -477,17 +479,48 @@ func (d *Dispatcher[K]) Dispatch(ctx context.Context, _ K, call sys.Syscall, aut
 	// and the human's answer are journaled exactly once, and no handler has to
 	// remember to ask.
 	if entry.RequireApproval && auth.Decision != sys.Approved {
-		return sys.Yield(approvalPrompt(entry)), nil
+		return sys.Yield(approvalPrompt(entry, call)), nil
 	}
 	return entry.Handler.DispatchCall(ctx, call, auth)
 }
 
-// approvalPrompt is what a human is asked to approve.
-func approvalPrompt(entry Entry) string {
+// approvalPromptArgsLimit caps the arguments quoted in a prompt. The prompt is a
+// summary; the task's syscall always carries the complete arguments.
+const approvalPromptArgsLimit = 4096
+
+// approvalPrompt is what a human is asked to approve: the operation and the
+// exact arguments it would run with, so an approval is never given blind.
+// Arguments past the cap are cut with a marker that says so.
+func approvalPrompt(entry Entry, call sys.Syscall) string {
+	prompt := fmt.Sprintf("Approve %s", entry.Key)
 	if entry.Description != "" {
-		return fmt.Sprintf("Approve %s: %s", entry.Key, entry.Description)
+		prompt += ": " + entry.Description
 	}
-	return fmt.Sprintf("Approve %s", entry.Key)
+	args := compactArgs(call.Args)
+	if args == "" {
+		return prompt
+	}
+	if len(args) > approvalPromptArgsLimit {
+		cut := approvalPromptArgsLimit
+		for cut > 0 && !utf8.RuneStart(args[cut]) {
+			cut--
+		}
+		args = fmt.Sprintf("%s… (%d more bytes; the task's syscall holds them all)", args[:cut], len(args)-cut)
+	}
+	return prompt + "\nargs: " + args
+}
+
+// compactArgs renders call arguments on one line; arguments that are not JSON
+// are quoted as they came.
+func compactArgs(raw json.RawMessage) string {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return ""
+	}
+	var out bytes.Buffer
+	if err := json.Compact(&out, raw); err != nil {
+		return strconv.Quote(string(raw))
+	}
+	return out.String()
 }
 
 // ReserveMissing reserves a descriptor unless the name is already known. It
