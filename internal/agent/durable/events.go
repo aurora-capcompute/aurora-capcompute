@@ -16,14 +16,13 @@ import (
 // session's explicit identity — its name (renamable, hence a first-class event
 // rather than derived), tags, and creation time; the rest of a session's summary
 // (title, active process) is still derived from the process projection. Task
-// events are semantic (created / resolved / executed). Capability-journal events
+// events are semantic (created / resolved). Capability-journal events
 // (syscall.recorded) are defined alongside the journal view.
 const (
 	evSessionState = "session.state"
 	evProcessState = "process.state"
 	evTaskCreated  = "task.created"
 	evTaskResolved = "task.resolved"
-	evTaskExecuted = "task.executed"
 )
 
 // taskEventData carries a task record plus its token hash, which TaskRecord
@@ -32,10 +31,6 @@ const (
 type taskEventData struct {
 	Record    TaskRecord `json:"record"`
 	TokenHash []byte     `json:"token_hash,omitempty"`
-}
-
-type taskExecutedData struct {
-	TaskID string `json:"task_id"`
 }
 
 // ProcessStateEvent records a process's full durable state.
@@ -57,10 +52,6 @@ func TaskCreatedEvent(now time.Time, record TaskRecord) (eventlog.Event, error) 
 func TaskResolvedEvent(now time.Time, record TaskRecord) (eventlog.Event, error) {
 	return EncodeEvent(evTaskResolved, record.Scope.ProcessID, record.Scope.Revision, now,
 		taskEventData{Record: record, TokenHash: record.TokenHash})
-}
-
-func TaskExecutedEvent(now time.Time, processID string, rev uint64, taskID string) (eventlog.Event, error) {
-	return EncodeEvent(evTaskExecuted, processID, rev, now, taskExecutedData{TaskID: taskID})
 }
 
 func EncodeEvent(kind, proc string, rev uint64, now time.Time, payload any) (eventlog.Event, error) {
@@ -97,10 +88,7 @@ type Projection struct {
 }
 
 // Fold reconstructs a session's durable projection from its event stream. Events
-// must be in append order (ascending Seq). A session.state event carries the
-// session's explicit identity (id, name, tags, creation time); its title and
-// active process are derived from the process projection and merged over it.
-// Folding is last-writer-wins per id.
+// must be in append order (ascending Seq). Folding is last-writer-wins per id.
 func Fold(events []eventlog.Event) (Projection, error) {
 	proj := Projection{
 		Processes: make(map[string]Process),
@@ -128,50 +116,20 @@ func Fold(events []eventlog.Event) (Projection, error) {
 			}
 			td.Record.TokenHash = td.TokenHash
 			proj.Tasks[td.Record.ID] = td.Record
-		case evTaskExecuted:
-			var x taskExecutedData
-			if err := json.Unmarshal(ev.Data, &x); err != nil {
-				return Projection{}, fmt.Errorf("decode task.executed: %w", err)
-			}
-			if rec, ok := proj.Tasks[x.TaskID]; ok {
-				rec.State = TaskExecuted
-				proj.Tasks[x.TaskID] = rec
-			}
 		}
 		// syscall.recorded belongs to the journal view
 		// (foldJournals); any other kind is skipped.
 	}
-	proj.Session = deriveSession(proj.Processes)
-	if sessionEvent != nil {
-		// The session.state event is authoritative for the session's explicit
-		// identity — id, name, tags, creation time — while the title and active
-		// process stay derived from the process projection. This is what lets a
-		// named session with no processes persist, and a rename survive a restart.
-		merged := *sessionEvent
-		merged.Title = proj.Session.Title
-		merged.ActiveProcessID = proj.Session.ActiveProcessID
-		if proj.Session.UpdatedAt.After(merged.UpdatedAt) {
-			merged.UpdatedAt = proj.Session.UpdatedAt
-		}
-		proj.Session = merged
+	if sessionEvent == nil {
+		return proj, nil // no session.state event: nothing to restore
 	}
-	return proj, nil
-}
-
-// deriveSession reconstructs the process-projection half of session
-// metadata; Fold merges the authoritative session.state event over it. It derives:
-//   - identity (ID) and Tags from the earliest process — the fallback
-//     for pre-session.state streams that carry no session event
-//   - Title from the first process's input, truncated to 60 runes
-//   - CreatedAt is the earliest process's CreatedAt
-//   - UpdatedAt is the latest process's UpdatedAt
-//   - ActiveProcessID is the ID of the one process (if any) that is not in a terminal state
-func deriveSession(processes map[string]Process) Session {
-	if len(processes) == 0 {
-		return Session{}
-	}
-	ordered := make([]Process, 0, len(processes))
-	for _, proc := range processes {
+	// The session.state event carries the session's explicit identity — id,
+	// name, tags, creation time. Its title, last update and active process are
+	// derived from its processes. This is what lets a named session with no
+	// processes persist, and a rename survive a restart.
+	proj.Session = *sessionEvent
+	ordered := make([]Process, 0, len(proj.Processes))
+	for _, proc := range proj.Processes {
 		ordered = append(ordered, proc)
 	}
 	// Deterministic order (creation time, then id) so nothing derived here —
@@ -182,30 +140,19 @@ func deriveSession(processes map[string]Process) Session {
 		}
 		return ordered[i].ID < ordered[j].ID
 	})
-
-	session := Session{
-		ID:        ordered[0].SessionID,
-		Title:     SessionTitle(ordered[0].Input),
-		CreatedAt: ordered[0].CreatedAt,
-		UpdatedAt: ordered[0].UpdatedAt,
-		Tags:      CloneTags(ordered[0].Tags),
+	if len(ordered) > 0 {
+		proj.Session.Title = SessionTitle(ordered[0].Input)
 	}
 	for _, proc := range ordered {
-		if proc.UpdatedAt.After(session.UpdatedAt) {
-			session.UpdatedAt = proc.UpdatedAt
+		if proc.UpdatedAt.After(proj.Session.UpdatedAt) {
+			proj.Session.UpdatedAt = proc.UpdatedAt
+		}
+		// The session's foreground process: the earliest non-terminal one.
+		if proj.Session.ActiveProcessID == "" && isActiveStatus(proc.Status) {
+			proj.Session.ActiveProcessID = proc.ID
 		}
 	}
-	// ActiveProcessID is the session's foreground process: the earliest
-	// non-terminal one.
-	if session.ActiveProcessID == "" {
-		for _, proc := range ordered {
-			if isActiveStatus(proc.Status) {
-				session.ActiveProcessID = proc.ID
-				break
-			}
-		}
-	}
-	return session
+	return proj, nil
 }
 
 // isActiveStatus reports whether a process still occupies its session — it is

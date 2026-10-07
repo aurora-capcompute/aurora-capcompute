@@ -62,11 +62,17 @@ func newRuntimeStore() *runtimeStore {
 	return &runtimeStore{log: newMemLog()}
 }
 
-// seed appends proc.state events so the runtime folds them on restore.
-// Session state is derived from the runs; no separate session event is needed.
+// seed appends the events a runtime restores the given runs from: a
+// session.state event for each session, then a process.state event per run.
 func (s *runtimeStore) seed(runs ...durable.Process) {
 	now := time.Now().UTC()
+	seeded := map[string]bool{}
 	for _, r := range runs {
+		if !seeded[r.SessionID] {
+			seeded[r.SessionID] = true
+			ev, _ := durable.SessionStateEvent(now, durable.Session{ID: r.SessionID, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt})
+			_, _ = s.log.Append(context.Background(), r.SessionID, ev)
+		}
 		ev, _ := durable.ProcessStateEvent(now, r)
 		_, _ = s.log.Append(context.Background(), r.SessionID, ev)
 	}
@@ -719,9 +725,9 @@ func TestRuntimeApprovalCycle(t *testing.T) {
 	if completed.Answer != "approved-done" {
 		t.Fatalf("answer = %q, want approved-done", completed.Answer)
 	}
-	// The approved execution was journaled once and marked executed.
+	// The approval stands as the task's state; the execution is in the journal.
 	tasks = processLog(t, runtime, proc.ID).Tasks
-	if len(tasks) != 1 || tasks[0].State != "executed" {
+	if len(tasks) != 1 || tasks[0].State != durable.TaskApproved {
 		t.Fatalf("final task state = %+v", tasks)
 	}
 }

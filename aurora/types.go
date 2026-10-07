@@ -77,7 +77,6 @@ const (
 	TaskStateDenied    = durable.TaskDenied
 	TaskStateCancelled = durable.TaskCancelled
 	TaskStateExpired   = durable.TaskExpired
-	TaskStateExecuted  = durable.TaskExecuted
 )
 
 // Error sentinels

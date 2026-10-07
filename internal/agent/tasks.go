@@ -13,7 +13,7 @@ import (
 
 // eventTaskStore implements durable.TaskStore over the append-only event log. It keeps
 // an in-memory projection (seeded from the log on restore, updated on each op)
-// and appends a task.created / task.resolved / task.executed event for every
+// and appends a task.created / task.resolved event for every
 // mutation, so durable task state lives only in the log.
 type eventTaskStore struct {
 	log eventlog.Log
@@ -36,11 +36,11 @@ func (s *eventTaskStore) seed(records []durable.TaskRecord) {
 	}
 }
 
-func (s *eventTaskStore) Find(_ context.Context, scope durable.ProcessContext, position int, callHash string) (durable.TaskRecord, bool, error) {
+func (s *eventTaskStore) Find(_ context.Context, scope durable.ProcessContext, position int) (durable.TaskRecord, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, record := range s.records {
-		if record.Scope == scope && record.JournalPosition == position && record.CallHash == callHash {
+		if record.Scope == scope && record.JournalPosition == position {
 			return cloneTaskRecord(record), true, nil
 		}
 	}
@@ -183,29 +183,6 @@ func due(record durable.TaskRecord, now time.Time) bool {
 		return !now.Before(fireAt)
 	}
 	return record.ExpiresAt != nil && !now.Before(*record.ExpiresAt)
-}
-
-func (s *eventTaskStore) MarkExecuted(ctx context.Context, taskID string, _ time.Time) error {
-	s.mu.Lock()
-	key := taskID
-	record, ok := s.records[key]
-	if !ok {
-		s.mu.Unlock()
-		return durable.ErrTaskNotFound
-	}
-	record.State = durable.TaskExecuted
-	ev, err := durable.TaskExecutedEvent(s.now().UTC(), record.Scope.ProcessID, record.Scope.Revision, taskID)
-	if err != nil {
-		s.mu.Unlock()
-		return err
-	}
-	if _, err := s.log.Append(ctx, record.Scope.SessionID, ev); err != nil {
-		s.mu.Unlock()
-		return err
-	}
-	s.records[key] = cloneTaskRecord(record)
-	s.mu.Unlock()
-	return nil
 }
 
 func cloneTaskRecord(record durable.TaskRecord) durable.TaskRecord {

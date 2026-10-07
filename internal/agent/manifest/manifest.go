@@ -52,12 +52,8 @@ type Manifest struct {
 	// advertised (the program calls them directly). Unset (the default) advertises
 	// them. (The field is `share_capabilities`, not `capabilities`, since a leaf
 	// grant's `capabilities` is its operation list.)
-	ShareCapabilities *bool `json:"share_capabilities,omitempty"`
-	// BindingRef is an opaque application correlation reference (e.g. the
-	// name of the control-plane binding that produced this manifest). The
-	// runtime never interprets it.
-	BindingRef string    `json:"binding_ref,omitempty"`
-	Syscalls   []Syscall `json:"syscalls,omitempty"`
+	ShareCapabilities *bool     `json:"share_capabilities,omitempty"`
+	Syscalls          []Syscall `json:"syscalls,omitempty"`
 }
 
 func (m Manifest) SharesHistory() bool { return m.History == nil || *m.History }
@@ -168,7 +164,6 @@ func Validate(spec Manifest, validator ConfigValidator) (Manifest, error) {
 
 func validateManifest(manifest *Manifest, validator ConfigValidator) error {
 	manifest.Program = strings.TrimSpace(manifest.Program)
-	manifest.BindingRef = strings.TrimSpace(manifest.BindingRef)
 	return validateSyscalls(manifest.Syscalls, validator)
 }
 

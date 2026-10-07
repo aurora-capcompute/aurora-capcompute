@@ -26,11 +26,11 @@ func newTaskStore() *taskStore {
 	return &taskStore{records: make(map[string]durable.TaskRecord)}
 }
 
-func (s *taskStore) Find(_ context.Context, scope durable.ProcessContext, position int, hash string) (durable.TaskRecord, bool, error) {
+func (s *taskStore) Find(_ context.Context, scope durable.ProcessContext, position int) (durable.TaskRecord, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, record := range s.records {
-		if record.Scope == scope && record.JournalPosition == position && record.CallHash == hash {
+		if record.Scope == scope && record.JournalPosition == position {
 			return record, true, nil
 		}
 	}
@@ -84,18 +84,6 @@ func (s *taskStore) Resolve(_ context.Context, id string, tokenHash []byte, reso
 	record.ResolvedAt = &now
 	s.records[id] = record
 	return record, nil
-}
-
-func (s *taskStore) MarkExecuted(_ context.Context, id string, _ time.Time) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	record, ok := s.records[id]
-	if !ok {
-		return durable.ErrTaskNotFound
-	}
-	record.State = durable.TaskExecuted
-	s.records[id] = record
-	return nil
 }
 
 // journal is a minimal in-memory journaled.Journal double.

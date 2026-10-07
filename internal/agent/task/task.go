@@ -17,7 +17,6 @@ package task
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"time"
@@ -29,9 +28,8 @@ import (
 
 // Store is the durable task store the dispatcher mints and reads records in.
 type Store interface {
-	Find(ctx context.Context, scope durable.ProcessContext, position int, callHash string) (durable.TaskRecord, bool, error)
+	Find(ctx context.Context, scope durable.ProcessContext, position int) (durable.TaskRecord, bool, error)
 	Create(ctx context.Context, record durable.TaskRecord) error
-	MarkExecuted(ctx context.Context, taskID string, now time.Time) error
 }
 
 // Dispatcher sits below the replay layer: by the time a syscall reaches it,
@@ -53,8 +51,9 @@ func (d *Dispatcher) Dispatch(ctx context.Context, cred durable.ProcessContext, 
 	// The replay layer appends the intent before delegating, so the syscall's
 	// journal position is the current tail.
 	position := max(d.Journal.Length()-1, 0)
-	callHash := HashCall(syscall)
-	record, found, err := d.Store.Find(ctx, scope, position, callHash)
+	// Replay refuses a different call at a recorded position, and a fork mints a
+	// new revision, so (process revision, position) names one call.
+	record, found, err := d.Store.Find(ctx, scope, position)
 	if err != nil {
 		return sys.SyscallResult{}, err
 	}
@@ -75,7 +74,6 @@ func (d *Dispatcher) Dispatch(ctx context.Context, cred durable.ProcessContext, 
 		Scope:           scope,
 		ID:              taskID,
 		JournalPosition: position,
-		CallHash:        callHash,
 		Syscall:         syscall.Copy(),
 		Summary:         result.Message(),
 		State:           durable.TaskPending,
@@ -103,11 +101,7 @@ func (d *Dispatcher) resume(ctx context.Context, cred durable.ProcessContext, re
 	case durable.TaskPending:
 		return sys.Yield(record.ID), nil
 	case durable.TaskApproved:
-		result, err := d.Next.Dispatch(ctx, cred, record.Syscall, record.Resolution)
-		if err == nil && result.Status() != sys.StatusYield {
-			_ = d.Store.MarkExecuted(ctx, record.ID, d.now())
-		}
-		return result, err
+		return d.Next.Dispatch(ctx, cred, record.Syscall, record.Resolution)
 	case durable.TaskCompleted:
 		return sys.Result(record.Resolution.Data), nil
 	case durable.TaskDenied:
@@ -118,21 +112,9 @@ func (d *Dispatcher) resume(ctx context.Context, cred durable.ProcessContext, re
 		return sys.FailCode(sys.ErrnoDenied, "external task cancelled"), nil
 	case durable.TaskExpired:
 		return sys.FailCode(sys.ErrnoExpired, "external task expired"), nil
-	case durable.TaskExecuted:
-		return d.Next.Dispatch(ctx, cred, record.Syscall, record.Resolution)
 	default:
 		return sys.SyscallResult{}, fmt.Errorf("unsupported task state %q", record.State)
 	}
-}
-
-// HashCall is a call's identity within one journal position: the same position
-// reached with different arguments is a different task.
-func HashCall(syscall sys.Syscall) string {
-	sum := sha256.New()
-	_, _ = sum.Write([]byte(syscall.Name))
-	_, _ = sum.Write([]byte{0})
-	_, _ = sum.Write(syscall.Args)
-	return hex.EncodeToString(sum.Sum(nil))
 }
 
 func (d *Dispatcher) now() time.Time { return d.Now().UTC() }

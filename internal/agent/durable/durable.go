@@ -41,8 +41,8 @@ type ProcessContext struct {
 	Revision  uint64
 }
 
-// Session is a session's durable state, derived from the process projection
-// and folded back into memory on restore.
+// Session is a session's durable state, carried by session.state events and
+// folded back into memory on restore.
 type Session struct {
 	ID string
 	// Name is the session's explicit, renamable handle (empty if unnamed). It is
@@ -84,10 +84,6 @@ type Process struct {
 	// process contributes is rebuilt with its provenance on restore — the
 	// cross-run flow policy survives a restart.
 	Labels []string `json:",omitempty"`
-	// Tags carries the owning session's tags. A session.state event now carries
-	// them too; this copy is retained so sessions from pre-session.state streams
-	// (which have no such event) still restore their tags.
-	Tags map[string]string
 	// ForkOffset is the current revision's copy-on-write fork point; it is
 	// persisted so a revision that was forked but crashed before logging any
 	// record can be reconstructed on restore.

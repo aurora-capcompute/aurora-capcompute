@@ -727,9 +727,9 @@ func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, erro
 		r.forkJournalLocked(proc, forkOffset)
 	}
 	// Nothing bracketed: same revision, no fork. A resume continues the attempt —
-	// replay serves everything recorded (an open intent at the tail re-drives
-	// under its original key) and the guest proceeds mid-flight, so an
-	// interruption never opens a new key space.
+	// replay serves everything recorded (an open intent at the tail is driven
+	// again) and the guest proceeds mid-flight, so an interruption never opens
+	// a new revision.
 	return r.relaunchLocked(proc)
 }
 

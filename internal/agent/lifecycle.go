@@ -11,6 +11,7 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	manifestpkg "github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
+	"github.com/aurora-capcompute/aurora-capcompute/monitor"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
@@ -85,7 +86,7 @@ func newLifecycleDispatcher(
 		err := table.Reserve(capability.Descriptor{
 			Name:        manifestpkg.DeclassifySyscall,
 			Description: "request lifting labels from this run's taint; each crossing requires human approval and is journaled with its reason",
-			InputSchema: declassifyInputSchema,
+			InputSchema: monitor.DeclassifyInputSchema,
 		})
 		if err != nil {
 			return nil, err
@@ -150,20 +151,6 @@ func (l *lifecycleDispatcher) Dispatch(ctx context.Context, cred durable.Process
 		return l.next.Dispatch(ctx, cred, syscall, auth)
 	}
 }
-
-// declassifyInputSchema mirrors the processor Declassifier's sys.declassify input
-// schema. The Declassifier is the authoritative validator (it re-checks labels,
-// reason, and approval); this is the grant-set copy the Validator admits the
-// call against, kept in step with capcompute's declassifyInputSchema.
-var declassifyInputSchema = json.RawMessage(`{
-	"type": "object",
-	"required": ["labels", "reason"],
-	"properties": {
-		"labels": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
-		"reason": {"type": "string", "minLength": 1}
-	},
-	"additionalProperties": false
-}`)
 
 // historyLabels is the union of the provenance labels carried by every session-
 // history entry — the taint the loopback carries. It seeds the reading run's

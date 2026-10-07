@@ -137,10 +137,6 @@ func visibleCapabilities(caps []capability.Descriptor) []capability.Descriptor {
 }
 
 func (r *Runtime) storedProcessLocked(proc *processState) durable.Process {
-	var tags map[string]string
-	if session := r.sessions[proc.sessionID]; session != nil {
-		tags = durable.CloneTags(session.tags)
-	}
 	return durable.Process{
 		ID:            proc.id,
 		SessionID:     proc.sessionID,
@@ -158,7 +154,6 @@ func (r *Runtime) storedProcessLocked(proc *processState) durable.Process {
 		ProgramDigest: proc.digest,
 		HideHistory:   proc.hideHistory,
 		Labels:        append([]string(nil), proc.labels...),
-		Tags:          tags,
 		ForkOffset:    proc.forkOffset,
 		AbortRetries:  proc.abortRetries,
 	}

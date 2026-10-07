@@ -2,7 +2,7 @@ package durable
 
 // A durable approval task: what survives of one syscall that yielded for an
 // out-of-band decision. The record is persisted vocabulary like Process and
-// Session — task.created / task.resolved / task.executed carry it, and Fold
+// Session — task.created / task.resolved carry it, and Fold
 // restores it — so it lives here. The dispatcher that mints and resolves these
 // records lives in internal/agent/task, above this package: it is behaviour, and
 // behaviour depends on schema rather than the other way round.
@@ -27,7 +27,6 @@ const (
 	TaskDenied              = sys.Denied
 	TaskCancelled           = sys.Cancelled
 	TaskExpired   TaskState = "expired"
-	TaskExecuted  TaskState = "executed"
 )
 
 type TaskResolution = sys.Authorization
@@ -36,7 +35,6 @@ type TaskRecord struct {
 	Scope           ProcessContext `json:"scope"`
 	ID              string         `json:"id"`
 	JournalPosition int            `json:"journal_position"`
-	CallHash        string         `json:"call_hash"`
 	Syscall         sys.Syscall    `json:"syscall"`
 	Summary         string         `json:"summary"`
 	State           TaskState      `json:"state"`

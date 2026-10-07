@@ -108,7 +108,9 @@ type DeclassifyResult struct {
 	Declassified []string `json:"declassified"`
 }
 
-var declassifyInputSchema = json.RawMessage(`{
+// DeclassifyInputSchema is the shape of sys.declassify's arguments, the schema
+// the Validator admits the call against.
+var DeclassifyInputSchema = json.RawMessage(`{
 	"type": "object",
 	"required": ["labels", "reason"],
 	"properties": {

@@ -10,20 +10,22 @@ import (
 func TestFoldReconstructsLatestRunAndSessionState(t *testing.T) {
 	now := time.Unix(0, 0).UTC()
 
-	// Run goes running → completed; session state is derived from runs.
+	// The session's identity comes from its session.state event; the run goes
+	// running → completed, and the rest of the session is derived from it.
+	session, _ := SessionStateEvent(now, Session{
+		ID: "th1", CreatedAt: now, UpdatedAt: now, Tags: map[string]string{"origin": "ops"},
+	})
 	r1, _ := ProcessStateEvent(now, Process{
 		ID: "proc1", SessionID: "th1", Revision: 1,
 		Input: "hello", Status: ProcessRunning,
 		CreatedAt: now, UpdatedAt: now,
-		Tags: map[string]string{"binding_ref": "ops"},
 	})
 	r2, _ := ProcessStateEvent(now.Add(time.Second), Process{
 		ID: "proc1", SessionID: "th1", Revision: 1,
 		Input: "hello", Status: ProcessCompleted, Answer: "done",
 		CreatedAt: now, UpdatedAt: now.Add(time.Second),
-		Tags: map[string]string{"binding_ref": "ops"},
 	})
-	proj, err := Fold([]eventlog.Event{r1, r2})
+	proj, err := Fold([]eventlog.Event{session, r1, r2})
 	if err != nil {
 		t.Fatalf("fold: %v", err)
 	}
@@ -31,9 +33,9 @@ func TestFoldReconstructsLatestRunAndSessionState(t *testing.T) {
 	if proj.Session.ActiveProcessID != "" {
 		t.Fatalf("session active proc = %q, want cleared (completed run is not active)", proj.Session.ActiveProcessID)
 	}
-	// Session identity and tags are derived from the proc.
-	if proj.Session.ID != "th1" || proj.Session.Tags["binding_ref"] != "ops" {
-		t.Fatalf("session = %+v, want id=th1 binding_ref=ops", proj.Session)
+	if proj.Session.ID != "th1" || proj.Session.Tags["origin"] != "ops" || proj.Session.Title != "hello" ||
+		!proj.Session.UpdatedAt.Equal(now.Add(time.Second)) {
+		t.Fatalf("session = %+v, want th1, its tags, the first input as title, the run's last update", proj.Session)
 	}
 	proc := proj.Processes["proc1"]
 	if proc.Status != ProcessCompleted || proc.Answer != "done" {
@@ -56,14 +58,13 @@ func TestFoldTaskLifecycle(t *testing.T) {
 	resolved.State = TaskApproved
 	resolvedEv, _ := TaskResolvedEvent(now.Add(time.Second), resolved)
 
-	executed, _ := TaskExecutedEvent(now.Add(2*time.Second), "proc1", 1, "task1")
-	proj, err := Fold([]eventlog.Event{created, resolvedEv, executed})
+	proj, err := Fold([]eventlog.Event{created, resolvedEv})
 	if err != nil {
 		t.Fatalf("fold: %v", err)
 	}
 	got := proj.Tasks["task1"]
-	if got.State != TaskExecuted {
-		t.Fatalf("task state = %q, want executed", got.State)
+	if got.State != TaskApproved {
+		t.Fatalf("task state = %q, want approved", got.State)
 	}
 	// TokenHash must survive the round-trip even though TaskRecord omits it from JSON.
 	if len(got.TokenHash) != 3 || got.TokenHash[0] != 1 {
