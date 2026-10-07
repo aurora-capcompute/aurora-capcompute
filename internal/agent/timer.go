@@ -19,8 +19,8 @@ import (
 )
 
 // defaultMaxTimer bounds how far in the future a timer may be set when the
-// grant declares no bound. It guards against unbounded waits and keeps
-// timers within any task expiry window the host configures.
+// grant declares no bound. It guards against unbounded waits. Timer tasks
+// carry no task TTL: the fire time is their deadline.
 const defaultMaxTimer = 24 * time.Hour
 
 // timerRequest is the guest payload for sys.timer.

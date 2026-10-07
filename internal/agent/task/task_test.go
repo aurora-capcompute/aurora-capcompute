@@ -229,6 +229,46 @@ func TestDispatcherPersistsAndResumesYieldedTask(t *testing.T) {
 	}
 }
 
+type nextFunc func(context.Context, proc, sys.Syscall, sys.Authorization) (sys.SyscallResult, error)
+
+func (f nextFunc) Dispatch(ctx context.Context, cred proc, call sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
+	return f(ctx, cred, call, auth)
+}
+
+// The TTL bounds waits on a decision; a timer's task carries none, because its
+// fire time is its deadline and the timer service resolves it then — a TTL
+// equal to the longest timer would expire it at the moment it should fire.
+func TestTimerTaskHasNoTTL(t *testing.T) {
+	store := newTaskStore()
+	journal := &journal{}
+	yield := func(context.Context, proc, sys.Syscall, sys.Authorization) (sys.SyscallResult, error) {
+		return sys.Yield("waiting"), nil
+	}
+	dispatcher := &task.Dispatcher[proc]{
+		Next:        nextFunc(yield),
+		Store:       store,
+		Journal:     journal,
+		Scope:       func(proc) durable.TaskScope { return durable.TaskScope{TenantID: "t", ProcessID: "p", Revision: 1} },
+		TokenSecret: []byte("test-secret"),
+		TaskTTL:     time.Hour,
+	}
+	for _, name := range []string{sys.SyscallTimer, "net.http"} {
+		journal.records = append(journal.records, journaled.Record{Position: journal.Length(), Kind: journaled.KindIntent})
+		if _, err := dispatcher.Dispatch(context.Background(), proc{}, sys.Syscall{Name: name, Args: json.RawMessage(`{"duration_seconds":86400}`)}, sys.Authorization{}); err != nil {
+			t.Fatalf("dispatch %s: %v", name, err)
+		}
+	}
+	records, _ := store.List(context.Background(), "t", "p")
+	for _, record := range records {
+		switch {
+		case record.Syscall.Name == sys.SyscallTimer && record.ExpiresAt != nil:
+			t.Fatalf("timer task expires at %v; its fire time is its deadline", record.ExpiresAt)
+		case record.Syscall.Name != sys.SyscallTimer && record.ExpiresAt == nil:
+			t.Fatal("an approval task has no deadline")
+		}
+	}
+}
+
 // A denied resolution replays as a classified failure, not an execution.
 func TestDispatcherDeniedTask(t *testing.T) {
 	store := newTaskStore()
