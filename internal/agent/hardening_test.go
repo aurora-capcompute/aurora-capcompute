@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 	"github.com/aurora-capcompute/aurora-capcompute/replay"
 	"github.com/aurora-capcompute/capcompute/sys"
@@ -22,7 +23,7 @@ func TestSysInputOmitsHistoryLabelsFromGuestPayload(t *testing.T) {
 		{Role: "assistant", Content: "a", Labels: []string{"untrusted_web", "credential:ONYX@abc"}},
 	}
 	l, _ := mustLifecycle(t, nopNext{}, "task", history, manifest.Manifest{}, 1, nil)
-	result, err := l.Dispatch(context.Background(), ProcessContext{},
+	result, err := l.Dispatch(context.Background(), durable.ProcessContext{},
 		sys.Syscall{Abi: sys.ABIVersion, Name: callSysInput}, sys.Authorization{})
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
@@ -123,7 +124,7 @@ func TestTimerRejectsOverflowingDuration(t *testing.T) {
 	td := &timerDispatcher{next: nopNext{}, maxDuration: defaultMaxTimer}
 	dispatch := func(seconds int64) sys.SyscallResult {
 		t.Helper()
-		r, err := td.Dispatch(context.Background(), ProcessContext{},
+		r, err := td.Dispatch(context.Background(), durable.ProcessContext{},
 			sys.Syscall{Abi: sys.ABIVersion, Name: manifest.TimerSyscall,
 				Args: json.RawMessage(fmt.Sprintf(`{"duration_seconds":%d}`, seconds))},
 			sys.Authorization{})

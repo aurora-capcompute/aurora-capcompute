@@ -12,6 +12,7 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/capcompute/sys"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 )
 
@@ -21,7 +22,7 @@ func TestLifecycleAbortArgs(t *testing.T) {
 	l, _ := mustLifecycle(t, stubNext{}, "msg", nil, manifest.Manifest{}, 1, nil)
 	dispatch := func(args string) sys.SyscallResult {
 		t.Helper()
-		result, err := l.Dispatch(context.Background(), ProcessContext{},
+		result, err := l.Dispatch(context.Background(), durable.ProcessContext{},
 			sys.Syscall{Abi: sys.ABIVersion, Name: callSysAbort, Args: json.RawMessage(args)},
 			sys.Authorization{})
 		if err != nil {
@@ -54,7 +55,7 @@ func TestLifecycleValidatesAnswer(t *testing.T) {
 	l, _ := mustLifecycle(t, stubNext{}, "msg", nil, manifest.Manifest{}, 1, reject)
 	output := func(args string) sys.SyscallResult {
 		t.Helper()
-		result, err := l.Dispatch(context.Background(), ProcessContext{},
+		result, err := l.Dispatch(context.Background(), durable.ProcessContext{},
 			sys.Syscall{Abi: sys.ABIVersion, Name: callSysOutput, Args: json.RawMessage(args)},
 			sys.Authorization{})
 		if err != nil {
@@ -74,7 +75,7 @@ type stubNext struct{}
 
 // mustLifecycle builds the lifecycle layer over a fresh grant table — the table
 // is where it declares sys.input/output/abort, so every test needs one.
-func mustLifecycle(t *testing.T, next sys.Dispatcher[ProcessContext], input string, history []HistoryMessage,
+func mustLifecycle(t *testing.T, next sys.Dispatcher[durable.ProcessContext], input string, history []HistoryMessage,
 	spec manifest.Manifest, attempt int, validate func(string) error) (*lifecycleDispatcher, *capability.Table) {
 	t.Helper()
 	table := capability.NewTable()
@@ -85,6 +86,6 @@ func mustLifecycle(t *testing.T, next sys.Dispatcher[ProcessContext], input stri
 	return l, table
 }
 
-func (stubNext) Dispatch(context.Context, ProcessContext, sys.Syscall, sys.Authorization) (sys.SyscallResult, error) {
+func (stubNext) Dispatch(context.Context, durable.ProcessContext, sys.Syscall, sys.Authorization) (sys.SyscallResult, error) {
 	return sys.Fail("unexpected"), nil
 }

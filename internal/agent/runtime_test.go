@@ -29,7 +29,7 @@ type runtimeDispatchers struct {
 
 func (*runtimeDispatchers) ValidateConfig(string, json.RawMessage) error { return nil }
 
-func (p *runtimeDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, manifest manifest.Manifest) (*capability.Table, error) {
+func (p *runtimeDispatchers) NewDispatcher(_ context.Context, _ durable.ProcessContext, manifest manifest.Manifest) (*capability.Table, error) {
 	p.mu.Lock()
 	p.manifests = append(p.manifests, manifest.Clone())
 	p.mu.Unlock()
@@ -45,7 +45,7 @@ func llmCapability() capability.Descriptor {
 
 type finalDispatcher struct{}
 
-func (finalDispatcher) Dispatch(_ context.Context, _ ProcessContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
+func (finalDispatcher) Dispatch(_ context.Context, _ durable.ProcessContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
 	if syscall.Name != "core.openaiApi" {
 		return sys.Fail("unsupported call: " + syscall.Name), nil
 	}
@@ -625,14 +625,14 @@ type approvalDispatchers struct{}
 
 func (approvalDispatchers) ValidateConfig(string, json.RawMessage) error { return nil }
 
-func (approvalDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ manifest.Manifest) (*capability.Table, error) {
+func (approvalDispatchers) NewDispatcher(_ context.Context, _ durable.ProcessContext, _ manifest.Manifest) (*capability.Table, error) {
 	return tableOf(approvalToolDispatcher{}, llmCapability(),
 		capability.Descriptor{Name: "tool.y", Description: "guarded tool", InputSchema: json.RawMessage(`{"type":"object"}`)}), nil
 }
 
 type approvalToolDispatcher struct{}
 
-func (approvalToolDispatcher) Dispatch(_ context.Context, _ ProcessContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
+func (approvalToolDispatcher) Dispatch(_ context.Context, _ durable.ProcessContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	switch syscall.Name {
 	case "tool.y":
 		if auth.Decision != sys.Approved {
@@ -824,14 +824,14 @@ type failThenSucceedDispatchers struct {
 
 func (*failThenSucceedDispatchers) ValidateConfig(string, json.RawMessage) error { return nil }
 
-func (d *failThenSucceedDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ manifest.Manifest) (*capability.Table, error) {
+func (d *failThenSucceedDispatchers) NewDispatcher(_ context.Context, _ durable.ProcessContext, _ manifest.Manifest) (*capability.Table, error) {
 	return tableOf(&failThenSucceedDispatcher{parent: d}, llmCapability(),
 		capability.Descriptor{Name: "tool.x", Description: "test tool", InputSchema: json.RawMessage(`{"type":"object"}`)}), nil
 }
 
 type failThenSucceedDispatcher struct{ parent *failThenSucceedDispatchers }
 
-func (d *failThenSucceedDispatcher) Dispatch(_ context.Context, _ ProcessContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
+func (d *failThenSucceedDispatcher) Dispatch(_ context.Context, _ durable.ProcessContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
 	switch syscall.Name {
 	case "tool.x":
 		return sys.Result(json.RawMessage(`{"ok":true}`)), nil
@@ -975,7 +975,7 @@ type effectsDispatchers struct{ d *effectsDispatcher }
 
 func (effectsDispatchers) ValidateConfig(string, json.RawMessage) error { return nil }
 
-func (p effectsDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ manifest.Manifest) (*capability.Table, error) {
+func (p effectsDispatchers) NewDispatcher(_ context.Context, _ durable.ProcessContext, _ manifest.Manifest) (*capability.Table, error) {
 	return tableOf(p.d, llmCapability(),
 		capability.Descriptor{Name: "billing.charge", Description: "charge a card", InputSchema: json.RawMessage(`{"type":"object"}`)}), nil
 }
@@ -985,7 +985,7 @@ type effectsDispatcher struct {
 	charges int
 }
 
-func (d *effectsDispatcher) Dispatch(_ context.Context, _ ProcessContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
+func (d *effectsDispatcher) Dispatch(_ context.Context, _ durable.ProcessContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
 	switch syscall.Name {
 	case "billing.charge":
 		d.mu.Lock()

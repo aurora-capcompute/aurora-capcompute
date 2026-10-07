@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/capcompute/sys"
 
@@ -176,7 +177,7 @@ func (p *testDispatchers) ValidateConfig(syscall string, _ json.RawMessage) erro
 	return nil
 }
 
-func (*testDispatchers) NewDispatcher(context.Context, ProcessContext, manifest.Manifest) (*capability.Table, error) {
+func (*testDispatchers) NewDispatcher(context.Context, durable.ProcessContext, manifest.Manifest) (*capability.Table, error) {
 	return capability.NewTable(), nil
 }
 
@@ -204,7 +205,7 @@ func waitForTerminal(t *testing.T, runtime *Runtime, processID string) ProcessSn
 // back the grant table rather than a dispatcher: the routing, the grant set and
 // the flow policy all read from one index, so a test that wants a fake driver
 // has to say what that index contains.
-func tableOf(d sys.Dispatcher[ProcessContext], publish ...capability.Descriptor) *capability.Table {
+func tableOf(d sys.Dispatcher[durable.ProcessContext], publish ...capability.Descriptor) *capability.Table {
 	table := capability.NewTable()
 	for _, published := range publish {
 		family := capability.Family{
@@ -226,10 +227,10 @@ func tableOf(d sys.Dispatcher[ProcessContext], publish ...capability.Descriptor)
 // dispatchAsHandler lets an existing dispatcher double stand in as the handler
 // for each of its own capabilities.
 type dispatchAsHandler struct {
-	d sys.Dispatcher[ProcessContext]
+	d sys.Dispatcher[durable.ProcessContext]
 }
 
 func (h dispatchAsHandler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
-	var cred ProcessContext
+	var cred durable.ProcessContext
 	return h.d.Dispatch(ctx, cred, call, auth)
 }

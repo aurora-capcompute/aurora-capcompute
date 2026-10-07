@@ -11,17 +11,19 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-// Taints is the cross-process taint state: every label each process has
-// observed. It is shared by all of a host's per-process monitor chains (Stack
-// holds one), while the Flow that consumes it is wired per process — state and wiring have different lifetimes, so they are different
-// types.
-type Taints[ID comparable] struct {
+// Taints is the cross-process taint state: every label each process revision
+// has observed. One is shared by all of a host's per-process monitor chains,
+// while the Flow that consumes it is wired per process — state and wiring have
+// different lifetimes, so they are different types.
+type Taints[K comparable] struct {
 	mu       sync.Mutex
-	observed map[ID]map[string]struct{}
+	observed map[K]map[string]struct{}
 }
 
-func NewTaints[ID comparable]() *Taints[ID] {
-	return &Taints[ID]{observed: make(map[ID]map[string]struct{})}
+// NewTaints keys taint by the credential itself: one credential names one
+// process revision.
+func NewTaints[K comparable]() *Taints[K] {
+	return &Taints[K]{observed: make(map[K]map[string]struct{})}
 }
 
 // Declassify removes labels from a process's accumulated taint — an explicit,
@@ -29,7 +31,7 @@ func NewTaints[ID comparable]() *Taints[ID] {
 // it through the sys.declassify syscall (the Declassifier decorator), whose
 // approved result replays through Flow.Guard and lands here; the direct
 // method remains for host-side administrative use.
-func (t *Taints[ID]) Declassify(pid ID, labels ...string) {
+func (t *Taints[K]) Declassify(pid K, labels ...string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	taint := t.observed[pid]
@@ -39,13 +41,13 @@ func (t *Taints[ID]) Declassify(pid ID, labels ...string) {
 }
 
 // ForgetProcess releases a terminated process's taint state.
-func (t *Taints[ID]) ForgetProcess(pid ID) {
+func (t *Taints[K]) ForgetProcess(pid K) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	delete(t.observed, pid)
 }
 
-func (t *Taints[ID]) observe(pid ID, labels []string) {
+func (t *Taints[K]) observe(pid K, labels []string) {
 	if len(labels) == 0 {
 		return
 	}
@@ -61,7 +63,7 @@ func (t *Taints[ID]) observe(pid ID, labels []string) {
 	}
 }
 
-func (t *Taints[ID]) intersection(pid ID, forbid []string) []string {
+func (t *Taints[K]) intersection(pid K, forbid []string) []string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	taint := t.observed[pid]
@@ -78,9 +80,9 @@ func (t *Taints[ID]) intersection(pid ID, forbid []string) []string {
 // Snapshot returns the labels a process has accumulated — its current taint — so
 // a caller can carry that provenance elsewhere (e.g. onto session history a later
 // run will observe, keeping the flow policy intact across that boundary).
-func (t *Taints[ID]) Snapshot(pid ID) []string { return t.snapshot(pid) }
+func (t *Taints[K]) Snapshot(pid K) []string { return t.snapshot(pid) }
 
-func (t *Taints[ID]) snapshot(pid ID) []string {
+func (t *Taints[K]) snapshot(pid K) []string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	taint := t.observed[pid]

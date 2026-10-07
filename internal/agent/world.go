@@ -1,4 +1,4 @@
-package host
+package agent
 
 import (
 	"context"
@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
@@ -17,15 +18,15 @@ import (
 // time and entropy are capabilities: produced here on first execution — the
 // dispatcher sits below the replay layer, so the value is journaled like any
 // completion and replayed verbatim on resume. Everything else passes through.
-type worldDispatcher[K any] struct {
-	next sys.Dispatcher[K]
+type worldDispatcher struct {
+	next sys.Dispatcher[durable.ProcessContext]
 	now  func() time.Time
 	rand io.Reader
 }
 
 // newWorldDispatcher declares sys.now and sys.random as it builds the layer that
 // serves them: the grant set can then only ever name what this layer answers.
-func newWorldDispatcher[K any](next sys.Dispatcher[K], now func() time.Time, rand io.Reader, table *capability.Table) (*worldDispatcher[K], error) {
+func newWorldDispatcher(next sys.Dispatcher[durable.ProcessContext], now func() time.Time, rand io.Reader, table *capability.Table) (*worldDispatcher, error) {
 	for _, descriptor := range []capability.Descriptor{
 		{
 			Name:        sys.SyscallNow,
@@ -44,7 +45,7 @@ func newWorldDispatcher[K any](next sys.Dispatcher[K], now func() time.Time, ran
 			return nil, err
 		}
 	}
-	return &worldDispatcher[K]{next: next, now: now, rand: rand}, nil
+	return &worldDispatcher{next: next, now: now, rand: rand}, nil
 }
 
 type randomArgs struct {
@@ -52,7 +53,7 @@ type randomArgs struct {
 	Bytes int `json:"bytes"`
 }
 
-func (d *worldDispatcher[K]) Dispatch(ctx context.Context, cred K, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
+func (d *worldDispatcher) Dispatch(ctx context.Context, cred durable.ProcessContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	switch syscall.Name {
 	case sys.SyscallNow:
 		payload, err := json.Marshal(map[string]int64{"unix_ms": d.now().UTC().UnixMilli()})

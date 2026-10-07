@@ -22,7 +22,7 @@ func (r *Runtime) execute(processID string) {
 		r.stopProcess(processID, context.Canceled)
 		return
 	}
-	cred := r.processContextLocked(proc)
+	cred := proc.context()
 	program := ProgramID(proc.manifest.Program)
 	digest := proc.digest
 	deadline := proc.deadline
@@ -111,7 +111,7 @@ func (r *Runtime) execute(processID string) {
 // runQuantum gives one process the CPU for one quantum: it checks that the
 // process still runs the program it was created from, builds its dispatcher
 // chain, and runs the guest until it completes, yields, stops or fails.
-func (r *Runtime) runQuantum(ctx context.Context, cred ProcessContext, id ProgramID, digest string) quantumResult {
+func (r *Runtime) runQuantum(ctx context.Context, cred durable.ProcessContext, id ProgramID, digest string) quantumResult {
 	// Setup that fails because the quantum was stopped (a kill, a deadline, a
 	// shutdown) is a stop, not a failure of the process.
 	failed := func(err error) quantumResult {
@@ -124,11 +124,11 @@ func (r *Runtime) runQuantum(ctx context.Context, cred ProcessContext, id Progra
 	if err != nil {
 		return failed(err)
 	}
-	dispatcher, err := r.factory.NewDispatcher(ctx, cred)
+	dispatcher, err := r.newDispatcher(ctx, cred, program)
 	if err != nil {
 		return failed(err)
 	}
-	process, err := capcompute.NewProcess(ctx, program.image, capcompute.ProcessSpec[ProcessContext]{
+	process, err := capcompute.NewProcess(ctx, program.image, capcompute.ProcessSpec[durable.ProcessContext]{
 		Entrypoint: "run",
 		Cred:       cred,
 		Dispatcher: dispatcher,
@@ -173,11 +173,11 @@ func (r *Runtime) finishLocked(proc *processState, status durable.ProcessStatus,
 		// Snapshot the run's taint before releasing it, so the answer this process
 		// contributes to session history carries the run's provenance into any
 		// later run that reads it (closing the run-to-run laundering loophole).
-		proc.labels = r.taints.Snapshot(proc.key())
+		proc.labels = r.taints.Snapshot(proc.context())
 		// The process's taint state is scoped to its revision identity; release
 		// it when no further quantum can observe it. A parked process keeps its
 		// taint (resume must re-enforce flow policy over the same history).
-		r.taints.ForgetProcess(proc.key())
+		r.taints.ForgetProcess(proc.context())
 	}
 	session := r.sessions[proc.sessionID]
 	if session != nil {

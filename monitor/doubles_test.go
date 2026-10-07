@@ -10,17 +10,15 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 )
 
+// testCred is the monitor tests' credential: comparable, so it keys the taint.
+type testCred struct{ id string }
+
 // memJournal is an in-memory journaled.Journal.
 type memJournal struct {
 	header    journaled.Header
 	hasHeader bool
 	records   []journaled.Record
 }
-
-// testPID is the monitor tests' credential double.
-type testPID struct{ id string }
-
-func (p testPID) PID() string { return p.id }
 
 func newMemJournal() *memJournal { return &memJournal{} }
 

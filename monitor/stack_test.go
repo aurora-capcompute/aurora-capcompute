@@ -17,7 +17,7 @@ type stackDriver struct {
 	calls int
 }
 
-func (d *stackDriver) Dispatch(_ context.Context, _ testPID, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
+func (d *stackDriver) Dispatch(_ context.Context, _ testCred, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
 	d.calls++
 	return sys.Result(json.RawMessage(`{"from":"` + syscall.Name + `"}`)), nil
 }
@@ -38,26 +38,21 @@ var stackTable = func() *capability.Table {
 	return table
 }()
 
-// The Stack's reason to exist: each layer on its correct side of the replay
+// Wrap's reason to exist: each layer on its correct side of the replay
 // boundary. One test per load-bearing ordering property.
-func TestStackEnforcesCanonicalOrder(t *testing.T) {
+func TestWrapEnforcesCanonicalOrder(t *testing.T) {
 	journal := newMemJournal()
 	header := journaled.Header{ABI: sys.ABIVersion, Program: "sha256:test", Process: "p1"}
 	driver := &stackDriver{}
 
-	boot := func(t *testing.T) sys.Dispatcher[testPID] {
+	boot := func(t *testing.T) sys.Dispatcher[testCred] {
 		t.Helper()
 		tape, err := journaled.NewTape(journal, header)
 		if err != nil {
 			t.Fatalf("new tape: %v", err)
 		}
-		chain, err := Stack[string, testPID]{
-			Taints: NewTaints[string](), // fresh per boot: a crash loses host memory
-		}.ForProcess(tape, stackTable, driver)
-		if err != nil {
-			t.Fatalf("for run: %v", err)
-		}
-		return chain
+		// Fresh Taints per boot: a crash loses host memory.
+		return Wrap(NewTaints[testCred](), tape, stackTable, nil, driver)
 	}
 
 	chain := boot(t)
@@ -104,19 +99,6 @@ func TestStackEnforcesCanonicalOrder(t *testing.T) {
 	}
 }
 
-func TestStackRequiresItsPieces(t *testing.T) {
-	tape, _ := journaled.NewTape(newMemJournal(), journaled.Header{ABI: sys.ABIVersion, Program: "p", Process: "r"})
-	if _, err := (Stack[string, testPID]{Taints: NewTaints[string]()}).ForProcess(tape, nil, &recordingDispatcher{}); err == nil {
-		t.Fatal("stack without a grant table accepted")
-	}
-	if _, err := (Stack[string, testPID]{}).ForProcess(tape, stackTable, &recordingDispatcher{}); err == nil {
-		t.Fatal("stack without Taints accepted")
-	}
-	if _, err := (Stack[string, testPID]{Taints: NewTaints[string]()}).ForProcess(tape, stackTable, nil); err == nil {
-		t.Fatal("stack without drivers accepted")
-	}
-}
-
 // A syscall a decorator above the routing dispatcher serves is reserved, not
 // indexed: the Validator admits it, but it resolves to no entry. So a layer that
 // stops intercepting its own syscall falls through to the leaf and is denied,
@@ -131,8 +113,8 @@ func TestReservedSyscallIsAdmittedButNotRoutable(t *testing.T) {
 		t.Fatal("a reserved syscall must be in the grant set")
 	}
 	// The leaf is the routing dispatcher alone — nothing intercepts above it.
-	leaf := capability.NewDispatcher[testPID](table)
-	result, err := leaf.Dispatch(context.Background(), testPID{id: "p1"},
+	leaf := capability.NewDispatcher[testCred](table)
+	result, err := leaf.Dispatch(context.Background(), testCred{id: "p1"},
 		sys.Syscall{Abi: sys.ABIVersion, Name: "sys.served.above"}, sys.Authorization{})
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)

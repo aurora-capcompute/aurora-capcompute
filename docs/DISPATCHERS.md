@@ -120,14 +120,14 @@ session.
 
 ## 2. Connection — building one process's chain
 
-This happens once per quantum, in `host.Factory.NewDispatcher`
-([host.go:113](../internal/agent/host/host.go:113)).
+This happens once per quantum, in `Runtime.newDispatcher`
+([dispatcher.go:28](../internal/agent/dispatcher.go:28)), the one function that
+builds the whole chain.
 
 ### 2.1 The runtime's own layers
 
-`Runtime.Drivers` ([runtime.go:271](../internal/agent/runtime.go:271)) asks the
-provider for the leaf chain, then does the check that keeps the manifest
-authoritative:
+It asks the provider for the process's grant table, then does the check that
+keeps the manifest authoritative:
 
 ```go
 if err := reconcileGrants(table.Descriptors(), spec); err != nil {
@@ -135,7 +135,7 @@ if err := reconcileGrants(table.Descriptors(), spec); err != nil {
 }
 ```
 
-`reconcileGrants` ([runtime.go:120](../internal/agent/runtime.go:120)) fails closed
+`reconcileGrants` ([runtime.go:115](../internal/agent/runtime.go:115)) fails closed
 if the provider advertises a capability the manifest did not grant. Without it a
 buggy or hostile provider could widen a process's authority past its manifest —
 the confused-deputy gap. Under-advertising is fine (the guest just can't call it);
@@ -146,8 +146,9 @@ Then `sys.timer` is layered on if granted, and the `progressDispatcher` (serving
 
 ### 2.2 The full stack
 
-`monitor.Stack.ForProcess` ([stack.go:45](../monitor/stack.go:45)) assembles the
-canonical order — in code, not prose, so it cannot be got wrong by hand:
+`monitor.Wrap` ([stack.go:29](../monitor/stack.go:29)) assembles the canonical
+order around the replay boundary — in code, not prose, so it cannot be got wrong
+by hand:
 
 ```
 Validator → Flow.Guard → [replay tape] → Flow.Stamp → Declassifier → drivers
@@ -158,8 +159,8 @@ pass and never enter the journal (validation, flow denials). Below it sit
 outcomes that must be journaled exactly once (stamped labels, approved
 declassifications).
 
-`drivers` there is itself a stack, built by the Factory before it hands the whole
-thing to `ForProcess`. Written out once, innermost last, this is what a syscall
+`drivers` there is itself a stack, built by `newDispatcher` before it hands the
+whole thing to `Wrap`. Written out once, innermost last, this is what a syscall
 actually walks:
 
 ```
@@ -170,7 +171,7 @@ Flow.Stamp           stamp result labels
 Declassifier         approved label crossings
 savepointDispatcher  sys.begin / sys.commit markers
 worldDispatcher      sys.now / sys.random (journaled, so they replay)
-wrapProtocol         sys.input / sys.output / sys.abort
+lifecycle            sys.input / sys.output / sys.abort
 task.Dispatcher      durable approval — yields, resumes on resolution
 progressDispatcher   sys.log
 timerDispatcher      sys.timer, if granted
@@ -184,10 +185,10 @@ a durable fact rather than a question asked twice.
 ### 2.3 Where the grant set comes from
 
 This is the line that makes §4.3 airtight
-([host.go:171](../internal/agent/host/host.go:171)):
+([dispatcher.go:99](../internal/agent/dispatcher.go:99)):
 
 ```go
-return stack.ForProcess(tape, table, withSavepoints)
+return monitor.Wrap(r.taints, tape, table, r.openIntents, chain), nil
 ```
 
 The Validator's grant set is **the process's grant table** — not a list parsed
@@ -290,10 +291,10 @@ Three properties make that hold:
 
 - **The grant set is the table, not a copy of it.** The Validator reads the same
   `capability.Table` the routing dispatcher was built from and every protocol
-  layer declared into ([host.go](../internal/agent/host/host.go)). Nothing can be
+  layer declared into ([dispatcher.go](../internal/agent/dispatcher.go)). Nothing can be
   in the grant set that is not in the chain.
 - **The chain cannot exceed the manifest.** `reconcileGrants`
-  ([runtime.go:120](../internal/agent/runtime.go:120)) refuses to build a process
+  ([runtime.go:115](../internal/agent/runtime.go:115)) refuses to build a process
   whose provider advertised more than the manifest granted.
 - **The credential is host-side.** `ProcessContext` is passed by the runtime into
   `Resume` and never crosses into guest memory
@@ -349,7 +350,7 @@ Worth stating plainly, so the guarantee isn't over-read:
 | the index and the leaf dispatcher | `capability/capability.go` |
 | what a driver's handler does | `aurora-dispatchers/internet/handler.go` |
 | how the leaf chain is assembled | `aurora-dist/internal/dist/provider.go` |
-| how one process's chain is built | `internal/agent/host/host.go` |
+| how one process's chain is built | `internal/agent/dispatcher.go` |
 | the chain's order | `monitor/stack.go` |
 | deny-by-default | `monitor/validate.go` |
 | the sandbox | `capcompute/processor.go`, `capcompute/ambient.go` |

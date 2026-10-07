@@ -14,7 +14,7 @@ type recordingDispatcher struct {
 	calls []sys.Syscall
 }
 
-func (d *recordingDispatcher) Dispatch(_ context.Context, _ testPID, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
+func (d *recordingDispatcher) Dispatch(_ context.Context, _ testCred, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
 	d.calls = append(d.calls, syscall)
 	return sys.Result(json.RawMessage(`{"ok":true}`)), nil
 }
@@ -31,13 +31,13 @@ func grantsFixture(grants ...capability.Descriptor) *capability.Table {
 	return table
 }
 
-func callValidator(t *testing.T, v *Validator[testPID], name string, args string) (sys.SyscallResult, error) {
+func callValidator(t *testing.T, v *Validator[testCred], name string, args string) (sys.SyscallResult, error) {
 	t.Helper()
 	var raw json.RawMessage
 	if args != "" {
 		raw = json.RawMessage(args)
 	}
-	return v.Dispatch(context.Background(), testPID{id: "p1"}, sys.Syscall{Abi: sys.ABIVersion, Name: name, Args: raw}, sys.Authorization{})
+	return v.Dispatch(context.Background(), testCred{id: "p1"}, sys.Syscall{Abi: sys.ABIVersion, Name: name, Args: raw}, sys.Authorization{})
 }
 
 func TestValidatorRejectsArgsFailingInputSchema(t *testing.T) {

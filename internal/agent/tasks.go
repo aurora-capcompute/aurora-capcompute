@@ -36,7 +36,7 @@ func (s *eventTaskStore) seed(records []durable.TaskRecord) {
 	}
 }
 
-func (s *eventTaskStore) Find(_ context.Context, scope durable.TaskScope, position int, callHash string) (durable.TaskRecord, bool, error) {
+func (s *eventTaskStore) Find(_ context.Context, scope durable.ProcessContext, position int, callHash string) (durable.TaskRecord, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, record := range s.records {

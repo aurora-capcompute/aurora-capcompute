@@ -19,13 +19,13 @@ type timerDispatchers struct{}
 
 func (timerDispatchers) ValidateConfig(string, json.RawMessage) error { return nil }
 
-func (timerDispatchers) NewDispatcher(context.Context, ProcessContext, manifest.Manifest) (*capability.Table, error) {
+func (timerDispatchers) NewDispatcher(context.Context, durable.ProcessContext, manifest.Manifest) (*capability.Table, error) {
 	return tableOf(timerLLM{}, llmCapability()), nil
 }
 
 type timerLLM struct{}
 
-func (timerLLM) Dispatch(_ context.Context, _ ProcessContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
+func (timerLLM) Dispatch(_ context.Context, _ durable.ProcessContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
 	var req struct {
 		Messages []struct {
 			Role    string `json:"role"`

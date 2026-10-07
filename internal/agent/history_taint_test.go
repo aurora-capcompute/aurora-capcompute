@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
@@ -14,7 +15,7 @@ import (
 // serves sys.input itself and only reads next's capability menu.
 type nopNext struct{ caps []capability.Descriptor }
 
-func (n nopNext) Dispatch(context.Context, ProcessContext, sys.Syscall, sys.Authorization) (sys.SyscallResult, error) {
+func (n nopNext) Dispatch(context.Context, durable.ProcessContext, sys.Syscall, sys.Authorization) (sys.SyscallResult, error) {
 	return sys.Result(nil), nil
 }
 
@@ -43,7 +44,7 @@ func TestSysInputStampsHistoryLabels(t *testing.T) {
 	}
 	l, _ := mustLifecycle(t, nopNext{}, "next task", history, manifest.Manifest{}, 1, nil)
 
-	result, err := l.Dispatch(context.Background(), ProcessContext{},
+	result, err := l.Dispatch(context.Background(), durable.ProcessContext{},
 		sys.Syscall{Name: callSysInput}, sys.Authorization{})
 	if err != nil {
 		t.Fatalf("dispatch sys.input: %v", err)
@@ -60,7 +61,7 @@ func TestSysInputStampsHistoryLabels(t *testing.T) {
 // taint the run.
 func TestSysInputUnlabeledHistoryTaintsNothing(t *testing.T) {
 	l, _ := mustLifecycle(t, nopNext{}, "task", []HistoryMessage{{Role: "assistant", Content: "clean"}}, manifest.Manifest{}, 1, nil)
-	result, err := l.Dispatch(context.Background(), ProcessContext{},
+	result, err := l.Dispatch(context.Background(), durable.ProcessContext{},
 		sys.Syscall{Name: callSysInput}, sys.Authorization{})
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)

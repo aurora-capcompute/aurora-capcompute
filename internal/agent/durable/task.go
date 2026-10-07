@@ -8,7 +8,6 @@ package durable
 // behaviour depends on schema rather than the other way round.
 
 import (
-	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -17,12 +16,6 @@ import (
 
 	"github.com/aurora-capcompute/capcompute/sys"
 )
-
-type TaskScope struct {
-	SessionID string
-	ProcessID string
-	Revision  uint64
-}
 
 type TaskState = sys.Decision
 
@@ -40,7 +33,7 @@ const (
 type TaskResolution = sys.Authorization
 
 type TaskRecord struct {
-	Scope           TaskScope      `json:"scope"`
+	Scope           ProcessContext `json:"scope"`
 	ID              string         `json:"id"`
 	JournalPosition int            `json:"journal_position"`
 	CallHash        string         `json:"call_hash"`
@@ -52,12 +45,6 @@ type TaskRecord struct {
 	CreatedAt       time.Time      `json:"created_at"`
 	ExpiresAt       *time.Time     `json:"expires_at,omitempty"`
 	ResolvedAt      *time.Time     `json:"resolved_at,omitempty"`
-}
-
-type TaskStore interface {
-	Find(context.Context, TaskScope, int, string) (TaskRecord, bool, error)
-	Create(context.Context, TaskRecord) error
-	MarkExecuted(context.Context, string, time.Time) error
 }
 
 var (

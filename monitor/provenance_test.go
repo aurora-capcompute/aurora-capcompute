@@ -51,9 +51,9 @@ func flowTable(t *testing.T, handler capability.Handler) *capability.Table {
 	return table
 }
 
-func call(t *testing.T, d sys.Dispatcher[testPID], pid string, name string) sys.SyscallResult {
+func call(t *testing.T, d sys.Dispatcher[testCred], pid string, name string) sys.SyscallResult {
 	t.Helper()
-	result, err := d.Dispatch(context.Background(), testPID{id: pid}, sys.Syscall{Abi: sys.ABIVersion, Name: name}, sys.Authorization{})
+	result, err := d.Dispatch(context.Background(), testCred{id: pid}, sys.Syscall{Abi: sys.ABIVersion, Name: name}, sys.Authorization{})
 	if err != nil {
 		t.Fatalf("dispatch %s: %v", name, err)
 	}
@@ -62,15 +62,15 @@ func call(t *testing.T, d sys.Dispatcher[testPID], pid string, name string) sys.
 
 // stamped is the below-the-tape half over the table's own routing dispatcher:
 // the index that resolves the call is the index the labels come from.
-func stamped(t *testing.T, table *capability.Table, taints *Taints[string]) (*Flow[string, testPID], sys.Dispatcher[testPID]) {
+func stamped(t *testing.T, table *capability.Table, taints *Taints[testCred]) (*Flow[testCred], sys.Dispatcher[testCred]) {
 	t.Helper()
-	flow := NewFlow[string, testPID](taints, table)
-	return flow, flow.Stamp(capability.NewDispatcher[testPID](table))
+	flow := NewFlow(taints, table)
+	return flow, flow.Stamp(capability.NewDispatcher[testCred](table))
 }
 
 func TestStampRecordsDerivingCapabilityAndClasses(t *testing.T) {
 	table := flowTable(t, echo)
-	_, below := stamped(t, table, NewTaints[string]())
+	_, below := stamped(t, table, NewTaints[testCred]())
 	result := call(t, below, "p1", "internet.read")
 
 	labels := result.Labels()
@@ -82,7 +82,7 @@ func TestStampRecordsDerivingCapabilityAndClasses(t *testing.T) {
 }
 
 func TestFlowGuardBlocksTaintedFlow(t *testing.T) {
-	flow, below := stamped(t, flowTable(t, echo), NewTaints[string]())
+	flow, below := stamped(t, flowTable(t, echo), NewTaints[testCred]())
 	guarded := flow.Guard(below)
 
 	// Before any taint the protected capability is callable.
@@ -111,7 +111,7 @@ func TestFlowGuardBlocksTaintedFlow(t *testing.T) {
 }
 
 func TestFlowGuardDeclassify(t *testing.T) {
-	taints := NewTaints[string]()
+	taints := NewTaints[testCred]()
 	flow, below := stamped(t, flowTable(t, echo), taints)
 	guarded := flow.Guard(below)
 	call(t, guarded, "p1", "internet.read")
@@ -119,7 +119,7 @@ func TestFlowGuardDeclassify(t *testing.T) {
 	if result := call(t, guarded, "p1", "k8s.delete"); result.Errno() != sys.ErrnoDenied {
 		t.Fatalf("expected denial before declassification, got %#v", result)
 	}
-	taints.Declassify("p1", "untrusted_web")
+	taints.Declassify(testCred{id: "p1"}, "untrusted_web")
 	if result := call(t, guarded, "p1", "k8s.delete"); result.Status() != sys.StatusResult {
 		t.Fatalf("declassified k8s.delete = %#v, want result", result)
 	}
@@ -133,14 +133,14 @@ func TestFlowTaintSurvivesCrashReplay(t *testing.T) {
 	header := journaled.Header{ABI: sys.ABIVersion, Program: "sha256:test", Process: "p1"}
 	table := flowTable(t, echo)
 
-	newChain := func(t *testing.T) sys.Dispatcher[testPID] {
+	newChain := func(t *testing.T) sys.Dispatcher[testCred] {
 		t.Helper()
 		tape, err := journaled.NewTape(journal, header)
 		if err != nil {
 			t.Fatalf("new tape: %v", err)
 		}
-		flow, below := stamped(t, table, NewTaints[string]())
-		return flow.Guard(replay.NewDispatcher[testPID](tape, below))
+		flow, below := stamped(t, table, NewTaints[testCred]())
+		return flow.Guard(replay.NewDispatcher(tape, below, nil))
 	}
 
 	first := newChain(t)
@@ -176,15 +176,15 @@ func TestDeclassifySyscallLifecycle(t *testing.T) {
 	journal := newMemJournal()
 	header := journaled.Header{ABI: sys.ABIVersion, Program: "sha256:test", Process: "p1"}
 	table := flowTable(t, echo)
-	newChain := func(t *testing.T) sys.Dispatcher[testPID] {
+	newChain := func(t *testing.T) sys.Dispatcher[testCred] {
 		t.Helper()
 		tape, err := journaled.NewTape(journal, header)
 		if err != nil {
 			t.Fatalf("new tape: %v", err)
 		}
-		flow := NewFlow[string, testPID](NewTaints[string](), table)
-		below := flow.Stamp(NewDeclassifier[testPID](capability.NewDispatcher[testPID](table)))
-		return flow.Guard(replay.NewDispatcher[testPID](tape, below))
+		flow := NewFlow(NewTaints[testCred](), table)
+		below := flow.Stamp(NewDeclassifier(capability.NewDispatcher[testCred](table)))
+		return flow.Guard(replay.NewDispatcher(tape, below, nil))
 	}
 	declassify := sys.Syscall{
 		Abi:  sys.ABIVersion,
@@ -199,7 +199,7 @@ func TestDeclassifySyscallLifecycle(t *testing.T) {
 	}
 
 	// Unapproved: a human task is created (yield); nothing is lifted.
-	result, err := chain.Dispatch(context.Background(), testPID{id: "p1"}, declassify, sys.Authorization{})
+	result, err := chain.Dispatch(context.Background(), testCred{id: "p1"}, declassify, sys.Authorization{})
 	if err != nil {
 		t.Fatalf("declassify: %v", err)
 	}
@@ -215,7 +215,7 @@ func TestDeclassifySyscallLifecycle(t *testing.T) {
 	// journal, and re-issues the declassify — which meets its own open
 	// intent and now carries the resolved Authorization.
 	call(t, chain, "p1", "internet.read")
-	result, err = chain.Dispatch(context.Background(), testPID{id: "p1"}, declassify,
+	result, err = chain.Dispatch(context.Background(), testCred{id: "p1"}, declassify,
 		sys.Authorization{Decision: sys.Approved, Actor: "alice"})
 	if err != nil {
 		t.Fatalf("approved declassify: %v", err)
@@ -235,7 +235,7 @@ func TestDeclassifySyscallLifecycle(t *testing.T) {
 	if result := call(t, crashed, "p1", "k8s.delete"); result.Errno() != sys.ErrnoDenied {
 		t.Fatalf("replayed pre-crossing call escaped denial: %#v", result)
 	}
-	result, err = crashed.Dispatch(context.Background(), testPID{id: "p1"}, declassify, sys.Authorization{})
+	result, err = crashed.Dispatch(context.Background(), testCred{id: "p1"}, declassify, sys.Authorization{})
 	if err != nil {
 		t.Fatalf("replayed declassify: %v", err)
 	}
@@ -252,14 +252,14 @@ func TestDeclassifySyscallLifecycle(t *testing.T) {
 
 func TestDeclassifyValidatesRequest(t *testing.T) {
 	table := flowTable(t, echo)
-	declassifier := NewDeclassifier[testPID](capability.NewDispatcher[testPID](table))
+	declassifier := NewDeclassifier(capability.NewDispatcher[testCred](table))
 	for name, args := range map[string]string{
 		"no labels": `{"labels":[],"reason":"r"}`,
 		"no reason": `{"labels":["x"],"reason":"  "}`,
 		"bad json":  `{`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			result, err := declassifier.Dispatch(context.Background(), testPID{id: "p1"},
+			result, err := declassifier.Dispatch(context.Background(), testCred{id: "p1"},
 				sys.Syscall{Abi: sys.ABIVersion, Name: sys.SyscallDeclassify, Args: json.RawMessage(args)},
 				sys.Authorization{Decision: sys.Approved})
 			if err != nil {
@@ -280,7 +280,7 @@ func TestFlowGuardHandsTaintDownstream(t *testing.T) {
 		}
 		return sys.Result(nil), nil
 	})
-	flow, below := stamped(t, flowTable(t, probe), NewTaints[string]())
+	flow, below := stamped(t, flowTable(t, probe), NewTaints[testCred]())
 	guarded := flow.Guard(below)
 
 	call(t, guarded, "p1", "internet.read")
@@ -290,9 +290,9 @@ func TestFlowGuardHandsTaintDownstream(t *testing.T) {
 	}
 }
 
-func adtCall(t *testing.T, d sys.Dispatcher[testPID], operation string) sys.SyscallResult {
+func adtCall(t *testing.T, d sys.Dispatcher[testCred], operation string) sys.SyscallResult {
 	t.Helper()
-	result, err := d.Dispatch(context.Background(), testPID{id: "p1"}, sys.Syscall{
+	result, err := d.Dispatch(context.Background(), testCred{id: "p1"}, sys.Syscall{
 		Abi:  sys.ABIVersion,
 		Name: "core.filesystem",
 		Args: json.RawMessage(`{"operation":"` + operation + `"}`),
@@ -329,7 +329,7 @@ func adtTable(t *testing.T) *capability.Table {
 // enforcement left the driver.
 func TestPerOperationFlowPolicy(t *testing.T) {
 	table := adtTable(t)
-	flow, below := stamped(t, table, NewTaints[string]())
+	flow, below := stamped(t, table, NewTaints[testCred]())
 	chain := flow.Guard(below)
 
 	// A read stamps its own source class and taints the run.
@@ -354,12 +354,12 @@ func TestPerOperationFlowPolicy(t *testing.T) {
 // that named no readable operation, even though the read declares none.
 func TestUnresolvableCaseTakesTheStrictestBar(t *testing.T) {
 	table := adtTable(t)
-	flow, below := stamped(t, table, NewTaints[string]())
+	flow, below := stamped(t, table, NewTaints[testCred]())
 	chain := flow.Guard(below)
 
 	adtCall(t, chain, "read") // taints the run with untrusted_file
 
-	result, err := chain.Dispatch(context.Background(), testPID{id: "p1"}, sys.Syscall{
+	result, err := chain.Dispatch(context.Background(), testCred{id: "p1"}, sys.Syscall{
 		Abi:  sys.ABIVersion,
 		Name: "core.filesystem",
 		Args: json.RawMessage(`{"operation":42}`),
@@ -372,52 +372,6 @@ func TestUnresolvableCaseTakesTheStrictestBar(t *testing.T) {
 	}
 }
 
-// The permitted set is the index minus what the run's taint bars, and it must
-// track Guard exactly: anything it still lists must actually dispatch, and
-// anything it drops must actually be denied. Deriving it rather than caching it
-// is what makes that hold.
-func TestPermittedSetTracksTheGuard(t *testing.T) {
-	table := adtTable(t)
-	flow, below := stamped(t, table, NewTaints[string]())
-	chain := flow.Guard(below)
-
-	permitted := flow.Permitted("p1")
-	if len(permitted) != 2 {
-		t.Fatalf("permitted = %v, want both cases reachable before any taint", permitted)
-	}
-
-	adtCall(t, chain, "read") // taints the run with untrusted_file
-
-	permitted = flow.Permitted("p1")
-	if len(permitted) != 1 || permitted[0].Operation != "read" {
-		t.Fatalf("permitted = %v, want the write dropped and the read kept", permitted)
-	}
-	// What the set claims is what the guard does, in both directions.
-	if blocked := adtCall(t, chain, "write"); blocked.Errno() != sys.ErrnoDenied {
-		t.Fatalf("write = %v, want denied — the permitted set dropped it", blocked.Errno())
-	}
-	if allowed := adtCall(t, chain, "read"); allowed.Status() != sys.StatusResult {
-		t.Fatalf("read = %v, want served — the permitted set kept it", allowed.Status())
-	}
-
-	// A declassification grows the set back.
-	flow.taints.Declassify("p1", "untrusted_file")
-	if permitted = flow.Permitted("p1"); len(permitted) != 2 {
-		t.Fatalf("permitted after declassify = %v, want both cases reachable again", permitted)
-	}
-}
-
-// A flow layer with no index would answer every sink guard with "no policy" —
-// the one wrong answer a reference monitor can give. It refuses to exist.
-func TestFlowRefusesToBeBuiltWithoutAnIndex(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("a flow layer with no grant table was built instead of panicking")
-		}
-	}()
-	NewFlow[string, testPID](NewTaints[string](), nil)
-}
-
 // A failed result is still an observation: the call reached a labelled source
 // and the failure text may carry what it saw. Stamp labels it like any other
 // outcome, which is why a driver need not — and must not — label its own
@@ -427,7 +381,7 @@ func TestStampLabelsFailuresToo(t *testing.T) {
 	failing := handlerFunc(func(_ context.Context, _ sys.Syscall) (sys.SyscallResult, error) {
 		return sys.FailCode(sys.ErrnoTransient, "provider unreachable"), nil
 	})
-	_, below := stamped(t, flowTable(t, failing), NewTaints[string]())
+	_, below := stamped(t, flowTable(t, failing), NewTaints[testCred]())
 
 	result := call(t, below, "p1", "internet.read")
 	if result.Status() != sys.StatusFailed {

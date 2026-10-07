@@ -62,11 +62,10 @@ type DispatcherProvider = agent.DispatcherProvider
 
 type EventLog = eventlog.Log
 type LogEvent = eventlog.Event
-type ProcessContext = agent.ProcessContext
+type ProcessContext = durable.ProcessContext
 
 // Task types
 
-type TaskScope = durable.TaskScope
 type TaskState = sys.Decision
 type Resolution = sys.Authorization
 

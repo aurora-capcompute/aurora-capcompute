@@ -17,6 +17,7 @@ import (
 	"fmt"
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/aurora-capcompute/monitor"
 	"github.com/aurora-capcompute/capcompute/sys"
@@ -24,11 +25,6 @@ import (
 
 // ErrCrash is the injected fault: the process died at a journal append.
 var ErrCrash = errors.New("simulated crash")
-
-// PID is the simulated process identity.
-type PID struct{ ID string }
-
-func (p PID) PID() string { return p.ID }
 
 // Journal is an in-memory journaled.Journal plus fault injection: when
 // CrashAt equals the number of appends performed so far, the append fails
@@ -139,10 +135,10 @@ func (d driver) DispatchCall(_ context.Context, syscall sys.Syscall, _ sys.Autho
 }
 
 // Chain builds the canonical dispatcher stack over the world, exactly as a
-// real deployment does — via Stack.ForProcess, so the sim's crash matrix
+// real deployment does — via monitor.Wrap, so the sim's crash matrix
 // exercises the same layer order production runs. Fails with
 // journaled.ReplayIncompatibleError etc. via the returned error.
-func Chain(world *World, process string) (sys.Dispatcher[PID], error) {
+func Chain(world *World, process string) (sys.Dispatcher[durable.ProcessContext], error) {
 	tape, err := journaled.NewTape(world.Journal, journaled.Header{
 		ABI:     sys.ABIVersion,
 		Program: "sha256:sim",
@@ -152,10 +148,8 @@ func Chain(world *World, process string) (sys.Dispatcher[PID], error) {
 		return nil, err
 	}
 	table := Table(world.Effects)
-	stack := monitor.Stack[string, PID]{
-		Taints: monitor.NewTaints[string](), // fresh per boot: a crash loses host memory
-	}
-	return stack.ForProcess(tape, table, capability.NewDispatcher[PID](table))
+	// Fresh Taints per boot: a crash loses host memory.
+	return monitor.Wrap(monitor.NewTaints[durable.ProcessContext](), tape, table, nil, capability.NewDispatcher[durable.ProcessContext](table)), nil
 }
 
 // Run boots a fresh host process over the surviving world and drives the
@@ -173,7 +167,7 @@ func Run(world *World, process string, program Program) error {
 		if step.Args != "" {
 			syscall.Args = json.RawMessage(step.Args)
 		}
-		result, err := chain.Dispatch(ctx, PID{ID: process}, syscall, sys.Authorization{})
+		result, err := chain.Dispatch(ctx, durable.ProcessContext{ProcessID: process}, syscall, sys.Authorization{})
 		if err != nil {
 			return err
 		}

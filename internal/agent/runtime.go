@@ -24,14 +24,12 @@ import (
 	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
-	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/aurora-capcompute/monitor"
 	"github.com/aurora-capcompute/aurora-capcompute/replay"
 	"github.com/aurora-capcompute/capcompute/sys"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/errs"
-	internalhost "github.com/aurora-capcompute/aurora-capcompute/internal/agent/host"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 )
 
@@ -171,12 +169,11 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		return nil, fmt.Errorf("%w: task secret is required", errs.Invalid)
 	}
 	baseCtx, cancel := context.WithCancel(context.Background())
-	var err error
 	memoryPages, quantumCeiling := resolveGuestLimits(config.ProcessMemoryPages, config.MaxQuantumDuration)
 	runtime := &Runtime{
 		baseCtx:         baseCtx,
 		cancel:          cancel,
-		taints:          monitor.NewTaints[processKey](),
+		taints:          monitor.NewTaints[durable.ProcessContext](),
 		log:             config.Log,
 		sessions:        make(map[string]*sessionState),
 		processes:       make(map[string]*processState),
@@ -186,6 +183,7 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		taskTTL:         config.TaskTTL,
 		maxAbortRetries: config.MaxAbortRetries,
 		dispatchers:     config.Dispatchers,
+		openIntents:     openIntentPolicy(config.NonIdempotentSyscalls),
 	}
 	runtime.memoryPages, runtime.quantumCeiling = memoryPages, quantumCeiling
 	if runtime.idSource == nil {
@@ -203,20 +201,6 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 	}
 	if err := runtime.restore(ctx); err != nil {
 		return nil, fmt.Errorf("restore runtime: %w", err)
-	}
-
-	runtime.factory, err = internalhost.New(internalhost.Config[processKey, ProcessContext]{
-		Environment: runtime,
-		Taints:      runtime.taints,
-		Tasks:       runtime.tasks,
-		TaskSecret:  runtime.taskSecret,
-		TaskTTL:     runtime.taskTTL,
-		Wrap:        runtime.wrapProtocol,
-		OpenIntents: openIntentPolicy(config.NonIdempotentSyscalls),
-		Now:         runtime.now,
-	})
-	if err != nil {
-		return nil, err
 	}
 
 	maxConcurrent := config.MaxConcurrentProcesses
@@ -302,123 +286,6 @@ func (r *Runtime) wake(processID string) error {
 	}
 	_, err := r.Retry(processID, RetryResume)
 	return err
-}
-
-// Drivers builds the driver chain below the task layer for one process: the
-// application's capability dispatcher wrapped with progress reporting.
-func (r *Runtime) Drivers(resolveCtx context.Context, cred ProcessContext) (sys.Dispatcher[ProcessContext], *capability.Table, error) {
-	r.mu.Lock()
-	proc := r.processes[cred.ProcessID]
-	var spec manifest.Manifest
-	if proc != nil {
-		spec = proc.manifest.Clone()
-	}
-	r.mu.Unlock()
-	if proc == nil {
-		return nil, nil, fmt.Errorf("%w: process %s", errs.NotFound, cred.ProcessID)
-	}
-	table, err := r.dispatchers.NewDispatcher(resolveCtx, cred, spec)
-	if err != nil {
-		return nil, nil, err
-	}
-	if err := reconcileGrants(table.Descriptors(), spec); err != nil {
-		return nil, nil, err
-	}
-	// The routing dispatcher is built here, from the table the provider returned,
-	// rather than by the provider: the chain that serves a call and the index the
-	// monitor judges it against are then the same object by construction.
-	var base sys.Dispatcher[ProcessContext] = capability.NewDispatcher[ProcessContext](table)
-	if grant, ok := spec.FindSyscall(manifest.TimerSyscall); ok {
-		// sys.timer is the runtime's own, served below the task layer so its
-		// yield becomes a durable timer task.
-		base, err = newTimerDispatcher(base, grant, table)
-		if err != nil {
-			return nil, nil, err
-		}
-	}
-	progress, err := newProgressDispatcher(base, table)
-	if err != nil {
-		return nil, nil, err
-	}
-	return progress, table, nil
-}
-
-// wrapProtocol stacks the runtime's protocol layers above the task layer: the
-// agent lifecycle outermost, whose sys.input payload advertises every capability
-// beneath it.
-func (r *Runtime) wrapProtocol(cred ProcessContext, next sys.Dispatcher[ProcessContext], table *capability.Table) (sys.Dispatcher[ProcessContext], error) {
-	r.mu.Lock()
-	proc := r.processes[cred.ProcessID]
-	var spec manifest.Manifest
-	var input string
-	var history []HistoryMessage
-	var attempt int
-	if proc != nil {
-		spec = proc.manifest.Clone()
-		input = proc.input
-		// A manifest declaring history:false serves no session history on its
-		// sys.input — the process sees only its own input.
-		if !proc.hideHistory {
-			history = append([]HistoryMessage(nil), proc.history...)
-		}
-		attempt = proc.attempt
-	}
-	r.mu.Unlock()
-	if proc == nil {
-		return nil, fmt.Errorf("%w: process %s", errs.NotFound, cred.ProcessID)
-	}
-	return newLifecycleDispatcher(
-		next,
-		input,
-		history,
-		spec,
-		attempt,
-		func(answer string) error {
-			program, ok := r.programs.get(ProgramID(spec.Program))
-			if !ok {
-				return fmt.Errorf("%w: program %q is not loaded", errs.Conflict, spec.Program)
-			}
-			return program.validateOutput(answer)
-		},
-		table,
-	)
-}
-
-// ProcessJournal returns the process's live journal view.
-func (r *Runtime) ProcessJournal(_ context.Context, cred ProcessContext) (journaled.Journal, error) {
-	r.mu.Lock()
-	proc := r.processes[cred.ProcessID]
-	r.mu.Unlock()
-	if proc == nil || proc.journal == nil {
-		return nil, fmt.Errorf("%w: process %s has no journal", errs.NotFound, cred.ProcessID)
-	}
-	if proc.journal.rev != cred.Revision {
-		return nil, fmt.Errorf("%w: process %s journal is at revision %d, not %d",
-			errs.Conflict, cred.ProcessID, proc.journal.rev, cred.Revision)
-	}
-	return proc.journal, nil
-}
-
-// TaskScope is the credential in the task store's scope shape.
-//
-// Drivers, ProcessJournal, Header and TaskScope together are the runtime's
-// half of host.Environment — everything one process's dispatcher chain needs
-// that only the runtime can know. They are exported for that seam, not for
-// callers: aurora.Runtime is a closed interface and does not list them.
-func (r *Runtime) TaskScope(cred ProcessContext) durable.TaskScope { return cred.taskScope() }
-
-// Header is the journal writer identity for one process revision: the
-// syscall ABI, the program digest as the program, and the process id. The
-// tape refuses to replay a journal whose recorded header differs — the
-// versioned-replay law.
-func (r *Runtime) Header(cred ProcessContext) journaled.Header {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	program := ""
-	if proc := r.processes[cred.ProcessID]; proc != nil {
-		program = proc.digest
-	}
-	return journaled.Header{ABI: sys.ABIVersion, Program: program, Process: cred.ProcessID}
 }
 
 // AddProgram registers one program and compiles its wasm. Registering is always
@@ -913,7 +780,7 @@ func (r *Runtime) forkJournalLocked(proc *processState, forkOffset int) {
 	// so release its taint. Otherwise the shared taint map accumulates one dead
 	// entry per abort-retry/restart fork for the runtime's lifetime; the new
 	// revision rebuilds its own taint by replaying the shared prefix's labels.
-	r.taints.ForgetProcess(proc.key())
+	r.taints.ForgetProcess(proc.context())
 	proc.revision++
 	proc.forkOffset = forkOffset
 	proc.lastFailureLength = 0

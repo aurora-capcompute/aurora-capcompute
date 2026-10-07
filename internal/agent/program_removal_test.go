@@ -37,11 +37,11 @@ func newBlockingDispatchers(stoppable bool) *blockingDispatchers {
 
 func (*blockingDispatchers) ValidateConfig(string, json.RawMessage) error { return nil }
 
-func (d *blockingDispatchers) NewDispatcher(_ context.Context, _ ProcessContext, _ manifest.Manifest) (*capability.Table, error) {
+func (d *blockingDispatchers) NewDispatcher(_ context.Context, _ durable.ProcessContext, _ manifest.Manifest) (*capability.Table, error) {
 	return tableOf(d, llmCapability()), nil
 }
 
-func (d *blockingDispatchers) Dispatch(ctx context.Context, _ ProcessContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
+func (d *blockingDispatchers) Dispatch(ctx context.Context, _ durable.ProcessContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
 	if syscall.Name != "core.openaiApi" {
 		return sys.Fail("unsupported call: " + syscall.Name), nil
 	}

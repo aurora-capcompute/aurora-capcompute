@@ -38,19 +38,15 @@ func (t *fakeTape) Reset() {
 	t.reset = true
 }
 
-func (t *fakeTape) Remaining() int {
-	return 0
-}
+type nextFunc func(context.Context, string, sys.Syscall, sys.Authorization) (sys.SyscallResult, error)
 
-type nextFunc[K any] func(context.Context, K, sys.Syscall, sys.Authorization) (sys.SyscallResult, error)
-
-func (f nextFunc[K]) Dispatch(ctx context.Context, cred K, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
+func (f nextFunc) Dispatch(ctx context.Context, cred string, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	return f(ctx, cred, syscall, auth)
 }
 
-func dispatchWith(t *testing.T, tape *fakeTape, next nextFunc[string]) (sys.SyscallResult, error) {
+func dispatchWith(t *testing.T, tape *fakeTape, next nextFunc) (sys.SyscallResult, error) {
 	t.Helper()
-	return NewDispatcher[string](tape, next).Dispatch(
+	return NewDispatcher(tape, next, nil).Dispatch(
 		context.Background(), "run-1", sys.Syscall{Name: "step.one"}, sys.Authorization{})
 }
 
@@ -157,10 +153,10 @@ func TestDispatcherRetriesOpenIntent(t *testing.T) {
 
 func TestDispatcherFailsOpenIntentPerPolicy(t *testing.T) {
 	tape := &fakeTape{nextErr: OpenIntentError{Position: 4, Syscall: sys.Syscall{Name: "mail.send"}}}
-	dispatcher := NewDispatcher[string](tape, nextFunc[string](func(context.Context, string, sys.Syscall, sys.Authorization) (sys.SyscallResult, error) {
+	dispatcher := NewDispatcher(tape, nextFunc(func(context.Context, string, sys.Syscall, sys.Authorization) (sys.SyscallResult, error) {
 		t.Fatal("policy-failed open intent reached the driver")
 		return sys.SyscallResult{}, nil
-	})).WithOpenIntentPolicy(func(syscall sys.Syscall) OpenIntentDecision {
+	}), func(syscall sys.Syscall) OpenIntentDecision {
 		if syscall.Name == "mail.send" {
 			return FailOpenIntent
 		}

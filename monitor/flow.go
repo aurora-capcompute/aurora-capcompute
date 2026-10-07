@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
-	"github.com/aurora-capcompute/capcompute"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
@@ -28,69 +27,42 @@ import (
 // internet fetch labels by which credential matched, a session's input by what
 // its predecessors read — so they cannot be re-derived from the index and must
 // be journaled with the completion record. Getting either on the wrong side
-// silently breaks a law, which is why Stack assembles them and callers do not.
-type Flow[ID comparable, K capcompute.PID[ID]] struct {
-	taints *Taints[ID]
+// silently breaks a law, which is why Wrap assembles them and callers do not.
+type Flow[K comparable] struct {
+	taints *Taints[K]
 	table  *capability.Table
 }
 
-// NewFlow binds the shared taint state to one process's grant table. Both are
-// required: a flow layer with no index would answer every sink guard with "no
-// policy", which is the one wrong answer a reference monitor can give. Passing
-// nil panics here rather than failing open at the first tainted call.
-func NewFlow[ID comparable, K capcompute.PID[ID]](taints *Taints[ID], table *capability.Table) *Flow[ID, K] {
-	if taints == nil || table == nil {
-		panic("monitor: a flow layer needs both taint state and a grant table")
-	}
-	return &Flow[ID, K]{taints: taints, table: table}
+// NewFlow binds the shared taint state to one process's grant table.
+func NewFlow[K comparable](taints *Taints[K], table *capability.Table) *Flow[K] {
+	return &Flow[K]{taints: taints, table: table}
 }
 
 // Guard refuses a syscall whose operation forbids a label this run has already
 // observed, before any handler runs. It belongs above the replay layer.
-func (f *Flow[ID, K]) Guard(next sys.Dispatcher[K]) sys.Dispatcher[K] {
-	return &flowGuard[ID, K]{flow: f, next: next}
+func (f *Flow[K]) Guard(next sys.Dispatcher[K]) sys.Dispatcher[K] {
+	return &flowGuard[K]{flow: f, next: next}
 }
 
 // Stamp records the source classes an operation's results carry, and folds
 // every observed label into the run's taint. It belongs below the replay layer.
-func (f *Flow[ID, K]) Stamp(next sys.Dispatcher[K]) sys.Dispatcher[K] {
-	return &flowStamp[ID, K]{flow: f, next: next}
+func (f *Flow[K]) Stamp(next sys.Dispatcher[K]) sys.Dispatcher[K] {
+	return &flowStamp[K]{flow: f, next: next}
 }
 
-// Permitted is the run's remaining reach: every indexed operation whose forbid
-// set the accumulated taint does not intersect. It is the "what can this process
-// still do" question the taint answers only indirectly, and it shrinks as the run
-// observes labels — a declassification grows it back.
-//
-// It is derived on demand rather than maintained alongside the taint. A cached
-// permitted-set would be a second source of truth for a security decision, and
-// the moment it went stale it would go stale open; computing it from the index
-// and the taint means it cannot disagree with what Guard actually enforces.
-func (f *Flow[ID, K]) Permitted(pid ID) []capability.Key {
-	entries := f.table.Entries()
-	permitted := make([]capability.Key, 0, len(entries))
-	for _, entry := range entries {
-		if len(f.taints.intersection(pid, entry.Forbid)) == 0 {
-			permitted = append(permitted, entry.Key)
-		}
-	}
-	return permitted
-}
-
-type flowGuard[ID comparable, K capcompute.PID[ID]] struct {
-	flow *Flow[ID, K]
+type flowGuard[K comparable] struct {
+	flow *Flow[K]
 	next sys.Dispatcher[K]
 }
 
-func (g *flowGuard[ID, K]) Dispatch(ctx context.Context, cred K, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
+func (g *flowGuard[K]) Dispatch(ctx context.Context, cred K, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	switch syscall.Name {
 	case sys.SyscallBegin, sys.SyscallCommit:
 		return g.next.Dispatch(ctx, cred, syscall, auth)
 	}
 
-	pid := cred.PID()
 	forbid, sink := g.flow.table.Forbidden(syscall)
-	if tainted := g.flow.taints.intersection(pid, forbid); len(tainted) > 0 {
+	if tainted := g.flow.taints.intersection(cred, forbid); len(tainted) > 0 {
 		return sys.FailCode(sys.ErrnoDenied, fmt.Sprintf(
 			"flow policy: this run has observed %v, which may not flow into %q", tainted, sink)), nil
 	}
@@ -98,7 +70,7 @@ func (g *flowGuard[ID, K]) Dispatch(ctx context.Context, cred K, syscall sys.Sys
 	// Hand the run's taint downstream: handlers that store guest-derived data
 	// persist it with the value, so provenance survives into later sessions
 	// instead of being laundered.
-	result, err := g.next.Dispatch(capability.WithTaint(ctx, g.flow.taints.snapshot(pid)), cred, syscall, auth)
+	result, err := g.next.Dispatch(capability.WithTaint(ctx, g.flow.taints.snapshot(cred)), cred, syscall, auth)
 	if err != nil {
 		return result, err
 	}
@@ -109,19 +81,19 @@ func (g *flowGuard[ID, K]) Dispatch(ctx context.Context, cred K, syscall sys.Sys
 		if err := json.Unmarshal(result.Result(), &crossed); err != nil {
 			return sys.SyscallResult{}, fmt.Errorf("decode declassify result: %w", err)
 		}
-		g.flow.taints.Declassify(pid, crossed.Declassified...)
+		g.flow.taints.Declassify(cred, crossed.Declassified...)
 		return result, nil
 	}
-	g.flow.taints.observe(pid, result.Labels())
+	g.flow.taints.observe(cred, result.Labels())
 	return result, nil
 }
 
-type flowStamp[ID comparable, K capcompute.PID[ID]] struct {
-	flow *Flow[ID, K]
+type flowStamp[K comparable] struct {
+	flow *Flow[K]
 	next sys.Dispatcher[K]
 }
 
-func (s *flowStamp[ID, K]) Dispatch(ctx context.Context, cred K, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
+func (s *flowStamp[K]) Dispatch(ctx context.Context, cred K, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	result, err := s.next.Dispatch(ctx, cred, syscall, auth)
 	if err != nil {
 		return result, err

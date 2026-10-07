@@ -1,8 +1,9 @@
-package host
+package agent
 
 import (
 	"context"
 
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
@@ -17,11 +18,11 @@ var savepointResult = []byte("{}")
 // markers never become durable tasks or reach a driver). A guest brackets a
 // unit of retryable work with begin … commit; on a failed process the runtime
 // forks resume just past the outermost begin that was never committed.
-type savepointDispatcher[K any] struct {
-	next sys.Dispatcher[K]
+type savepointDispatcher struct {
+	next sys.Dispatcher[durable.ProcessContext]
 }
 
-func (d *savepointDispatcher[K]) Dispatch(ctx context.Context, cred K, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
+func (d *savepointDispatcher) Dispatch(ctx context.Context, cred durable.ProcessContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	if syscall.Name == sys.SyscallBegin || syscall.Name == sys.SyscallCommit {
 		return sys.Result(savepointResult), nil
 	}

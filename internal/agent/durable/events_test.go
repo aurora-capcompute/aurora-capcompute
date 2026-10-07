@@ -44,7 +44,7 @@ func TestFoldReconstructsLatestRunAndSessionState(t *testing.T) {
 func TestFoldTaskLifecycle(t *testing.T) {
 	now := time.Unix(0, 0).UTC()
 	rec := TaskRecord{
-		Scope:     TaskScope{SessionID: "th1", ProcessID: "proc1", Revision: 1},
+		Scope:     ProcessContext{SessionID: "th1", ProcessID: "proc1", Revision: 1},
 		ID:        "task1",
 		State:     TaskPending,
 		TokenHash: []byte{1, 2, 3},

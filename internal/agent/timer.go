@@ -31,12 +31,12 @@ type timerRequest struct {
 }
 
 type timerDispatcher struct {
-	next        sys.Dispatcher[ProcessContext]
+	next        sys.Dispatcher[durable.ProcessContext]
 	maxDuration time.Duration
 	hidden      bool
 }
 
-func newTimerDispatcher(next sys.Dispatcher[ProcessContext], grant manifest.Syscall, table *capability.Table) (*timerDispatcher, error) {
+func newTimerDispatcher(next sys.Dispatcher[durable.ProcessContext], grant manifest.Syscall, table *capability.Table) (*timerDispatcher, error) {
 	var settings manifest.TimerSettings
 	if len(grant.Config) > 0 {
 		// Validated at the manifest door; a decode failure here leaves the
@@ -95,7 +95,7 @@ func timerTaskRequest(record durable.TaskRecord) (timerRequest, bool) {
 
 // Dispatch validates the request and yields a durable task. A valid call
 // always yields; invalid input fails immediately so the agent gets feedback.
-func (t *timerDispatcher) Dispatch(ctx context.Context, cred ProcessContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
+func (t *timerDispatcher) Dispatch(ctx context.Context, cred durable.ProcessContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	if syscall.Name != manifest.TimerSyscall {
 		return t.next.Dispatch(ctx, cred, syscall, auth)
 	}

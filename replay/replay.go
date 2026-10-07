@@ -15,11 +15,6 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-// CompletionChecker validates per-resume dispatcher state after the guest returns.
-type CompletionChecker interface {
-	CheckCompleted() error
-}
-
 // Tape owns replay cursor state and the two-record intent/completion protocol:
 // an intent is appended before a syscall executes (journal-before-execute), a
 // completion after its outcome is known and before the guest observes it
@@ -35,7 +30,6 @@ type Tape interface {
 	// Commit appends the completion record for the open intent.
 	Commit(result sys.SyscallResult) error
 	Reset()
-	Remaining() int
 }
 
 // OpenIntentError reports that replay reached an intent record with no
@@ -88,15 +82,10 @@ type Dispatcher[K any] struct {
 	openIntent OpenIntentPolicy
 }
 
-func NewDispatcher[K any](tape Tape, next sys.Dispatcher[K]) *Dispatcher[K] {
-	return &Dispatcher[K]{tape: tape, next: next}
-}
-
-// WithOpenIntentPolicy sets the open-intent decision; without it every open
-// intent is retried.
-func (d *Dispatcher[K]) WithOpenIntentPolicy(policy OpenIntentPolicy) *Dispatcher[K] {
-	d.openIntent = policy
-	return d
+// NewDispatcher journals next's syscalls on tape. A nil openIntent retries
+// every open intent.
+func NewDispatcher[K any](tape Tape, next sys.Dispatcher[K], openIntent OpenIntentPolicy) *Dispatcher[K] {
+	return &Dispatcher[K]{tape: tape, next: next, openIntent: openIntent}
 }
 
 func (d *Dispatcher[K]) Dispatch(ctx context.Context, cred K, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
@@ -141,24 +130,4 @@ func (d *Dispatcher[K]) decideOpenIntent(syscall sys.Syscall) OpenIntentDecision
 		return RetryOpenIntent
 	}
 	return d.openIntent(syscall)
-}
-
-func (d *Dispatcher[K]) Remaining() int {
-	return d.tape.Remaining()
-}
-
-func (d *Dispatcher[K]) CheckCompleted() error {
-	if remaining := d.Remaining(); remaining > 0 {
-		return IncompleteError{Remaining: remaining}
-	}
-	return nil
-}
-
-// IncompleteError means the guest completed before replaying all recorded syscalls.
-type IncompleteError struct {
-	Remaining int
-}
-
-func (e IncompleteError) Error() string {
-	return fmt.Sprintf("replay incomplete: %d recorded journal records were not consumed", e.Remaining)
 }

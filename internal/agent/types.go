@@ -3,17 +3,16 @@ package agent
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"sync"
 	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-capcompute/monitor"
+	"github.com/aurora-capcompute/aurora-capcompute/replay"
 	"github.com/aurora-capcompute/capcompute/sys"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
-	internalhost "github.com/aurora-capcompute/aurora-capcompute/internal/agent/host"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 )
 
@@ -47,7 +46,7 @@ type HistoryMessage struct {
 // other two to be reconstructed, which is where they could disagree.
 type DispatcherProvider interface {
 	ValidateConfig(syscall string, config json.RawMessage) error
-	NewDispatcher(context.Context, ProcessContext, manifest.Manifest) (*capability.Table, error)
+	NewDispatcher(context.Context, durable.ProcessContext, manifest.Manifest) (*capability.Table, error)
 }
 
 // Config wires a Runtime. Everything concrete is injected: programs, capability
@@ -106,7 +105,7 @@ type Runtime struct {
 	cancel          context.CancelFunc
 	programs        *programRegistry
 	pool            *pool
-	taints          *monitor.Taints[processKey]
+	taints          *monitor.Taints[durable.ProcessContext]
 	log             eventlog.Log
 	tasks           *eventTaskStore
 	sessions        map[string]*sessionState
@@ -119,7 +118,7 @@ type Runtime struct {
 	memoryPages     uint32
 	quantumCeiling  time.Duration
 	dispatchers     DispatcherProvider
-	factory         *internalhost.Factory[processKey, ProcessContext]
+	openIntents     replay.OpenIntentPolicy
 	wg              sync.WaitGroup
 	closed          bool
 }
@@ -190,34 +189,9 @@ type processState struct {
 	abortRetries int
 }
 
-type ProcessContext struct {
-	SessionID string
-	ProcessID string
-	Revision  uint64
-}
-
-func (r ProcessContext) PID() processKey {
-	return processKey{processID: r.ProcessID, revision: r.Revision}
-}
-
-// taskScope is the same credential in the task store's scope shape.
-func (r ProcessContext) taskScope() durable.TaskScope {
-	return durable.TaskScope{
-		SessionID: r.SessionID,
-		ProcessID: r.ProcessID,
-		Revision:  r.Revision,
-	}
-}
-
-type processKey struct {
-	processID string
-	revision  uint64
-}
-
-func (k processKey) String() string { return fmt.Sprintf("%s@%d", k.processID, k.revision) }
-
-func (p *processState) key() processKey {
-	return processKey{processID: p.id, revision: p.revision}
+// context is the identity of the process's current revision.
+func (p *processState) context() durable.ProcessContext {
+	return durable.ProcessContext{SessionID: p.sessionID, ProcessID: p.id, Revision: p.revision}
 }
 
 type agentInput struct {

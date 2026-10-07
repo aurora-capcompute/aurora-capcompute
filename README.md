@@ -145,8 +145,9 @@ capability names.
 
 ## How it works: the processor chain
 
-Every process's syscalls flow through a fixed monitor chain (assembled by this
-repo's `monitor.Stack.ForProcess`, never by hand):
+Every process's syscalls flow through a fixed chain. One function,
+`newDispatcher` in `internal/agent/dispatcher.go`, builds it for every quantum;
+the monitor and replay part comes from `monitor.Wrap`, never by hand:
 
 ```
 Validator → Flow.Guard → [replay over the journal] → Flow.Stamp → Declassifier →
@@ -211,7 +212,7 @@ internal/agent/         the runtime engine (Go's internal/ rule hides it)
   abort.go              abort/failure re-drive and section refork
   restore.go            rebuild state by replaying event streams
   eventlog/             the append-only Log interface (no concrete store)
-  host/                 per-process dispatcher stack over monitor.Stack
+  dispatcher.go         builds one process's whole dispatcher chain
   task/                 durable approval-task store + state machine
 ```
 

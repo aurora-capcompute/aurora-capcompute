@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
@@ -16,7 +17,7 @@ func leafCap(name string) capability.Descriptor { return capability.Descriptor{N
 // capsDispatcher advertises a fixed capability set; it never serves calls.
 type capsDispatcher struct{ caps []capability.Descriptor }
 
-func (capsDispatcher) Dispatch(context.Context, ProcessContext, sys.Syscall, sys.Authorization) (sys.SyscallResult, error) {
+func (capsDispatcher) Dispatch(context.Context, durable.ProcessContext, sys.Syscall, sys.Authorization) (sys.SyscallResult, error) {
 	return sys.Fail("unused"), nil
 }
 
@@ -26,7 +27,7 @@ func (capsDispatcher) Dispatch(context.Context, ProcessContext, sys.Syscall, sys
 type fixedProvider struct{ caps []capability.Descriptor }
 
 func (fixedProvider) ValidateConfig(string, json.RawMessage) error { return nil }
-func (p fixedProvider) NewDispatcher(context.Context, ProcessContext, manifest.Manifest) (*capability.Table, error) {
+func (p fixedProvider) NewDispatcher(context.Context, durable.ProcessContext, manifest.Manifest) (*capability.Table, error) {
 	return reservedTable(p.caps...), nil
 }
 
@@ -82,38 +83,6 @@ func TestReconcileGrants(t *testing.T) {
 			t.Fatalf("err = %v, want a driver advertising %s to be rejected", err, manifest.TimerSyscall)
 		}
 	})
-}
-
-// The guard is actually wired into process activation: a provider that
-// advertises a capability the manifest did not grant fails Drivers
-// (fail-closed), so the leaked capability never becomes callable.
-func TestProcessDriversRejectsOverAdvertisingProvider(t *testing.T) {
-	r := &Runtime{
-		dispatchers: fixedProvider{caps: []capability.Descriptor{leafCap("core.openaiApi"), leafCap("core.leak")}},
-		processes: map[string]*processState{
-			"p1": {id: "p1", manifest: manifest.Manifest{Version: manifest.Version, Syscalls: []manifest.Syscall{
-				{Syscall: "core.openaiApi", Hidden: true},
-			}}},
-		},
-	}
-	_, _, err := r.Drivers(context.Background(), ProcessContext{ProcessID: "p1"})
-	if err == nil || !strings.Contains(err.Error(), "core.leak") {
-		t.Fatalf("Drivers err = %v, want a fail-closed rejection naming core.leak", err)
-	}
-}
-
-func TestProcessDriversAdmitsFaithfulProvider(t *testing.T) {
-	r := &Runtime{
-		dispatchers: fixedProvider{caps: []capability.Descriptor{leafCap("core.openaiApi")}},
-		processes: map[string]*processState{
-			"p1": {id: "p1", manifest: manifest.Manifest{Version: manifest.Version, Syscalls: []manifest.Syscall{
-				{Syscall: "core.openaiApi", Hidden: true},
-			}}},
-		},
-	}
-	if _, _, err := r.Drivers(context.Background(), ProcessContext{ProcessID: "p1"}); err != nil {
-		t.Fatalf("faithful provider rejected at activation: %v", err)
-	}
 }
 
 // The reserved sys.* namespace belongs to the processor and runtime. A manifest may

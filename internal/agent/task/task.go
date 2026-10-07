@@ -19,7 +19,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"time"
 
@@ -28,26 +27,29 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
+// Store is the durable task store the dispatcher mints and reads records in.
+type Store interface {
+	Find(ctx context.Context, scope durable.ProcessContext, position int, callHash string) (durable.TaskRecord, bool, error)
+	Create(ctx context.Context, record durable.TaskRecord) error
+	MarkExecuted(ctx context.Context, taskID string, now time.Time) error
+}
+
 // Dispatcher sits below the replay layer: by the time a syscall reaches it,
 // the replay dispatcher has already journaled the intent, so the current
 // journal tail is this syscall's intent record. That intent position is the
 // task's identity within the process revision — a resumed process re-reaches the same
 // position and finds the same task.
-type Dispatcher[K any] struct {
-	Next        sys.Dispatcher[K]
-	Store       durable.TaskStore
+type Dispatcher struct {
+	Next        sys.Dispatcher[durable.ProcessContext]
+	Store       Store
 	Journal     journaled.Journal
-	Scope       func(K) durable.TaskScope
 	Now         func() time.Time
 	TokenSecret []byte
 	TaskTTL     time.Duration
 }
 
-func (d *Dispatcher[K]) Dispatch(ctx context.Context, cred K, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
-	if d.Next == nil || d.Store == nil || d.Journal == nil || d.Scope == nil {
-		return sys.SyscallResult{}, errors.New("task dispatcher is not configured")
-	}
-	scope := d.Scope(cred)
+func (d *Dispatcher) Dispatch(ctx context.Context, cred durable.ProcessContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
+	scope := cred
 	// The replay layer appends the intent before delegating, so the syscall's
 	// journal position is the current tail.
 	position := max(d.Journal.Length()-1, 0)
@@ -93,7 +95,7 @@ func (d *Dispatcher[K]) Dispatch(ctx context.Context, cred K, syscall sys.Syscal
 	return sys.Yield(record.ID), nil
 }
 
-func (d *Dispatcher[K]) resume(ctx context.Context, cred K, record durable.TaskRecord) (sys.SyscallResult, error) {
+func (d *Dispatcher) resume(ctx context.Context, cred durable.ProcessContext, record durable.TaskRecord) (sys.SyscallResult, error) {
 	if record.ExpiresAt != nil && !d.now().Before(*record.ExpiresAt) && record.State == durable.TaskPending {
 		return sys.FailCode(sys.ErrnoExpired, "external task expired"), nil
 	}
@@ -133,12 +135,7 @@ func HashCall(syscall sys.Syscall) string {
 	return hex.EncodeToString(sum.Sum(nil))
 }
 
-func (d *Dispatcher[K]) now() time.Time {
-	if d.Now != nil {
-		return d.Now().UTC()
-	}
-	return time.Now().UTC()
-}
+func (d *Dispatcher) now() time.Time { return d.Now().UTC() }
 
 func randomID() (string, error) {
 	var raw [16]byte

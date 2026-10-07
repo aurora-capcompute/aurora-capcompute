@@ -1,4 +1,4 @@
-package host
+package agent
 
 import (
 	"bytes"
@@ -8,26 +8,27 @@ import (
 	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
 type sink struct{}
 
-func (sink) Dispatch(context.Context, struct{}, sys.Syscall, sys.Authorization) (sys.SyscallResult, error) {
+func (sink) Dispatch(context.Context, durable.ProcessContext, sys.Syscall, sys.Authorization) (sys.SyscallResult, error) {
 	return sys.Fail("unexpected passthrough"), nil
 }
 
 func TestWorldDispatcherServesJournaledSources(t *testing.T) {
 	calls := 0
 	table := capability.NewTable()
-	world, buildErr := newWorldDispatcher[struct{}](sink{},
+	world, buildErr := newWorldDispatcher(sink{},
 		func() time.Time { calls++; return time.UnixMilli(1_234_567) },
 		bytes.NewReader([]byte{0xde, 0xad, 0xbe, 0xef}), table)
 	if buildErr != nil {
 		t.Fatalf("new world dispatcher: %v", buildErr)
 	}
 
-	result, err := world.Dispatch(context.Background(), struct{}{}, sys.Syscall{Abi: sys.ABIVersion, Name: sys.SyscallNow}, sys.Authorization{})
+	result, err := world.Dispatch(context.Background(), durable.ProcessContext{}, sys.Syscall{Abi: sys.ABIVersion, Name: sys.SyscallNow}, sys.Authorization{})
 	if err != nil || result.Status() != sys.StatusResult {
 		t.Fatalf("sys.now = %v, %v", result, err)
 	}
@@ -38,7 +39,7 @@ func TestWorldDispatcherServesJournaledSources(t *testing.T) {
 		t.Fatalf("now payload = %s (clock calls %d)", result.Result(), calls)
 	}
 
-	result, err = world.Dispatch(context.Background(), struct{}{}, sys.Syscall{
+	result, err = world.Dispatch(context.Background(), durable.ProcessContext{}, sys.Syscall{
 		Abi: sys.ABIVersion, Name: sys.SyscallRandom, Args: json.RawMessage(`{"bytes":4}`),
 	}, sys.Authorization{})
 	if err != nil || result.Status() != sys.StatusResult {
@@ -52,7 +53,7 @@ func TestWorldDispatcherServesJournaledSources(t *testing.T) {
 	}
 
 	// Bounds are enforced; the world sources are published, hidden, granted.
-	result, _ = world.Dispatch(context.Background(), struct{}{}, sys.Syscall{
+	result, _ = world.Dispatch(context.Background(), durable.ProcessContext{}, sys.Syscall{
 		Abi: sys.ABIVersion, Name: sys.SyscallRandom, Args: json.RawMessage(`{"bytes":65}`),
 	}, sys.Authorization{})
 	if result.Status() != sys.StatusFailed {

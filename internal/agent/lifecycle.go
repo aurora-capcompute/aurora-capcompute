@@ -8,8 +8,9 @@ import (
 	"strings"
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
-	manifestpkg "github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
+	manifestpkg "github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
@@ -39,7 +40,7 @@ type abortArgs struct {
 }
 
 type lifecycleDispatcher struct {
-	next           sys.Dispatcher[ProcessContext]
+	next           sys.Dispatcher[durable.ProcessContext]
 	table          *capability.Table
 	input          string
 	history        []HistoryMessage
@@ -49,7 +50,7 @@ type lifecycleDispatcher struct {
 }
 
 func newLifecycleDispatcher(
-	next sys.Dispatcher[ProcessContext],
+	next sys.Dispatcher[durable.ProcessContext],
 	input string,
 	history []HistoryMessage,
 	manifest manifestpkg.Manifest,
@@ -101,7 +102,7 @@ func newLifecycleDispatcher(
 	}, nil
 }
 
-func (l *lifecycleDispatcher) Dispatch(ctx context.Context, cred ProcessContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
+func (l *lifecycleDispatcher) Dispatch(ctx context.Context, cred durable.ProcessContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	switch syscall.Name {
 	case sys.SyscallInput:
 		payload, err := json.Marshal(agentInput{

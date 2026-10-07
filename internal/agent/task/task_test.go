@@ -11,13 +11,11 @@ import (
 	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/aurora-capcompute/replay"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
-
-type proc struct{}
 
 type taskStore struct {
 	mu      sync.Mutex
@@ -28,7 +26,7 @@ func newTaskStore() *taskStore {
 	return &taskStore{records: make(map[string]durable.TaskRecord)}
 }
 
-func (s *taskStore) Find(_ context.Context, scope durable.TaskScope, position int, hash string) (durable.TaskRecord, bool, error) {
+func (s *taskStore) Find(_ context.Context, scope durable.ProcessContext, position int, hash string) (durable.TaskRecord, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, record := range s.records {
@@ -141,7 +139,7 @@ type approvalDispatcher struct {
 	executions int
 }
 
-func (d *approvalDispatcher) Dispatch(_ context.Context, _ proc, _ sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
+func (d *approvalDispatcher) Dispatch(_ context.Context, _ durable.ProcessContext, _ sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	if auth.Decision == "" {
 		return sys.Yield("approve test operation"), nil
 	}
@@ -161,15 +159,15 @@ func TestDispatcherPersistsAndResumesYieldedTask(t *testing.T) {
 	store := newTaskStore()
 	journal := &journal{}
 	next := &approvalDispatcher{}
-	scope := durable.TaskScope{SessionID: "session", ProcessID: "proc", Revision: 1}
+	scope := durable.ProcessContext{SessionID: "session", ProcessID: "proc", Revision: 1}
 	secret := []byte("test-secret")
 	header := journaled.Header{ABI: sys.ABIVersion, Program: "prog", Process: "proc"}
-	build := func() sys.Dispatcher[proc] {
-		taskDispatcher := &task.Dispatcher[proc]{
+	build := func() sys.Dispatcher[durable.ProcessContext] {
+		taskDispatcher := &task.Dispatcher{
 			Next:        next,
 			Store:       store,
 			Journal:     journal,
-			Scope:       func(proc) durable.TaskScope { return scope },
+			Now:         time.Now,
 			TokenSecret: secret,
 			TaskTTL:     time.Hour,
 		}
@@ -177,11 +175,11 @@ func TestDispatcherPersistsAndResumesYieldedTask(t *testing.T) {
 		if err != nil {
 			t.Fatalf("new tape: %v", err)
 		}
-		return replay.NewDispatcher[proc](tape, taskDispatcher)
+		return replay.NewDispatcher(tape, taskDispatcher, nil)
 	}
 	call := sys.Syscall{Abi: sys.ABIVersion, Name: "net.http", Args: json.RawMessage(`{"url":"https://example.com"}`)}
 
-	result, err := build().Dispatch(context.Background(), proc{}, call, sys.Authorization{})
+	result, err := build().Dispatch(context.Background(), scope, call, sys.Authorization{})
 	if err != nil {
 		t.Fatalf("initial dispatch: %v", err)
 	}
@@ -209,7 +207,7 @@ func TestDispatcherPersistsAndResumesYieldedTask(t *testing.T) {
 		t.Fatalf("resolve: %v", err)
 	}
 
-	result, err = build().Dispatch(context.Background(), proc{}, call, sys.Authorization{})
+	result, err = build().Dispatch(context.Background(), scope, call, sys.Authorization{})
 	if err != nil {
 		t.Fatalf("resumed dispatch: %v", err)
 	}
@@ -220,7 +218,7 @@ func TestDispatcherPersistsAndResumesYieldedTask(t *testing.T) {
 		t.Fatalf("journal length = %d, want 2 (intent + completion)", journal.Length())
 	}
 
-	result, err = build().Dispatch(context.Background(), proc{}, call, sys.Authorization{})
+	result, err = build().Dispatch(context.Background(), scope, call, sys.Authorization{})
 	if err != nil {
 		t.Fatalf("replayed dispatch: %v", err)
 	}
@@ -229,9 +227,9 @@ func TestDispatcherPersistsAndResumesYieldedTask(t *testing.T) {
 	}
 }
 
-type nextFunc func(context.Context, proc, sys.Syscall, sys.Authorization) (sys.SyscallResult, error)
+type nextFunc func(context.Context, durable.ProcessContext, sys.Syscall, sys.Authorization) (sys.SyscallResult, error)
 
-func (f nextFunc) Dispatch(ctx context.Context, cred proc, call sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
+func (f nextFunc) Dispatch(ctx context.Context, cred durable.ProcessContext, call sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	return f(ctx, cred, call, auth)
 }
 
@@ -241,20 +239,20 @@ func (f nextFunc) Dispatch(ctx context.Context, cred proc, call sys.Syscall, aut
 func TestTimerTaskHasNoTTL(t *testing.T) {
 	store := newTaskStore()
 	journal := &journal{}
-	yield := func(context.Context, proc, sys.Syscall, sys.Authorization) (sys.SyscallResult, error) {
+	yield := func(context.Context, durable.ProcessContext, sys.Syscall, sys.Authorization) (sys.SyscallResult, error) {
 		return sys.Yield("waiting"), nil
 	}
-	dispatcher := &task.Dispatcher[proc]{
+	dispatcher := &task.Dispatcher{
 		Next:        nextFunc(yield),
 		Store:       store,
 		Journal:     journal,
-		Scope:       func(proc) durable.TaskScope { return durable.TaskScope{ProcessID: "p", Revision: 1} },
+		Now:         time.Now,
 		TokenSecret: []byte("test-secret"),
 		TaskTTL:     time.Hour,
 	}
 	for _, name := range []string{sys.SyscallTimer, "net.http"} {
 		journal.records = append(journal.records, journaled.Record{Position: journal.Length(), Kind: journaled.KindIntent})
-		if _, err := dispatcher.Dispatch(context.Background(), proc{}, sys.Syscall{Name: name, Args: json.RawMessage(`{"duration_seconds":86400}`)}, sys.Authorization{}); err != nil {
+		if _, err := dispatcher.Dispatch(context.Background(), durable.ProcessContext{ProcessID: "p", Revision: 1}, sys.Syscall{Name: name, Args: json.RawMessage(`{"duration_seconds":86400}`)}, sys.Authorization{}); err != nil {
 			t.Fatalf("dispatch %s: %v", name, err)
 		}
 	}
@@ -274,15 +272,15 @@ func TestDispatcherDeniedTask(t *testing.T) {
 	store := newTaskStore()
 	journal := &journal{}
 	next := &approvalDispatcher{}
-	scope := durable.TaskScope{SessionID: "session", ProcessID: "proc", Revision: 1}
+	scope := durable.ProcessContext{SessionID: "session", ProcessID: "proc", Revision: 1}
 	secret := []byte("test-secret")
 	header := journaled.Header{ABI: sys.ABIVersion, Program: "prog", Process: "proc"}
-	build := func() sys.Dispatcher[proc] {
-		taskDispatcher := &task.Dispatcher[proc]{
+	build := func() sys.Dispatcher[durable.ProcessContext] {
+		taskDispatcher := &task.Dispatcher{
 			Next:        next,
 			Store:       store,
 			Journal:     journal,
-			Scope:       func(proc) durable.TaskScope { return scope },
+			Now:         time.Now,
 			TokenSecret: secret,
 			TaskTTL:     time.Hour,
 		}
@@ -290,11 +288,11 @@ func TestDispatcherDeniedTask(t *testing.T) {
 		if err != nil {
 			t.Fatalf("new tape: %v", err)
 		}
-		return replay.NewDispatcher[proc](tape, taskDispatcher)
+		return replay.NewDispatcher(tape, taskDispatcher, nil)
 	}
 	call := sys.Syscall{Abi: sys.ABIVersion, Name: "net.http", Args: json.RawMessage(`{"url":"https://example.com"}`)}
 
-	if _, err := build().Dispatch(context.Background(), proc{}, call, sys.Authorization{}); err != nil {
+	if _, err := build().Dispatch(context.Background(), scope, call, sys.Authorization{}); err != nil {
 		t.Fatalf("initial dispatch: %v", err)
 	}
 	records, _ := store.List(context.Background(), scope.ProcessID)
@@ -307,7 +305,7 @@ func TestDispatcherDeniedTask(t *testing.T) {
 		t.Fatalf("resolve: %v", err)
 	}
 
-	result, err := build().Dispatch(context.Background(), proc{}, call, sys.Authorization{})
+	result, err := build().Dispatch(context.Background(), scope, call, sys.Authorization{})
 	if err != nil {
 		t.Fatalf("denied dispatch: %v", err)
 	}

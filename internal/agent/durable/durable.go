@@ -32,6 +32,15 @@ const (
 	ProcessFailed      ProcessStatus = "failed"
 )
 
+// ProcessContext names one revision of one process: the credential its
+// dispatcher chain runs under, the key its taint is kept by, and the scope a
+// task record belongs to.
+type ProcessContext struct {
+	SessionID string
+	ProcessID string
+	Revision  uint64
+}
+
 // Session is a session's durable state, derived from the process projection
 // and folded back into memory on restore.
 type Session struct {

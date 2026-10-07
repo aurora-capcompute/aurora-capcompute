@@ -70,7 +70,8 @@ classified errno the guest can react to, not a crash.
 
 Everything in this repo is a `Dispatcher` that wraps another `Dispatcher`. The
 architecture *is* the nesting order, which is why it is assembled in code and
-never by hand — `monitor/stack.go` and `internal/agent/host/host.go` own it.
+never by hand — `internal/agent/dispatcher.go` builds the whole chain, and
+`monitor.Wrap` (`monitor/stack.go`) owns the part around the replay boundary.
 
 Outermost (first to see a syscall) to innermost:
 
@@ -93,7 +94,7 @@ application drivers  the actual capabilities
 
 ### Why the replay boundary is where it is
 
-This is the single most load-bearing decision in the repo, and `stack.go`
+This is the single most load-bearing decision in the repo, and `monitor.Wrap`
 states it plainly: layers **above** replay must re-derive their decision
 identically on every pass and must never enter the journal; layers **below**
 replay produce outcomes that must be journaled exactly once and served from the
@@ -105,7 +106,7 @@ Stamped labels and approved declassification crossings sit below: they are
 facts about what happened, and they belong in the audit trail.
 
 Put one layer on the wrong side and you silently break a law. That is precisely
-why `Stack.ForProcess` exists and why nothing assembles this by hand.
+why `monitor.Wrap` exists and why nothing assembles this by hand.
 
 ### The layers, in one line each
 
@@ -306,7 +307,7 @@ that assembly.
 
 | You want | Look at |
 |---|---|
-| the chain order and why | `monitor/stack.go`, `internal/agent/host/host.go` |
+| the chain order and why | `internal/agent/dispatcher.go`, `monitor/stack.go` |
 | complete mediation | `monitor/validate.go` |
 | taint / flow policy | `monitor/flow.go`, `monitor/provenance.go` |
 | the replay protocol | `replay/replay.go` |

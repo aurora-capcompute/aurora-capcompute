@@ -110,9 +110,6 @@ func TestBeginCommitAppendsIntentCompletionPair(t *testing.T) {
 	if journal.records[1].Kind != journaled.KindCompletion || journal.records[1].Result == nil {
 		t.Fatalf("record 1 = %+v, want completion", journal.records[1])
 	}
-	if remaining := tape.Remaining(); remaining != 0 {
-		t.Fatalf("remaining = %d, want 0", remaining)
-	}
 	if err := journaled.Verify(journal); err != nil {
 		t.Fatalf("verify: %v", err)
 	}
@@ -133,9 +130,6 @@ func TestResetReplaysRecordedResults(t *testing.T) {
 	}
 	if string(result.Result()) != `{"ok":true}` {
 		t.Fatalf("result = %s", result.Result())
-	}
-	if remaining := tape.Remaining(); remaining != 0 {
-		t.Fatalf("remaining = %d, want 0", remaining)
 	}
 }
 

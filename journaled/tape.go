@@ -237,13 +237,6 @@ func (t *Tape) Reset() {
 	t.pending = false
 }
 
-func (t *Tape) Remaining() int {
-	if t == nil {
-		return 0
-	}
-	return t.journal.Length() - t.cursor
-}
-
 // Verify walks the whole journal and checks its structure: a header where
 // there are records, positions in order, and alternating intent/completion
 // with at most one open intent at the tail. It returns CorruptJournalError at

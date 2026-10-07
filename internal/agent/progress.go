@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
@@ -15,14 +16,14 @@ import (
 // the durable stream, there is nothing to push. It publishes its capability —
 // hidden — so the Validator's grant set covers it.
 type progressDispatcher struct {
-	next sys.Dispatcher[ProcessContext]
+	next sys.Dispatcher[durable.ProcessContext]
 }
 
 type progressArgs struct {
 	Message string `json:"message"`
 }
 
-func newProgressDispatcher(next sys.Dispatcher[ProcessContext], table *capability.Table) (*progressDispatcher, error) {
+func newProgressDispatcher(next sys.Dispatcher[durable.ProcessContext], table *capability.Table) (*progressDispatcher, error) {
 	// Declared where it is built: the layer that serves sys.log is the layer that
 	// puts it in the grant set, so the two cannot come apart.
 	err := table.ReserveMissing(capability.Descriptor{
@@ -36,7 +37,7 @@ func newProgressDispatcher(next sys.Dispatcher[ProcessContext], table *capabilit
 	return &progressDispatcher{next: next}, nil
 }
 
-func (d *progressDispatcher) Dispatch(ctx context.Context, cred ProcessContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
+func (d *progressDispatcher) Dispatch(ctx context.Context, cred durable.ProcessContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	if syscall.Name == callSysLog {
 		var args progressArgs
 		if err := json.Unmarshal(syscall.Args, &args); err != nil {
