@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/aurora-capcompute/monitor"
 	"github.com/aurora-capcompute/aurora-capcompute/replay"
@@ -228,14 +227,8 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 	if maxConcurrent <= 0 {
 		maxConcurrent = defaultMaxConcurrentProcesses
 	}
-	runtime.scheduler, err = New(
-		direct.NewRegistry[ProgramID, ProcessContext](memoryPages),
-		maxConcurrent,
-		baseCtx,
-	)
-	if err != nil {
-		return nil, err
-	}
+	runtime.programs = newProgramRegistry(memoryPages)
+	runtime.pool = newPool(baseCtx, maxConcurrent)
 
 	go runtime.sweepLoop()
 	return runtime, nil
@@ -386,26 +379,14 @@ func (r *Runtime) wrapProtocol(cred ProcessContext, next sys.Dispatcher[ProcessC
 		spec,
 		attempt,
 		func(answer string) error {
-			return r.scheduler.ValidateOutput(ProgramID(spec.Program), answer)
+			program, ok := r.programs.get(ProgramID(spec.Program))
+			if !ok {
+				return fmt.Errorf("%w: program %q is not loaded", errs.Conflict, spec.Program)
+			}
+			return program.validateOutput(answer)
 		},
 		table,
 	)
-}
-
-// programBinding refuses a relaunch under program bytes or an interface that
-// changed under the process. It reads the registry, so callers must not hold
-// r.mu: the spawn path takes the registry lock first and r.mu second.
-func (r *Runtime) programBinding(id ProgramID, bound direct.Digest) error {
-	program, ok := r.scheduler.Get(id)
-	if !ok {
-		return fmt.Errorf("program %q is not loaded", id)
-	}
-	if program.Digest != bound {
-		return fmt.Errorf(
-			"program %q changed (loaded %s, process bound to %s): a process is immutable — its code and interface are fixed; spawn a new process from the new program, or kill this one to settle its effects",
-			id, program.Digest.ArtifactDigest, bound.ArtifactDigest)
-	}
-	return nil
 }
 
 // ProcessJournal returns the process's live journal view.
@@ -440,7 +421,7 @@ func (r *Runtime) Header(cred ProcessContext) journaled.Header {
 	defer r.mu.Unlock()
 	program := ""
 	if proc := r.processes[cred.ProcessID]; proc != nil {
-		program = proc.digest.ArtifactDigest
+		program = proc.digest
 	}
 	return journaled.Header{ABI: sys.ABIVersion, Program: program, Process: cred.ProcessID}
 }
@@ -451,12 +432,12 @@ func (r *Runtime) Header(cred ProcessContext) journaled.Header {
 // live process, because processes are immutably bound to the (name, identity)
 // they were created from; the withdrawal is what settles them.
 func (r *Runtime) AddProgram(ctx context.Context, data ProgramData) error {
-	if r.scheduler.Exists(data.ID) {
+	if _, taken := r.programs.get(data.ID); taken {
 		if err := r.RemoveProgram(ctx, string(data.ID)); err != nil {
 			return err
 		}
 	}
-	if _, err := r.scheduler.Add(ctx, data); err != nil {
+	if err := r.programs.add(ctx, data); err != nil {
 		return err
 	}
 	// A Close that raced this registration has already drained the registry, so
@@ -466,7 +447,7 @@ func (r *Runtime) AddProgram(ctx context.Context, data ProgramData) error {
 	closed := r.closed
 	r.mu.Unlock()
 	if closed {
-		if release, ok := r.scheduler.Remove(data.ID); ok {
+		if release, ok := r.programs.remove(data.ID); ok {
 			_ = release(context.Background())
 		}
 		return fmt.Errorf("%w: runtime is closed", errs.Conflict)
@@ -486,7 +467,7 @@ func (r *Runtime) AddProgram(ctx context.Context, data ProgramData) error {
 // changed program.
 func (r *Runtime) RemoveProgram(ctx context.Context, id string) error {
 	id = strings.TrimSpace(id)
-	release, ok := r.scheduler.Remove(ProgramID(id))
+	release, ok := r.programs.remove(ProgramID(id))
 	if !ok {
 		return fmt.Errorf("%w: program %q is not registered", errs.NotFound, id)
 	}
@@ -645,7 +626,7 @@ func (r *Runtime) ListSessions() []SessionSummary {
 }
 
 func (r *Runtime) Programs() []Program {
-	return r.scheduler.List()
+	return r.programs.list()
 }
 
 func (r *Runtime) GetSession(sessionID string) (SessionSnapshot, error) {
@@ -687,11 +668,11 @@ func (r *Runtime) CreateProcess(sessionID string, input string, spec manifest.Ma
 			spec.Syscalls[i].Hidden = true
 		}
 	}
-	program, ok := r.scheduler.Get(ProgramID(spec.Program))
+	program, ok := r.programs.get(ProgramID(spec.Program))
 	if !ok {
 		return ProcessSnapshot{}, fmt.Errorf("%w: program %q is not registered", errs.Invalid, spec.Program)
 	}
-	if err := r.scheduler.ValidateInput(program.ID, input); err != nil {
+	if err := program.validateInput(input); err != nil {
 		return ProcessSnapshot{}, err
 	}
 	processID, err := r.idSource("proc_")
@@ -827,28 +808,18 @@ func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, erro
 		return ProcessSnapshot{}, fmt.Errorf("%w: retry mode must be resume or restart", errs.Invalid)
 	}
 
-	// Every branch below relaunches the guest. A process is an audit target: it
-	// never resumes or restarts under different program bytes. The check reads the
-	// registry, so it runs before r.mu is taken: a worker starting a quantum holds
-	// the registry lock and reaches back for r.mu through the dispatcher factory,
-	// so taking the two the other way round here would invert the order. What it
-	// reads is fixed for the process's life, and the registry re-checks the same
-	// binding when it instantiates — this is the early, legible refusal.
 	r.mu.Lock()
 	proc := r.processes[processID]
-	r.mu.Unlock()
 	if proc == nil {
-		return ProcessSnapshot{}, fmt.Errorf("%w: process %s", errs.NotFound, processID)
-	}
-	// Both are written once, when the process is built, and never again.
-	if err := r.programBinding(ProgramID(proc.manifest.Program), proc.digest); err != nil {
-		return ProcessSnapshot{}, fmt.Errorf("%w: %v", errs.Conflict, err)
-	}
-
-	r.mu.Lock()
-	if proc = r.processes[processID]; proc == nil {
 		r.mu.Unlock()
 		return ProcessSnapshot{}, fmt.Errorf("%w: process %s", errs.NotFound, processID)
+	}
+	// Every branch below relaunches the guest. A process is an audit target: it
+	// never resumes or restarts under different program bytes. The quantum checks
+	// the same binding again before it runs; this is the early, legible refusal.
+	if _, err := r.programs.bound(ProgramID(proc.manifest.Program), proc.digest); err != nil {
+		r.mu.Unlock()
+		return ProcessSnapshot{}, err
 	}
 	switch proc.status {
 	case durable.ProcessYielded, durable.ProcessWaitingTask, durable.ProcessStopped, durable.ProcessFailed, durable.ProcessInterrupted:
@@ -991,7 +962,8 @@ func (r *Runtime) Close(ctx context.Context) error {
 		return ctx.Err()
 	}
 
-	// Closing the registry drains the queue, waits out the running quanta, and
-	// releases every compiled image.
-	return errors.Join(r.scheduler.Close(context.Background())...)
+	// Closing the pool drops the waiting quanta and waits out the running ones;
+	// then every compiled image is released.
+	r.pool.close()
+	return errors.Join(r.programs.close(context.Background())...)
 }

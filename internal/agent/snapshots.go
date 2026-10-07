@@ -86,7 +86,7 @@ func (r *Runtime) processSnapshotLocked(proc *processState) ProcessSnapshot {
 		StartedAt:     copyTime(proc.startedAt),
 		CompletedAt:   copyTime(proc.completedAt),
 		Manifest:      proc.manifest.Clone(),
-		ProgramDigest: proc.digest.ArtifactDigest,
+		ProgramDigest: proc.digest,
 	}
 }
 
@@ -144,7 +144,6 @@ func (r *Runtime) processContextLocked(proc *processState) ProcessContext {
 		SessionID: proc.sessionID,
 		ProcessID: proc.id,
 		Revision:  proc.revision,
-		Digest:    proc.digest,
 	}
 }
 
@@ -154,27 +153,26 @@ func (r *Runtime) storedProcessLocked(proc *processState) durable.Process {
 		tags = durable.CloneTags(session.tags)
 	}
 	return durable.Process{
-		TenantID:         r.tenantID,
-		ID:               proc.id,
-		SessionID:        proc.sessionID,
-		Revision:         proc.revision,
-		Input:            proc.input,
-		Status:           proc.status,
-		Attempt:          proc.attempt,
-		CreatedAt:        proc.createdAt,
-		UpdatedAt:        proc.updatedAt,
-		StartedAt:        copyTime(proc.startedAt),
-		CompletedAt:      copyTime(proc.completedAt),
-		Answer:           proc.answer,
-		Error:            proc.err,
-		Manifest:         proc.manifest.Clone(),
-		ProgramDigest:    proc.digest.ArtifactDigest,
-		SourceCodeDigest: proc.digest.SourceCodeDigest,
-		HideHistory:      proc.hideHistory,
-		Labels:           append([]string(nil), proc.labels...),
-		Tags:             tags,
-		ForkOffset:       proc.forkOffset,
-		AbortRetries:     proc.abortRetries,
+		TenantID:      r.tenantID,
+		ID:            proc.id,
+		SessionID:     proc.sessionID,
+		Revision:      proc.revision,
+		Input:         proc.input,
+		Status:        proc.status,
+		Attempt:       proc.attempt,
+		CreatedAt:     proc.createdAt,
+		UpdatedAt:     proc.updatedAt,
+		StartedAt:     copyTime(proc.startedAt),
+		CompletedAt:   copyTime(proc.completedAt),
+		Answer:        proc.answer,
+		Error:         proc.err,
+		Manifest:      proc.manifest.Clone(),
+		ProgramDigest: proc.digest,
+		HideHistory:   proc.hideHistory,
+		Labels:        append([]string(nil), proc.labels...),
+		Tags:          tags,
+		ForkOffset:    proc.forkOffset,
+		AbortRetries:  proc.abortRetries,
 	}
 }
 

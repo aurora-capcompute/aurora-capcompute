@@ -69,7 +69,6 @@ type Process struct {
 	Error            string
 	Manifest         manifest.Manifest
 	ProgramDigest    string
-	SourceCodeDigest string `json:",omitempty"`
 	// HideHistory records that this process's manifest declared history:false
 	// with history:false — its sys.input omits the session history. Persisted so
 	// a restart re-serves the same isolated input.

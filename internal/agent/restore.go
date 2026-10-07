@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"sort"
 
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 )
@@ -106,7 +105,7 @@ func (r *Runtime) restoreSession(proj durable.Projection, journals map[string]ma
 			answer:       sr.Answer,
 			err:          sr.Error,
 			manifest:     em.Clone(),
-			digest:       direct.Digest{ArtifactDigest: sr.ProgramDigest, SourceCodeDigest: sr.SourceCodeDigest},
+			digest:       sr.ProgramDigest,
 			hideHistory:  sr.HideHistory,
 			labels:       append([]string(nil), sr.Labels...),
 			forkOffset:   sr.ForkOffset,

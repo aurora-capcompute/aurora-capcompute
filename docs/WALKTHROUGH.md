@@ -265,16 +265,16 @@ fresh revision.
 
 ## Scheduling and residency
 
-The scheduler (`internal/agent/sched.go`) decides *when* a process gets the CPU.
-It is `direct.Registry` — the only door to capcompute — wrapped in a fixed pool
-of workers: every method passes straight through except `Spawn`, which waits for
-a free worker, bounds the quantum's wall-clock, and hands back a handle. The
-worker count is the concurrency bound, so nothing counts slots and nothing can
-overrun.
+The pool (`internal/agent/pool.go`) decides *when* a process gets the CPU: a
+fixed set of workers, each running one quantum to its end before it takes the
+next. The worker count is the concurrency bound, so nothing counts slots and
+nothing can overrun. A quantum (`runQuantum` in `internal/agent/executor.go`)
+checks that the process still runs the program it was created from, builds its
+dispatcher chain, and resumes the guest on the processor.
 
 The quantum's deadline starts when a worker takes the submission, not when it
-was submitted: queue time never counts against a guest. Closing the handle
-drops a submission that is still waiting, or stops a guest that has started.
+was submitted: queue time never counts against a guest. Cancelling a submission
+drops it while it waits, or stops the guest once it has started.
 
 It is deliberately **not** fair-share: no priorities, no quotas, no owners.
 Submissions are first-come-first-served, bounded by `MaxConcurrentProcesses`,
@@ -314,7 +314,7 @@ that assembly.
 | abort and section re-run | `internal/agent/abort.go` |
 | what a quantum does | `internal/agent/executor.go` |
 | state rebuilt after restart | `internal/agent/restore.go` |
-| scheduling | `internal/agent/sched.go` |
+| scheduling | `internal/agent/pool.go` |
 | the public API | `aurora/runtime.go` |
 
 ## How it is verified

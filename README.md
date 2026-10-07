@@ -205,7 +205,8 @@ aurora/                 the PUBLIC API — import only this
 internal/agent/         the runtime engine (Go's internal/ rule hides it)
   runtime.go            lifecycle + scheduler wiring
   manifest/             the grant model + ValidateManifest
-  direct/               the only door to capcompute: compile, spawn, quantum
+  programs.go           the program registry: compile, schemas, identity
+  pool.go               the worker pool that bounds running quanta
   lifecycle.go          sys.input/output/log/abort
   abort.go              abort/failure re-drive and section refork
   restore.go            rebuild state by replaying event streams

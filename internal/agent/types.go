@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/direct"
 	"github.com/aurora-capcompute/aurora-capcompute/monitor"
 	"github.com/aurora-capcompute/capcompute/sys"
 
@@ -108,7 +107,8 @@ type Runtime struct {
 	// complete on shutdown to persist final state.
 	baseCtx         context.Context
 	cancel          context.CancelFunc
-	scheduler       Scheduler[ProgramID, ProcessContext]
+	programs        *programRegistry
+	pool            *pool
 	taints          *monitor.Taints[processKey]
 	log             eventlog.Log
 	tasks           *eventTaskStore
@@ -169,7 +169,7 @@ type processState struct {
 	deadline time.Duration
 	manifest manifest.Manifest
 	revision uint64
-	digest   direct.Digest
+	digest   string
 	// hideHistory suppresses the session history in this process's sys.input,
 	// set when its manifest declares history:false. Persisted, so a restart
 	// re-serves the same isolated input.
@@ -199,7 +199,6 @@ type ProcessContext struct {
 	SessionID string
 	ProcessID string
 	Revision  uint64
-	Digest    direct.Digest
 }
 
 func (r ProcessContext) PID() processKey {
