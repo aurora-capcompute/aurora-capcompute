@@ -15,7 +15,7 @@ import (
 // point, so folding is last-writer-wins per id. A session.state event carries the
 // session's explicit identity — its name (renamable, hence a first-class event
 // rather than derived), tags, and creation time; the rest of a session's summary
-// (title, active process) is still derived from the process projection. Task
+// (active process, last update) is derived from the process projection. Task
 // events are semantic (created / resolved). Capability-journal events
 // (syscall.recorded) are defined alongside the journal view.
 const (
@@ -124,8 +124,8 @@ func Fold(events []eventlog.Event) (Projection, error) {
 		return proj, nil // no session.state event: nothing to restore
 	}
 	// The session.state event carries the session's explicit identity — id,
-	// name, tags, creation time. Its title, last update and active process are
-	// derived from its processes. This is what lets a named session with no
+	// name, tags, creation time. Its last update and active process are derived
+	// from its processes. This is what lets a named session with no
 	// processes persist, and a rename survive a restart.
 	proj.Session = *sessionEvent
 	ordered := make([]Process, 0, len(proj.Processes))
@@ -140,9 +140,6 @@ func Fold(events []eventlog.Event) (Projection, error) {
 		}
 		return ordered[i].ID < ordered[j].ID
 	})
-	if len(ordered) > 0 {
-		proj.Session.Title = SessionTitle(ordered[0].Input)
-	}
 	for _, proc := range ordered {
 		if proc.UpdatedAt.After(proj.Session.UpdatedAt) {
 			proj.Session.UpdatedAt = proc.UpdatedAt

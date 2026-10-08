@@ -224,7 +224,7 @@ func (r *Runtime) CreateSession(name string, tags map[string]string) (SessionSna
 	if err := r.checkSessionNameFreeLocked(name, ""); err != nil {
 		return SessionSnapshot{}, err
 	}
-	session := &sessionState{id: id, name: name, title: durable.DefaultSessionTitle, createdAt: now, updatedAt: now, tags: durable.CloneTags(tags)}
+	session := &sessionState{id: id, name: name, createdAt: now, updatedAt: now, tags: durable.CloneTags(tags)}
 	r.sessions[id] = session
 	if err := r.appendSession(session); err != nil {
 		delete(r.sessions, id)
@@ -357,9 +357,6 @@ func (r *Runtime) CreateProcess(sessionID string, input string, spec manifest.Ma
 	proc.journal = r.newJournal(proc, newProcessHistory(), 0)
 	r.processes[processID] = proc
 	session.processIDs = append(session.processIDs, processID)
-	if len(session.processIDs) == 1 {
-		session.title = durable.SessionTitle(input)
-	}
 	session.activeProcessID = processID
 	session.updatedAt = now
 	if err := r.appendProcess(proc); err != nil {

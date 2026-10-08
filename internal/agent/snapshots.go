@@ -15,10 +15,15 @@ import (
 )
 
 func (r *Runtime) sessionSummaryLocked(session *sessionState) SessionSummary {
+	// The title is the first process's input, shortened.
+	var firstInput string
+	if len(session.processIDs) > 0 {
+		firstInput = r.processes[session.processIDs[0]].input
+	}
 	return SessionSummary{
 		ID:              session.id,
 		Name:            session.name,
-		Title:           session.title,
+		Title:           durable.SessionTitle(firstInput),
 		CreatedAt:       session.createdAt,
 		UpdatedAt:       session.updatedAt,
 		ProcessCount:    len(session.processIDs),

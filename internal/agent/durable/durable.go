@@ -47,7 +47,6 @@ type Session struct {
 	// Name is the session's explicit, renamable handle (empty if unnamed). It is
 	// carried by session.state events, not derived from the process projection.
 	Name            string
-	Title           string
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 	ActiveProcessID string
@@ -90,9 +89,7 @@ type Process struct {
 	AbortRetries int `json:",omitempty"`
 }
 
-// DefaultSessionTitle is the placeholder headline a session carries until one of
-// its processes supplies one. It is applied identically on creation and on
-// restore so a process-less named session round-trips to the same title.
+// DefaultSessionTitle is the headline of a session with no process input yet.
 const DefaultSessionTitle = "New session"
 
 // SessionTitle derives a session's headline from its first process input.

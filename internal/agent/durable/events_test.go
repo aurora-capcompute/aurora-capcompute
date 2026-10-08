@@ -33,9 +33,9 @@ func TestFoldReconstructsLatestRunAndSessionState(t *testing.T) {
 	if proj.Session.ActiveProcessID != "" {
 		t.Fatalf("session active proc = %q, want cleared (completed run is not active)", proj.Session.ActiveProcessID)
 	}
-	if proj.Session.ID != "th1" || proj.Session.Tags["origin"] != "ops" || proj.Session.Title != "hello" ||
+	if proj.Session.ID != "th1" || proj.Session.Tags["origin"] != "ops" ||
 		!proj.Session.UpdatedAt.Equal(now.Add(time.Second)) {
-		t.Fatalf("session = %+v, want th1, its tags, the first input as title, the run's last update", proj.Session)
+		t.Fatalf("session = %+v, want th1, its tags, the run's last update", proj.Session)
 	}
 	proc := proj.Processes["proc1"]
 	if proc.Status != ProcessCompleted || proc.Answer != "done" {

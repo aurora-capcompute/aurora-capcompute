@@ -101,7 +101,6 @@ type Runtime struct {
 type sessionState struct {
 	id              string
 	name            string
-	title           string
 	createdAt       time.Time
 	updatedAt       time.Time
 	history         []HistoryMessage

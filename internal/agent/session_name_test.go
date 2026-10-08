@@ -79,9 +79,25 @@ func TestSessionNamePersistsAcrossRestart(t *testing.T) {
 	if restored.Name != "renamed" {
 		t.Fatalf("restored name = %q, want the last rename to survive", restored.Name)
 	}
-	// A process-less session has no derived title, but must round-trip to the
-	// same placeholder the live runtime assigns at creation — not an empty string.
+	// A process-less session's title is the placeholder, not an empty string.
 	if restored.Title != durable.DefaultSessionTitle {
-		t.Fatalf("restored title = %q, want %q to survive restart", restored.Title, durable.DefaultSessionTitle)
+		t.Fatalf("restored title = %q, want %q", restored.Title, durable.DefaultSessionTitle)
+	}
+}
+
+// A session's title is derived from its first process's input, so it needs no
+// storage and is the same after a restart.
+func TestSessionTitleIsTheFirstInput(t *testing.T) {
+	runtime, processID := failedEffectsProcess(t, testProgram("program@1", buildProgram(t)))
+	proc, err := runtime.GetProcess(processID)
+	if err != nil {
+		t.Fatalf("get process: %v", err)
+	}
+	session, err := runtime.GetSession(proc.SessionID)
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if session.Title != "place the order" {
+		t.Fatalf("title after restart = %q, want the first input", session.Title)
 	}
 }

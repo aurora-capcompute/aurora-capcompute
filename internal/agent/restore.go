@@ -50,16 +50,10 @@ func (r *Runtime) restoreSession(proj durable.Projection, journals map[string]ma
 	session := &sessionState{
 		id:              stored.ID,
 		name:            stored.Name,
-		title:           stored.Title,
 		createdAt:       stored.CreatedAt,
 		updatedAt:       stored.UpdatedAt,
 		activeProcessID: stored.ActiveProcessID,
 		tags:            durable.CloneTags(stored.Tags),
-	}
-	// A process-less session has no derived title; give it the same placeholder
-	// the live runtime assigns at creation so its title survives a restart.
-	if session.title == "" {
-		session.title = durable.DefaultSessionTitle
 	}
 	r.sessions[session.id] = session
 
