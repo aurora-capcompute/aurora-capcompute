@@ -497,25 +497,29 @@ func firstAndLaterUser(messages []struct {
 }
 
 // approvalDispatchers drives a run whose first turn calls tool.y, a capability
-// that requires human approval: the driver yields until the dispatch carries
-// an approved Authorization (the task layer's injection seam).
+// whose entry requires human approval: the routing dispatcher yields until the
+// task layer injects an approved Authorization.
 type approvalDispatchers struct{}
 
 func (approvalDispatchers) ValidateConfig(string, json.RawMessage) error { return nil }
 
 func (approvalDispatchers) NewDispatcher(_ context.Context, _ durable.ProcessContext, _ manifest.Manifest) (*capability.Table, error) {
-	return tableOf(approvalToolDispatcher{}, llmCapability(),
-		capability.Descriptor{Name: "tool.y", Description: "guarded tool", InputSchema: json.RawMessage(`{"type":"object"}`)}), nil
+	table := tableOf(approvalToolDispatcher{}, llmCapability())
+	err := table.Add(capability.Family{Entries: []capability.Entry{{
+		Key:             capability.Key{Syscall: "tool.y"},
+		Description:     "guarded tool",
+		Input:           json.RawMessage(`{"type":"object"}`),
+		RequireApproval: true,
+		Handler:         dispatchAsHandler{approvalToolDispatcher{}},
+	}}})
+	return table, err
 }
 
 type approvalToolDispatcher struct{}
 
-func (approvalToolDispatcher) Dispatch(_ context.Context, _ durable.ProcessContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
+func (approvalToolDispatcher) Dispatch(_ context.Context, _ durable.ProcessContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
 	switch syscall.Name {
 	case "tool.y":
-		if auth.Decision != sys.Approved {
-			return sys.Yield("Approve tool.y"), nil
-		}
 		return sys.Result(json.RawMessage(`{"granted":true}`)), nil
 	case "core.openaiApi":
 		var req struct {
@@ -581,7 +585,7 @@ func TestRuntimeApprovalCycle(t *testing.T) {
 	if pending.Syscall.Name != "tool.y" || pending.State != "pending" {
 		t.Fatalf("pending task = %+v", pending)
 	}
-	if pending.Summary != "Approve tool.y" {
+	if pending.Summary != "Approve tool.y: guarded tool\nargs: {}" {
 		t.Fatalf("task summary = %q", pending.Summary)
 	}
 

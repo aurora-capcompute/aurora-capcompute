@@ -12,15 +12,8 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-// handlerFunc is a leaf operation: the table resolved the call, this performs it.
-type handlerFunc func(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error)
-
-func (f handlerFunc) DispatchCall(ctx context.Context, call sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
-	return f(ctx, call)
-}
-
 // echo is the trivial handler: it names the operation it served.
-var echo = handlerFunc(func(_ context.Context, call sys.Syscall) (sys.SyscallResult, error) {
+var echo = capability.HandlerFunc(func(_ context.Context, call sys.Syscall) (sys.SyscallResult, error) {
 	return sys.Result(json.RawMessage(`{"from":"` + call.Name + `"}`)), nil
 })
 
@@ -266,7 +259,7 @@ func TestDeclassifyValidatesRequest(t *testing.T) {
 
 func TestFlowGuardHandsTaintDownstream(t *testing.T) {
 	var seen []string
-	probe := handlerFunc(func(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error) {
+	probe := capability.HandlerFunc(func(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error) {
 		if call.Name == "mail.send" {
 			seen = capability.Taint(ctx)
 		}
@@ -370,7 +363,7 @@ func TestUnresolvableCaseTakesTheStrictestBar(t *testing.T) {
 // failures. openaillm relied on doing that itself until its policy moved onto
 // its entries; this is the guarantee it now leans on.
 func TestStampLabelsFailuresToo(t *testing.T) {
-	failing := handlerFunc(func(_ context.Context, _ sys.Syscall) (sys.SyscallResult, error) {
+	failing := capability.HandlerFunc(func(_ context.Context, _ sys.Syscall) (sys.SyscallResult, error) {
 		return sys.FailCode(sys.ErrnoTransient, "provider unreachable"), nil
 	})
 	_, below := stamped(t, flowTable(t, failing), NewTaints[testCred]())

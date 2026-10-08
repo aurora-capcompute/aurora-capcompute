@@ -44,11 +44,20 @@ func (k Key) String() string {
 }
 
 // Handler performs one operation's effect. It is reached only after the table
-// has resolved a call to an entry, so it never routes: one handler may back
+// has resolved a call to an entry and the entry's policy held, approval
+// included, so it never routes and never authorizes: one handler may back
 // several entries (a single internet client serving GET and POST), and the
 // entry — not the handler — is what the call was matched against.
 type Handler interface {
-	DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error)
+	DispatchCall(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error)
+}
+
+// HandlerFunc lets a function or a method value serve an entry, so a driver
+// can bind each entry to the operation it performs.
+type HandlerFunc func(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error)
+
+func (f HandlerFunc) DispatchCall(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error) {
+	return f(ctx, call)
 }
 
 // Entry is one dispatchable operation: what it is, the shape of its arguments,
@@ -484,7 +493,7 @@ func (d *Dispatcher[K]) Dispatch(ctx context.Context, _ K, call sys.Syscall, aut
 	if entry.RequireApproval && auth.Decision != sys.Approved {
 		return sys.Yield(approvalPrompt(entry, call)), nil
 	}
-	return entry.Handler.DispatchCall(ctx, call, auth)
+	return entry.Handler.DispatchCall(ctx, call)
 }
 
 // approvalPromptArgsLimit caps the arguments quoted in a prompt. The prompt is a

@@ -118,7 +118,7 @@ type driver struct {
 	effects *Effects
 }
 
-func (d driver) DispatchCall(_ context.Context, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
+func (d driver) DispatchCall(_ context.Context, syscall sys.Syscall) (sys.SyscallResult, error) {
 	d.effects.Dispatches++
 	d.effects.Applied[syscall.Name]++
 	return sys.Result(json.RawMessage(fmt.Sprintf(`{"applied":%q,"seq":%d}`, syscall.Name, d.effects.Applied[syscall.Name]))), nil

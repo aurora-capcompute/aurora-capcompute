@@ -214,7 +214,7 @@ type dispatchAsHandler struct {
 	d sys.Dispatcher[durable.ProcessContext]
 }
 
-func (h dispatchAsHandler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
+func (h dispatchAsHandler) DispatchCall(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error) {
 	var cred durable.ProcessContext
-	return h.d.Dispatch(ctx, cred, call, auth)
+	return h.d.Dispatch(ctx, cred, call, sys.Authorization{})
 }

@@ -10,7 +10,7 @@ import (
 
 type nopHandler struct{}
 
-func (nopHandler) DispatchCall(context.Context, sys.Syscall, sys.Authorization) (sys.SyscallResult, error) {
+func (nopHandler) DispatchCall(context.Context, sys.Syscall) (sys.SyscallResult, error) {
 	return sys.Result(nil), nil
 }
 
