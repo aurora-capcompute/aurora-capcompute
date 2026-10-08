@@ -29,18 +29,8 @@ append-only event stream per session.
 The module ships interfaces and orchestration only. Drivers, stores, HTTP and
 connectors come from the assembly (aurora-dist).
 
-```
-   aurora-cli / aurora-slack-connector      clients
-              │  HTTP /v1
-         aurora-dist                         the server binary
-              │
-   ┌──────────┴──────────┐
- aurora-capcompute    aurora-dispatchers     runtime (this repo) + drivers
-   └──────────┬──────────┘
-         capcompute                          the processor
-
-   aurora-brains                             the Wasm programs that run inside
-```
+The [aurora-dist README](https://github.com/aurora-capcompute/aurora-dist)
+shows how the repos fit together.
 
 ## Use
 
@@ -90,9 +80,8 @@ manifest version is 4.
 ## Docs
 
 - [`docs/WALKTHROUGH.md`](docs/WALKTHROUGH.md): the dispatcher chain, the
-  replay boundary, a crash and an approval, the event-log fold.
-- [`docs/DISPATCHERS.md`](docs/DISPATCHERS.md): one capability from a manifest
-  line to a TCP connection, and why a guest can do nothing else.
+  replay boundary, a crash and an approval, how a grant becomes a table, why a
+  guest can do nothing else, and the event-log fold.
 - [capcompute `docs/ARCHITECTURE.md`](https://github.com/aurora-capcompute/capcompute/blob/main/docs/ARCHITECTURE.md):
   the OS model and its laws.
 

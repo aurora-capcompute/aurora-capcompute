@@ -1,7 +1,8 @@
 # Walkthrough
 
-A tour from the processor to the public API. Read it once, start to finish, and
-the code is easy to navigate after. The [README](../README.md) is the overview.
+A tour from the processor to the public API, and from a manifest grant to a
+driver. Read it once, start to finish, and the code is easy to navigate after.
+The [README](../README.md) is the overview, and
 [capcompute's ARCHITECTURE](https://github.com/aurora-capcompute/capcompute/blob/main/docs/ARCHITECTURE.md)
 is the OS model. This document does not repeat them.
 
@@ -175,6 +176,92 @@ that waits on a task that is no longer pending.
 The processor always passes an empty `Authorization`. Turning a human decision
 into a dispatch is the runtime's job.
 
+## From a grant to a table
+
+A manifest grant names a syscall and carries a configuration that only its
+driver reads. `Manifest.LeafSyscalls()` separates the grants the runtime serves
+itself (`sys.timer`, `sys.declassify`) from the grants a driver serves.
+
+The assembly lists its driver registrations at compile time (aurora-dist's
+`newProvider`). A driver that is not registered does not exist: there is no
+plugin path and no lookup by name at run time. A registration has two methods:
+
+```go
+Matches(syscall string) bool
+Configure(ctx, config, services registry.Services) (capability.Family, error)
+```
+
+`Configure` parses the grant and returns a `capability.Family`: one entry per
+case of the syscall (for `core.internet`, one per method and domain). Each entry
+carries its schema, labels, forbidden labels, approval flag and handler. A
+handler is reached only through its entry, so what a call may do is a property
+of the table. Secrets resolve here, so a missing secret fails when the process
+starts. `registry.Services` carries only the secret resolver and the audit key,
+with no identity, so a grant cannot name another session's data.
+
+`Registry.Build` adds each family to one `*capability.Table`. `Table.Add`
+refuses a duplicate (syscall, operation). Then `newDispatcher` checks the table:
+
+```go
+if err := reconcileGrants(table.Descriptors(), spec); err != nil {
+    return nil, err
+}
+```
+
+`reconcileGrants` fails closed when the provider offers a capability that the
+manifest did not grant. Offering less is allowed.
+
+The Validator's grant set **is** this table, and the routing dispatcher is
+built from the same table. Each runtime layer that serves its own syscall adds
+it to the table as it is built (`sys.now` and `sys.random` in
+`newWorldDispatcher`, `sys.log` in `newProgressDispatcher`, `sys.timer` in
+`newTimerDispatcher`, the agent protocol in `newLifecycleDispatcher`). Such a
+syscall is **reserved**: admitted and on the menu, but routed to no entry. A
+layer that fails to catch its own syscall lets it fall to the routing
+dispatcher, which denies it. So what is permitted and what was built cannot
+drift apart.
+
+## Why a guest can do nothing else
+
+Four independent walls must all fail for a guest to act outside its grants:
+
+1. **No ambient authority.** The guest is Wasm with no syscalls, sockets or file
+   descriptors. `capcompute.NewProgram` refuses an image with `AllowedHosts` or
+   `AllowedPaths` (`ErrAmbientAuthority`), or with its own memory cap
+   (`ErrImageMemoryOverride`). The processor builds the module config, with a
+   deterministic clock and random source and no environment.
+2. **One door.** The processor registers one host function, `syscall` in the
+   `extism:host/compute` namespace. There is no second entry point, no shared
+   memory that the host writes, and no callback.
+3. **Deny by default.** The Validator denies any name that the table does not
+   have. The table is the one the chain was built from, `reconcileGrants` keeps
+   it inside the manifest, and the credential never enters guest memory. A
+   guest cannot name another process, because it cannot name its own.
+   `sys.begin` and `sys.commit` skip the grant lookup: they reach no driver.
+4. **The grant is narrower than the capability.** Only the granted (syscall,
+   operation) pairs are in the table, so an ungranted method is denied by
+   absence. The driver checks its own policy again: `internet.Client` checks
+   the allowlist on every request and redirect, and its dial guard refuses
+   loopback, private, link-local and CGNAT addresses after DNS. A driver can
+   narrow a grant, never widen it.
+
+Flow policy and approval belong to the entry, not the driver. A driver adds
+only provenance that the entry cannot know, such as a stored value's own labels.
+
+What this does **not** guarantee:
+
+- **Driver bugs are in scope.** The chain guarantees that a guest reaches only
+  `core.internet`, not that the internet client has no bugs. Its guards and
+  their tests live in the driver.
+- **The host process is trusted.** Nothing defends against a compromised
+  Aurora binary.
+- **A host command is not confined.** `core.command` controls the command line,
+  not what the binary does. See the aurora-dispatchers README.
+- **The journal is not tamper-evident.** `journaled.Verify` checks structure
+  only.
+- **Denial of service is bounded, not prevented.** Memory is capped and a
+  quantum has a deadline, but a guest can use all of its budget.
+
 ## The event-log fold
 
 `internal/agent/eventlog` is an append-only log with one ordered stream per
@@ -229,6 +316,10 @@ them.
 
 | Question | File |
 |---|---|
+| the grants | `internal/agent/manifest/manifest.go` |
+| the table and routing | `capability/capability.go` |
+| which drivers exist | aurora-dist `internal/dist/dist.go`, `provider.go` |
+| how a driver is built | aurora-dispatchers `internet/registration.go` |
 | the chain order | `internal/agent/dispatcher.go`, `monitor/stack.go` |
 | complete mediation | `monitor/validate.go` |
 | flow policy | `monitor/flow.go`, `monitor/provenance.go` |
@@ -251,3 +342,8 @@ them.
   orders.
 - capcompute's adversary suite builds a hostile guest and tests the processor's
   isolation and ABI from the guest's side.
+- The walls: `monitor/validate_test.go`, `monitor/stack_test.go`
+  (`TestWrapEnforcesCanonicalOrder`), `internal/agent/reconcile_test.go`,
+  `monitor/provenance_test.go` (`TestFlowTaintSurvivesCrashReplay`), and the
+  aurora-dispatchers `internet` tests for allowlists, redirects, byte limits,
+  dial guards and credential stripping.
