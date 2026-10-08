@@ -1,57 +1,39 @@
-# Walkthrough: how aurora-capcompute works
+# Walkthrough
 
-A guided tour of the system from the bottom (the processor) to the top (the
-public API), meant to be read once, start to finish, so that the code is
-navigable afterwards.
-
-This is the *deep* tour. The [README](../README.md) is the orientation, and
-[capcompute's `docs/ARCHITECTURE.md`](https://github.com/aurora-capcompute/capcompute/blob/main/docs/ARCHITECTURE.md)
-is the OS model and its five invariants. Neither is repeated here.
-
----
+A tour from the processor to the public API. Read it once, start to finish, and
+the code is easy to navigate after. The [README](../README.md) is the overview.
+[capcompute's ARCHITECTURE](https://github.com/aurora-capcompute/capcompute/blob/main/docs/ARCHITECTURE.md)
+is the OS model. This document does not repeat them.
 
 ## Two spines
 
-Almost every confusion about this codebase comes from mixing up two structures
-that run along different axes. Learn them separately and the rest falls out.
+Two structures run along different axes. Learn them separately.
 
-**Spine 1 — the dispatcher chain (the request path).** One syscall from a guest
-travels down a fixed stack of decorators and its result travels back up. Every
-security, durability, and protocol behaviour is a layer on that stack. Order is
-the design.
+1. **The dispatcher chain (the request path).** A syscall travels down a fixed
+   stack of layers, and its result travels back up. Every security, durability
+   and protocol behavior is one layer. The order is the design.
+2. **The event-log fold (the state model).** There is no mutable row store.
+   Sessions, processes and tasks are projections of one append-only event
+   stream per session. A restart folds the streams again.
 
-**Spine 2 — the event-log fold (the state model).** There is no mutable row
-store. All durable runtime state — sessions, processes, tasks — is a
-*projection* folded from one append-only event stream per session. Restart
-replays the streams and rebuilds the projections.
+The chain is what happens during a syscall. The fold is what is true between
+syscalls.
 
-Spine 1 is what happens during a syscall. Spine 2 is what is true between them.
+## Layer 0: the processor
 
----
+capcompute does little, and its limits are most of what you need to know:
 
-## Layer 0: capcompute, the processor
+- `NewProgram` compiles a Wasm image and refuses ambient authority.
+- `NewProcess` creates a process. Input, credential and dispatcher are
+  explicit.
+- `Resume` runs one quantum, until the guest completes, yields, fails or stops.
+- One host function is the only way out. `Resume` binds it to the process's
+  credential and dispatcher.
+- The WASI clock and random source are deterministic, so replay is exact.
 
-capcompute is deliberately small, and knowing where its responsibility *stops*
-is most of what you need:
-
-- `NewProgram` compiles a Wasm image and refuses ambient authority (no allowed
-  hosts or paths).
-- `NewProcess` instantiates a process — explicit input, credential, and
-  dispatcher; nothing inherited.
-- `Resume` gives a process the CPU for one cooperative quantum, until it
-  completes, yields, fails, or is stopped.
-- One host function is the only way out of the sandbox. `Resume` plants a
-  dispatch closure — already bound to that process's credential and dispatcher
-  — in the call context, so the gate serves exactly the process holding the CPU.
-- The WASI clock and RNG are pinned so a fresh instance observes the identical
-  sequence. That is what makes replay exact.
-
-**capcompute does *not* own** the journal, replay, the monitor chain,
-scheduling, approval, sessions, or retries. Every one of those lives in *this*
-repo. If you remember one boundary, remember that one.
-
-The shared vocabulary lives in capcompute's `sys` package and is the whole
-interface between the two repos:
+capcompute does **not** own the journal, replay, the monitor, scheduling,
+approval, sessions or retries. This repo owns all of them. The interface
+between the two repos is capcompute's `sys` package:
 
 ```go
 type Dispatcher[K any] interface {
@@ -59,274 +41,213 @@ type Dispatcher[K any] interface {
 }
 ```
 
-`cred` is *who* is calling (host-side, never guest-supplied), `syscall` is
-*what* is asked, `auth` is *what has been granted for this specific call*. A
-`SyscallResult` is one of `result`, `yield`, or `failed` — a failure is a
-classified errno the guest can react to, not a crash.
+`cred` is who calls (host-side only), `syscall` is what is asked, and `auth` is
+what a human approved for this call. A result is `result`, `yield` or `failed`.
+A failure is an errno that the guest can act on, not a crash.
 
----
+## The chain
 
-## Spine 1: the chain
-
-Everything in this repo is a `Dispatcher` that wraps another `Dispatcher`. The
-architecture *is* the nesting order, which is why it is assembled in code and
-never by hand — `internal/agent/dispatcher.go` builds the whole chain, and
-`monitor.Wrap` (`monitor/stack.go`) owns the part around the replay boundary.
-
-Outermost (first to see a syscall) to innermost:
+Every layer is a `Dispatcher` that wraps another. `internal/agent/dispatcher.go`
+builds the chain for each quantum, and `monitor.Wrap` (`monitor/stack.go`) owns
+the part around the replay boundary. Outermost first:
 
 ```
-Validator            grants + arg schemas                  ┐ above replay:
-Flow.Guard           taint vs. declared Forbid             ┘ re-derived every pass, never journaled
-─────────────────────────────────────────────────────────── the replay boundary
-replay.Dispatcher    serve from tape, or intent→run→completion
-───────────────────────────────────────────────────────────
-Flow.Stamp           stamps provenance on results          ┐ below replay:
-Declassifier         sys.declassify                        │ journaled once,
-savepoints           sys.begin / sys.commit                │ served from the tape
-world                sys.now / sys.random                  │ thereafter
+Validator            grants + argument schemas       ┐ above replay: decided again
+Flow.Guard           taint vs. the entry's forbid set ┘ on every pass, never journaled
+──────────────────────────────────────────────────────── the replay boundary
+replay.Dispatcher    serve from the tape, or journal intent → run → completion
+────────────────────────────────────────────────────────
+Flow.Stamp           labels on results               ┐ below replay: journaled once,
+savepoints           sys.begin / sys.commit          │ served from the tape after
+world                sys.now / sys.random            │
 lifecycle            sys.input / sys.output / sys.abort
-task                 durable approval
+task                 a yield from below → a durable task
+Declassifier         sys.declassify (yields for approval)
 progress             sys.log
-timer                sys.timer            (only when granted)
-application drivers  the actual capabilities
+timer                sys.timer (only when granted)
+capability.Dispatcher  routes (syscall, operation) to an entry; approval
+drivers              the application's capabilities
 ```
 
-### Why the replay boundary is where it is
+### Why the replay boundary is there
 
-This is the single most load-bearing decision in the repo, and `monitor.Wrap`
-states it plainly: layers **above** replay must re-derive their decision
-identically on every pass and must never enter the journal; layers **below**
-replay produce outcomes that must be journaled exactly once and served from the
-tape thereafter.
+Layers **above** replay must reach the same decision on every pass, and they
+never enter the journal. Validation and flow denials follow from the grant set
+and the current taint, so replay reaches the same verdict without a record.
+Layers **below** replay produce facts: stamped labels, approvals, times. Those
+are journaled once and served from the tape after. A layer on the wrong side
+breaks a law without a visible error. `monitor.Wrap` exists so that nobody
+builds this order by hand.
 
-So validation and flow denials sit above: they follow from the grant set and the
-current taint, so a replay reaches the same verdict without recording anything.
-Stamped labels and approved declassification crossings sit below: they are
-facts about what happened, and they belong in the audit trail.
+### The layers
 
-Put one layer on the wrong side and you silently break a law. That is precisely
-why `monitor.Wrap` exists and why nothing assembles this by hand.
-
-### The layers, in one line each
-
-- **`monitor.Validator`** — complete mediation. The syscall name must be in the
-  cred's grant set (else `denied`) and the args must validate against the
-  capability's `InputSchema` (else `invalid_args`). Refusals are results, not
-  errors: the guest sees an errno and continues.
-- **`monitor.Flow` + `Taints`** — information-flow control, one object with two
-  decorators. `Flow.Guard`, above replay, refuses a call whose operation declares
-  a `Forbid` label the process is carrying, and folds every result's labels into
-  the process's taint. Because the guest is opaque, flow is judged
-  conservatively: once observed, anything the process emits may derive from it.
-- **`replay.Dispatcher`** — the durability core. If the tape already has this
-  syscall recorded, serve the recorded result and never touch a driver.
-  Otherwise: append an **intent**, dispatch, append a **completion**, then let
-  the guest see it. That ordering is two invariants —
-  *journal-before-execute* and *journal-before-observe*.
-- **`journaled.Tape` / `Journal`** — where the tape lives. Records are a fixed
-  envelope (position, kind) plus an opaque payload. A journal belongs to one
-  process, and the process is bound to one program digest for life, so a tape
-  replays only what that program wrote. `journaled.Verify` checks the
-  structure — positions in order, alternating intent/completion — but the
+- **`monitor.Validator`**: the name must be in the grant table (else `denied`),
+  and the arguments must pass the entry's schema (else `invalid_args`). A
+  refusal is a result. The guest sees an errno and continues.
+- **`monitor.Flow`**: one object with two decorators. `Flow.Guard` (above
+  replay) refuses a call whose entry forbids a label the process carries, and
+  adds every result's labels to the process's taint. The guest is opaque, so
+  the taint never shrinks, except by an approved `sys.declassify`.
+- **`replay.Dispatcher`**: if the tape has this syscall, it serves the recorded
+  result and calls no driver. Else it appends an **intent**, dispatches, and
+  appends a **completion** before it returns. That order is the two write-ahead
+  laws.
+- **`journaled.Tape`**: the record format. A record is a position and a kind
+  plus an opaque payload. A journal belongs to one process, and the process is
+  bound to one program digest. `journaled.Verify` checks the structure. The
   journal is not tamper-evident.
-- **`Flow.Stamp`** — stamps `syscall:<name>` plus the operation's declared
-  source classes onto every result. Sitting below replay means provenance lands
-  in the journal for free.
-- **`monitor.Declassifier`** — serves `sys.declassify`, the explicit,
-  approved crossing of a label boundary. Journaled, because an approved crossing
-  is a fact, not a re-derivable decision.
-- **savepoints** — serves `sys.begin` / `sys.commit` with a constant
-  side-effect-free result, so replay matching stays deterministic. Above the
-  task and routing layers so a marker never becomes a human task.
-- **world** — serves `sys.now` and `sys.random`. Below replay, so the values are
-  journaled once and replay verbatim; this is what makes "the clock is a
-  capability" true in practice.
-- **lifecycle** — the program-facing protocol: `sys.input` (the run's payload
-  plus history and the capability menu), `sys.output` (its answer), and
+- **`Flow.Stamp`**: puts `syscall:<name>` and the entry's declared labels on
+  every result, failures too. Below replay, so the labels are in the journal.
+- **savepoints**: serves `sys.begin`/`sys.commit` with a constant result, above
+  the task layer, so a marker never becomes a task.
+- **world**: serves `sys.now` and `sys.random`. The values are journaled once
+  and replay as recorded.
+- **lifecycle**: `sys.input` (the input, history and capability menu),
+  `sys.output` (the answer, checked against the program's schema) and
   `sys.abort`.
-- **`task.Dispatcher`** — durable approval, described below.
-- **progress / timer / drivers** — `sys.log` journals a progress line for a
-  watcher to read; `sys.timer` yields and becomes a durable timer task; the drivers
-  are the application's actual capabilities and are injected, never owned here.
+- **`task.Dispatcher`**: turns a yield from any layer below it into a durable
+  task (see Trace 3).
+- **`monitor.Declassifier`**: serves `sys.declassify`. It yields for approval,
+  so the task layer parks it. The approved crossing is journaled, and
+  `Flow.Guard` lifts the labels when it sees it.
+- **progress, timer**: `sys.log` journals a progress line. `sys.timer` yields,
+  and its task fires at its time.
+- **`capability.Dispatcher`**: reads the operation from the arguments and
+  routes to the entry. An entry that requires approval yields here, with a
+  prompt that shows the call.
 
-Note that the runtime's own protocol calls are *granted explicitly* — they pass
-the Validator like anything else — but are hidden from the program's discoverable
-menu. There is no bypass lane.
-
----
+The runtime's own syscalls (`sys.input`, `sys.output`, `sys.log`, `sys.abort`)
+pass the Validator like any other. They are hidden from the program's menu.
+There is no bypass.
 
 ## Trace 1: an ordinary syscall
 
-A program calls a granted capability, say `core.scratch` with operation `get`.
+The guest calls `core.scratch` with operation `get`.
 
-1. The guest encodes an ABI v4 JSON envelope and traps through capcompute's one
-   host function. The processor unmarshals a `sys.Syscall` and calls the closure
-   `Resume` planted — which is this process's chain.
-2. **Validator**: is `core.scratch` `get` in this cred's grant set, and do the
-   args match its schema? If not, a `denied`/`invalid_args` result goes straight
-   back up. No driver is touched.
-3. **Flow.Guard**: does this operation forbid any label the process is already
-   carrying? If so, refused here.
-4. **replay**: is this syscall the next recorded entry on the tape? On a first
-   run it is not, so the tape appends an **intent** record.
-5. The call descends through the protocol layers to the driver, which does the
-   real work.
-6. On the way back up, **Flow.Stamp** stamps `syscall:core.scratch` plus the
-   operation's declared source classes onto the result.
-7. **replay** appends the **completion** record — carrying those labels — and
-   only then returns.
-8. **Flow.Guard** observes the result's labels into the process's taint.
-9. The result marshals back through the gate as JSON. The guest sees it.
+1. The guest sends an ABI v4 envelope through the host function. The processor
+   decodes a `sys.Syscall` and calls this process's chain.
+2. **Validator**: is `core.scratch` granted, and do the arguments match the
+   schema? If not, a `denied` or `invalid_args` result goes back. No driver runs.
+3. **Flow.Guard**: does the entry forbid a label that the process carries? If
+   yes, the call is refused here.
+4. **replay**: the tape has no record at this position, so it appends an intent.
+5. The call goes down through the protocol layers to the driver.
+6. **Flow.Stamp** labels the result.
+7. **replay** appends the completion, with the labels, and only then returns.
+8. **Flow.Guard** adds the labels to the process's taint.
+9. The guest receives the result.
 
-The guest never observes an outcome that is not already durable. That is the
-whole point of step 7 preceding step 9.
+The guest never sees an outcome that is not durable: step 7 comes before step 9.
 
-## Trace 2: a crash, and the resume
+## Trace 2: a crash
 
-The host dies between steps 5 and 7 — the effect happened, the completion was
-never written.
+The host stops between steps 5 and 7. The effect happened, and the completion
+was not written.
 
-On restart the process is re-driven from the top: the program re-executes from
-its entrypoint, and every syscall it repeats is served from the tape rather than
-re-dispatched, so it fast-forwards through work already done. When it reaches
-the position with an intent and no completion, the tape raises
-`replay.OpenIntentError`, and replay drives the call again: at-least-once, so
-an effect that happened before the crash happens again.
-
-Drivers get no idempotency key: making every external effect exactly-once is
-not something the runtime can promise. What it does promise is narrower — a
-call runs again only when the crash fell between its execution and its
+On restart the process runs again from its entrypoint. Each syscall it repeats
+is served from the tape, so it moves fast through finished work. At the intent
+with no completion, the tape returns `replay.OpenIntentError`, and replay runs
+the call again. Effects are at least once: an effect that happened before the
+crash happens again. Drivers get no idempotency key. The runtime promises only
+this: a call runs again only when the crash fell between its execution and its
 completion record.
 
 ## Trace 3: an approval
 
-A syscall needs a human. The driver returns `yield`.
+An entry requires approval, so `capability.Dispatcher` returns `yield` with a
+prompt.
 
-The **task layer** catches it and turns the yield into a persisted task record
-with an HMAC-derived token, leaving the replay intent *open*. The process parks;
-the quantum ends; nothing holds a thread.
+The **task layer** records a task with an HMAC-derived token and leaves the
+replay intent open. The process parks as `waiting_for_task`. The quantum ends,
+and no thread waits.
 
-Later someone calls `ResolveTask` with the token and a resolution. The runtime
-re-drives the process; replay fast-forwards to the open intent; and the task
-layer replays the original syscall down the chain — this time with the stored
-resolution as its `Authorization`. The driver now sees an approved call and does
-the work, and the completion is journaled.
+Later a client calls `ResolveTask` with the token and a decision. The runtime
+resumes the process. Replay moves fast to the open intent, and the task layer
+sends the original call down again, with the stored decision as its
+`Authorization`. The driver now sees an approved call and does the work. The
+completion is journaled.
 
-capcompute deliberately does not own this: the processor's gate always passes a
-zero `Authorization`. Promoting a human decision into a dispatch is the
-runtime's job, keyed by the intent the replay layer journaled.
+A timer is the same path: `sys.timer` yields, and the sweep completes the task
+at its time. An approval that nobody answers within `TaskTTL` expires, and the
+guest gets errno `expired`. The sweep runs every second and wakes every process
+that waits on a task that is no longer pending.
 
----
+The processor always passes an empty `Authorization`. Turning a human decision
+into a dispatch is the runtime's job.
 
-## Spine 2: the event-log fold
+## The event-log fold
 
-Now the other axis. Between syscalls, what is true?
+`internal/agent/eventlog` is an append-only log with one ordered stream per
+session and opaque payloads. All durable state is a fold of those streams:
 
-`internal/agent/eventlog` is a generic append-only log — domain-agnostic,
-opaque payloads, one ordered stream per session. Everything durable the runtime
-knows is a fold over those streams:
+- sessions and processes (`restore.go`, `snapshots.go`).
+- tasks (`tasks.go`).
+- the journal views (`journalview.go`).
 
-- session and process state (`restore.go`, `snapshots.go`)
-- tasks (`tasks.go`)
-- the capability journal views (`journalview.go`)
-
-There is no mutable row store to drift out of sync, and no migration to write
-when a projection changes shape. `restore.go` rebuilds in-memory state on
-startup by replaying every stream from the beginning. Live watchers get the same
-events through `Subscribe`.
-
-Read the runtime this way and its file layout stops being arbitrary:
-`durable/events.go` defines what can be appended, `restore.go` folds it back,
-and the `*Locked` helpers in `snapshots.go` project it into the immutable
-snapshots the public API hands out.
-
----
+No row store can drift, and a projection that changes shape needs no
+migration. `restore.go` folds every stream at boot. `durable/events.go` defines
+what can be appended.
 
 ## Revisions and retries
 
-Savepoints (`sys.begin`/`sys.commit`) are **redo scopes**: they can only
-re-execute their contents, never undo them. Nothing is undone — a section that
-must be re-runnable is the program's own contract.
+`sys.begin`/`sys.commit` are **redo scopes**. A section can run again but is
+never undone. A section that must be safe to run again is the program's
+contract.
 
-If the section must be abandoned, the guest calls `sys.abort`. The runtime forks
-the journal at the section's still-open `sys.begin` and re-runs the whole section
-live, at most 10 times. With no section open there is nothing smaller
-to re-run, and the process fails. A fork mints a new **revision**: forks are
-copy-on-write over the journal, and the revision is part of the process identity
-(`pid@revision`), so a retried attempt never resumes the instance it replaced.
+`sys.abort` abandons the open section. The runtime forks the journal at the
+section's `sys.begin` and runs the section again, at most 10 times. With no
+open section, the process fails. A fork makes a new **revision**. The fork is
+copy-on-write over the journal, and the revision is part of the process's
+identity (`ProcessContext{SessionID, ProcessID, Revision}`), so a retry never
+continues the instance it replaced.
 
-`Retry` from the public API offers the same thing at a coarser grain:
-`RetryResume` continues from where the journal stopped; `RetryRestart` starts a
-fresh revision.
+`Retry` offers the same at a coarser grain. `RetryResume` continues from where
+the journal stopped. `RetryRestart` starts a fresh revision from position 0.
 
----
+## Scheduling
 
-## Scheduling and residency
+The pool (`internal/agent/pool.go`) is a fixed set of workers. Each runs one
+quantum to its end, then takes the next. The worker count is the concurrency
+bound. A quantum (`runQuantum` in `executor.go`) checks that the process still
+has its program, builds the chain, and resumes the guest.
 
-The pool (`internal/agent/pool.go`) decides *when* a process gets the CPU: a
-fixed set of workers, each running one quantum to its end before it takes the
-next. The worker count is the concurrency bound, so nothing counts slots and
-nothing can overrun. A quantum (`runQuantum` in `internal/agent/executor.go`)
-checks that the process still runs the program it was created from, builds its
-dispatcher chain, and resumes the guest on the processor.
+The deadline starts when a worker takes the quantum, so queue time does not
+count. The pool is first come first served, with no priorities or quotas.
 
-The quantum's deadline starts when a worker takes the submission, not when it
-was submitted: queue time never counts against a guest. Cancelling a submission
-drops it while it waits, or stops the guest once it has started.
-
-It is deliberately **not** fair-share: no priorities, no quotas, no owners.
-Submissions are first-come-first-served, bounded by `MaxConcurrentProcesses`,
-which caps live instances rather than apportioning them.
-
-There is likewise **no residency**. Every quantum activates a fresh instance and
-releases it when the quantum ends, whatever the outcome. Keeping one warm would
-put guest globals and allocator state outside the journal — across a boundary
-syscalls are supposed to be the only path through. The cost is one instantiation
-per quantum; the gain is that a cold start is the only start.
-
----
+There is **no residency**. Every quantum starts a fresh instance and releases it
+at the end. A warm instance would keep guest state outside the journal. The
+cost is one instantiation per quantum.
 
 ## The public surface
 
-`aurora/` is a thin re-export of `internal/agent`. `aurora.Runtime` is the whole
-API: sessions, processes, the session read (journals and tasks included), task
-resolution, and stop/retry.
-
-The runtime owns no capabilities, dispatchers, stores, or channels. Dispatchers,
-programs and the event log are injected through `Config`. A shipping product is an *assembly* — a `main()` composing this runtime
-with concrete stores, drivers, and whatever channels it speaks. `aurora-dist` is
-that assembly.
-
----
+`aurora/` re-exports `internal/agent`. `aurora.Runtime` is the whole API:
+sessions, processes, the session read, task resolution, stop and retry. The
+runtime owns no drivers, stores or channels. An assembly (aurora-dist) injects
+them.
 
 ## Where to look
 
-| You want | Look at |
+| Question | File |
 |---|---|
-| the chain order and why | `internal/agent/dispatcher.go`, `monitor/stack.go` |
+| the chain order | `internal/agent/dispatcher.go`, `monitor/stack.go` |
 | complete mediation | `monitor/validate.go` |
-| taint / flow policy | `monitor/flow.go`, `monitor/provenance.go` |
-| the replay protocol | `replay/replay.go` |
+| flow policy | `monitor/flow.go`, `monitor/provenance.go` |
+| replay | `replay/replay.go` |
 | the record format | `journaled/tape.go` |
-| abort and section re-run | `internal/agent/abort.go` |
-| what a quantum does | `internal/agent/executor.go` |
-| state rebuilt after restart | `internal/agent/restore.go` |
+| abort and re-run | `internal/agent/abort.go` |
+| one quantum | `internal/agent/executor.go` |
+| restore after restart | `internal/agent/restore.go` |
 | scheduling | `internal/agent/pool.go` |
 | the public API | `aurora/runtime.go` |
 
-## How it is verified
+## How it is tested
 
-The invariants are tested as invariants, not incidentally.
-
-`sim/` is a deterministic simulation harness in the FoundationDB/Antithesis
-style: it models the parts of the world that survive a crash — the journal and
-the external effect store — drives a scripted guest through the full chain, and
-injects a crash at *every* journal append position, asserting three things each
-time: replay converges, an effect repeats only when the crash cut off its
-completion record, and the journal structure stays intact.
-
-The abort and savepoint tests in `internal/agent` cover abort/retry/crash
-interleavings. And capcompute's own adversarial suite builds a genuinely
-hostile guest with the standard Go toolchain, proving the processor's isolation
-and ABI boundary from the guest's side of the trap.
+- `sim/` is a deterministic simulation harness. It models what survives a
+  crash (the journal and an external effect store), runs a scripted guest
+  through the chain, and crashes at every journal append. Each time it checks
+  that replay converges, that an effect repeats only when the crash cut off its
+  completion, and that the journal structure holds.
+- The abort and savepoint tests in `internal/agent` cover abort, retry and crash
+  orders.
+- capcompute's adversary suite builds a hostile guest and tests the processor's
+  isolation and ABI from the guest's side.
