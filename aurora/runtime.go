@@ -9,7 +9,6 @@ type Runtime interface {
 	RenameSession(sessionID string, name string) (SessionSnapshot, error)
 	ListSessions() []SessionSummary
 	Programs() []ProgramArtifact
-	AddProgram(ctx context.Context, program ProgramData) error
 	GetSession(sessionID string) (SessionSnapshot, error)
 	CreateProcess(sessionID string, input string, manifest Manifest) (ProcessSnapshot, error)
 	GetProcess(processID string) (ProcessSnapshot, error)

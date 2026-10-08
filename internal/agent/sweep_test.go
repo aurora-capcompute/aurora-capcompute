@@ -51,6 +51,7 @@ func TestTimerFiresFromTheSweep(t *testing.T) {
 		return now
 	}
 	runtime, err := NewRuntime(context.Background(), Config{
+		Programs:    []ProgramData{testProgram("program@1", buildProgram(t))},
 		Dispatchers: timerDispatchers{},
 		Log:         newMemLog(),
 		TaskSecret:  []byte("stable-secret"),
@@ -59,7 +60,6 @@ func TestTimerFiresFromTheSweep(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
 	}
-	addTestProgram(t, runtime, "program@1", buildProgram(t))
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -103,20 +103,32 @@ func TestTimerFiresFromTheSweep(t *testing.T) {
 }
 
 // A resolution is recorded even when the parked process cannot resume yet —
-// here a restarted host has not loaded the program. The sweep wakes the process
-// once the program is back, with no second resolution.
+// here a restarted host does not have the program. The first sweep after a
+// restart that brings the program back wakes the process, with no second
+// resolution.
 func TestSweepWakesAProcessWhoseWakeFailed(t *testing.T) {
 	store := newRuntimeStore()
-	config := Config{
+	withProgram := Config{
 		Dispatchers: approvalDispatchers{},
+		Programs:    []ProgramData{testProgram("program@1", buildProgram(t))},
 		Log:         store.log,
 		TaskSecret:  []byte("stable-secret"),
 	}
-	first, err := NewRuntime(context.Background(), config)
+	withoutProgram := withProgram
+	withoutProgram.Programs = nil
+	closeRuntime := func(runtime *Runtime) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := runtime.Close(ctx); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+	}
+
+	first, err := NewRuntime(context.Background(), withProgram)
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
 	}
-	addTestProgram(t, first, "program@1", buildProgram(t))
 	session, err := first.CreateSession("", nil)
 	if err != nil {
 		t.Fatalf("create session: %v", err)
@@ -130,21 +142,12 @@ func TestSweepWakesAProcessWhoseWakeFailed(t *testing.T) {
 		t.Fatalf("create process: %v", err)
 	}
 	waitForStatus(t, first, proc.ID, durable.ProcessWaitingTask)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := first.Close(ctx); err != nil {
-		t.Fatalf("close: %v", err)
-	}
+	closeRuntime(first)
 
-	second, err := NewRuntime(context.Background(), config)
+	second, err := NewRuntime(context.Background(), withoutProgram)
 	if err != nil {
 		t.Fatalf("restart runtime: %v", err)
 	}
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = second.Close(ctx)
-	})
 	tasks := processLog(t, second, proc.ID).Tasks
 	if len(tasks) != 1 {
 		t.Fatalf("tasks = %+v", tasks)
@@ -153,14 +156,19 @@ func TestSweepWakesAProcessWhoseWakeFailed(t *testing.T) {
 		Decision: durable.TaskApproved,
 		Actor:    "tester",
 	}); err != nil {
-		t.Fatalf("resolve before the program is loaded: %v", err)
+		t.Fatalf("resolve without the program: %v", err)
 	}
 	if got, _ := second.GetProcess(proc.ID); got.Status != durable.ProcessWaitingTask {
 		t.Fatalf("process resumed with no program loaded: %s", got.Status)
 	}
+	closeRuntime(second)
 
-	addTestProgram(t, second, "program@1", buildProgram(t))
-	done := waitForStatus(t, second, proc.ID, durable.ProcessCompleted)
+	third, err := NewRuntime(context.Background(), withProgram)
+	if err != nil {
+		t.Fatalf("restart runtime: %v", err)
+	}
+	t.Cleanup(func() { closeRuntime(third) })
+	done := waitForStatus(t, third, proc.ID, durable.ProcessCompleted)
 	if done.Answer != "approved-done" {
 		t.Fatalf("answer = %q", done.Answer)
 	}

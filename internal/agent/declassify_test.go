@@ -53,6 +53,7 @@ func (declassifyLLM) Dispatch(_ context.Context, _ durable.ProcessContext, sysca
 // label from the run's taint, and the process carries on.
 func TestDeclassifyParksOnATaskAndLiftsTheLabel(t *testing.T) {
 	runtime, err := NewRuntime(context.Background(), Config{
+		Programs:    []ProgramData{testProgram("program@1", buildProgram(t))},
 		Dispatchers: declassifyDispatchers{},
 		Log:         newMemLog(),
 		TaskSecret:  []byte("stable-secret"),
@@ -60,7 +61,6 @@ func TestDeclassifyParksOnATaskAndLiftsTheLabel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
 	}
-	addTestProgram(t, runtime, "program@1", buildProgram(t))
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

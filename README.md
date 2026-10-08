@@ -117,6 +117,7 @@ dependency — construction fails if any required one is missing:
 ```go
 runtime, err := aurora.NewRuntime(ctx, aurora.Config{
     Dispatchers: dispatcherProvider, // capability drivers (from aurora-dispatchers)
+    Programs:    programs,           // Wasm bytes + interface manifest, compiled at boot
     Log:         eventLog,           // the append-only event store (in-memory or SQLite)
     TaskSecret:  taskSecret,         // non-empty []byte, keys the task resolution tokens
 })
@@ -124,11 +125,9 @@ if err != nil {
     return err
 }
 
-// Load a program, then drive it:
-err = runtime.AddProgram(ctx, program)                         // Wasm bytes + interface manifest
 sess, _ := runtime.CreateSession("", nil)
-proc, _ := runtime.CreateProcess(sess.ID, input, manifest, 0) // manifest.Version must be 4; 0 = default quantum deadline
-read, _ := runtime.GetSession(sess.ID)                        // its journal and tasks
+proc, _ := runtime.CreateProcess(sess.ID, input, manifest) // manifest.Version must be 4
+read, _ := runtime.GetSession(sess.ID)                     // its journal and tasks
 // … and runtime.ResolveTask(...) when a human approves a pending task.
 ```
 
@@ -183,8 +182,8 @@ how one syscall, one crash, and one approval each travel the chain — see
 No env vars, no files, no ports — everything is the injected struct.
 
 - **Required:** `Dispatchers`, `Log`, `TaskSecret` (non‑empty).
-  Programs are not configured: a runtime boots with an empty registry and gains
-  its programs through `AddProgram`, once, before it serves.
+- **Programs:** compiled once, at boot, and fixed for the runtime's life. To
+  change a program, restart with the new one.
 - **Optional knobs:** `Now`, `TaskTTL` (24h), `MaxConcurrentProcesses` (16),
   `QuantumDeadline` (2 min).
 - **Fixed bounds:** a guest's memory is capped at 256 MiB, and a guest may abort

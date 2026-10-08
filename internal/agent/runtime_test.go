@@ -159,6 +159,7 @@ func TestRuntimePassesManifestToDispatcherProvider(t *testing.T) {
 	dispatchers := &runtimeDispatchers{}
 	store := newRuntimeStore()
 	runtime, err := NewRuntime(context.Background(), Config{
+		Programs:    []ProgramData{testProgram("program@1", buildProgram(t))},
 		Dispatchers: dispatchers,
 		Log:         store.log,
 		TaskSecret:  []byte("stable-secret"),
@@ -166,7 +167,6 @@ func TestRuntimePassesManifestToDispatcherProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
 	}
-	addTestProgram(t, runtime, "program@1", buildProgram(t))
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -211,13 +211,14 @@ func TestRuntimePassesManifestToDispatcherProvider(t *testing.T) {
 	}
 }
 
-// TestRuntimeProgramLifecycle boots with no program (so a process cannot be
-// created), registers one with AddProgram, and drives a run through it. An id is
-// registered once: adding a taken id is refused.
-func TestRuntimeProgramLifecycle(t *testing.T) {
+// TestRuntimeRunsItsPrograms: the runtime serves the programs it booted with,
+// refuses a process for any other program, and refuses a config that lists an
+// id twice or a program that does not compile.
+func TestRuntimeRunsItsPrograms(t *testing.T) {
 	wasm := buildProgram(t)
 	runtime, err := NewRuntime(context.Background(), Config{
 		Dispatchers: &runtimeDispatchers{},
+		Programs:    []ProgramData{testProgram("program@1", wasm)},
 		Log:         newMemLog(),
 		TaskSecret:  []byte("stable-secret"),
 	})
@@ -232,20 +233,15 @@ func TestRuntimeProgramLifecycle(t *testing.T) {
 		}
 	})
 
-	if len(runtime.Programs()) != 0 {
-		t.Fatalf("expected no programs at boot, got %v", runtime.Programs())
+	if got := runtime.Programs(); len(got) != 1 || got[0].ID != "program@1" {
+		t.Fatalf("programs = %v", got)
 	}
 	session, err := runtime.CreateSession("", nil)
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	if _, err := runtime.CreateProcess(session.ID, "task", manifest.Manifest{Version: manifest.Version, Program: "program@1"}); err == nil {
-		t.Fatal("creating a run with no registered program should fail")
-	}
-
-	addTestProgram(t, runtime, "program@1", wasm)
-	if got := runtime.Programs(); len(got) != 1 || got[0].ID != "program@1" {
-		t.Fatalf("programs after register = %v", got)
+	if _, err := runtime.CreateProcess(session.ID, "task", manifest.Manifest{Version: manifest.Version, Program: "program@2"}); err == nil {
+		t.Fatal("creating a run for a program the runtime does not have should fail")
 	}
 	proc, err := runtime.CreateProcess(session.ID, "finish", manifest.Manifest{
 		Version:  manifest.Version,
@@ -257,8 +253,18 @@ func TestRuntimeProgramLifecycle(t *testing.T) {
 	}
 	waitForStatus(t, runtime, proc.ID, durable.ProcessCompleted)
 
-	if err := runtime.AddProgram(context.Background(), testProgram("program@1", wasm)); !errors.Is(err, errs.Conflict) {
-		t.Fatalf("adding a taken id = %v, want errs.Conflict", err)
+	for name, programs := range map[string][]ProgramData{
+		"duplicate id": {testProgram("program@1", wasm), testProgram("program@1", wasm)},
+		"invalid wasm": {testProgram("program@1", []byte("not wasm"))},
+	} {
+		if _, err := NewRuntime(context.Background(), Config{
+			Dispatchers: &runtimeDispatchers{},
+			Programs:    programs,
+			Log:         newMemLog(),
+			TaskSecret:  []byte("stable-secret"),
+		}); err == nil {
+			t.Fatalf("%s: runtime booted", name)
+		}
 	}
 }
 
@@ -279,14 +285,12 @@ func failedEffectsProcess(t *testing.T, program ProgramData) (*Runtime, string) 
 	}
 	second, err := NewRuntime(context.Background(), Config{
 		Dispatchers: effectsDispatchers{d: &effectsDispatcher{}},
+		Programs:    []ProgramData{program},
 		Log:         log,
 		TaskSecret:  []byte("stable-secret"),
 	})
 	if err != nil {
 		t.Fatalf("restart runtime: %v", err)
-	}
-	if err := second.AddProgram(context.Background(), program); err != nil {
-		t.Fatalf("add program: %v", err)
 	}
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -358,29 +362,6 @@ func TestProcessSurvivesDescriptionChange(t *testing.T) {
 
 	if _, err := runtime.Retry(processID, RetryRestart); err != nil {
 		t.Fatalf("retry after a description change = %v, want it allowed", err)
-	}
-}
-
-func TestAddProgramRejectsInvalidWasm(t *testing.T) {
-	store := newRuntimeStore()
-	runtime, err := NewRuntime(context.Background(), Config{
-		Dispatchers: &runtimeDispatchers{},
-		Log:         store.log,
-		TaskSecret:  []byte("stable-secret"),
-	})
-	if err != nil {
-		t.Fatalf("new runtime: %v", err)
-	}
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = runtime.Close(ctx)
-	})
-	if err := runtime.AddProgram(context.Background(), testProgram("program@1", []byte("not wasm"))); err == nil {
-		t.Fatal("expected program compile error")
-	}
-	if len(runtime.Programs()) != 0 {
-		t.Fatalf("a program that failed to compile was registered: %v", runtime.Programs())
 	}
 }
 
@@ -562,6 +543,7 @@ func (approvalToolDispatcher) Dispatch(_ context.Context, _ durable.ProcessConte
 func TestRuntimeApprovalCycle(t *testing.T) {
 	store := newRuntimeStore()
 	runtime, err := NewRuntime(context.Background(), Config{
+		Programs:    []ProgramData{testProgram("program@1", buildProgram(t))},
 		Dispatchers: approvalDispatchers{},
 		Log:         store.log,
 		TaskSecret:  []byte("stable-secret"),
@@ -569,7 +551,6 @@ func TestRuntimeApprovalCycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
 	}
-	addTestProgram(t, runtime, "program@1", buildProgram(t))
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -637,6 +618,7 @@ func TestUnansweredApprovalExpires(t *testing.T) {
 	}
 	store := newRuntimeStore()
 	runtime, err := NewRuntime(context.Background(), Config{
+		Programs:    []ProgramData{testProgram("program@1", buildProgram(t))},
 		Dispatchers: approvalDispatchers{},
 		Log:         store.log,
 		TaskSecret:  []byte("stable-secret"),
@@ -646,7 +628,6 @@ func TestUnansweredApprovalExpires(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
 	}
-	addTestProgram(t, runtime, "program@1", buildProgram(t))
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -784,6 +765,7 @@ func waitForProcessFailed(t *testing.T, runtime *Runtime, processID string) Proc
 func TestRuntimeHardRetryForksFromBeginning(t *testing.T) {
 	store := newRuntimeStore()
 	runtime, err := NewRuntime(context.Background(), Config{
+		Programs:    []ProgramData{testProgram("program@1", buildProgram(t))},
 		Dispatchers: &failThenSucceedDispatchers{},
 		Log:         store.log,
 		TaskSecret:  []byte("stable-secret"),
@@ -791,7 +773,6 @@ func TestRuntimeHardRetryForksFromBeginning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
 	}
-	addTestProgram(t, runtime, "program@1", buildProgram(t))
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -896,6 +877,7 @@ func (d *effectsDispatcher) Dispatch(_ context.Context, _ durable.ProcessContext
 func newEffectsRuntime(t *testing.T, disp *effectsDispatcher, log *memLog) *Runtime {
 	t.Helper()
 	runtime, err := NewRuntime(context.Background(), Config{
+		Programs:    []ProgramData{testProgram("program@1", buildProgram(t))},
 		Dispatchers: effectsDispatchers{d: disp},
 		Log:         log,
 		TaskSecret:  []byte("stable-secret"),
@@ -903,7 +885,6 @@ func newEffectsRuntime(t *testing.T, disp *effectsDispatcher, log *memLog) *Runt
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
 	}
-	addTestProgram(t, runtime, "program@1", buildProgram(t))
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

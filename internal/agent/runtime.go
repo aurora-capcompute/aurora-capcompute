@@ -118,7 +118,11 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 	if maxConcurrent <= 0 {
 		maxConcurrent = defaultMaxConcurrentProcesses
 	}
-	runtime.programs = newProgramRegistry(processMemoryPages)
+	programs, err := newProgramRegistry(ctx, config.Programs)
+	if err != nil {
+		return nil, err
+	}
+	runtime.programs = programs
 	runtime.pool = newPool(baseCtx, maxConcurrent)
 
 	go runtime.sweepLoop()
@@ -148,7 +152,7 @@ func (r *Runtime) sweepLoop() {
 // an unanswered approval expires and the guest gets errno expired — and then
 // wakes every process parked on a task that is no longer pending. The wake is
 // read from state rather than carried by the resolution, so a wake that fails
-// (at boot, before the programs are loaded) happens on a later sweep. The task
+// (the process's program is not loaded) happens on a later sweep. The task
 // store decides each task under its lock, so a human resolving at the deadline
 // and the sweep cannot both win.
 func (r *Runtime) sweepTasks() {
@@ -197,13 +201,6 @@ func (r *Runtime) wake(processID string) error {
 	}
 	_, err := r.Retry(processID, RetryResume)
 	return err
-}
-
-// AddProgram compiles one program and registers it. Programs are added once,
-// before the runtime serves, and stay for its life; a process restored from an
-// earlier life runs only if its program comes back with the same identity.
-func (r *Runtime) AddProgram(ctx context.Context, data ProgramData) error {
-	return r.programs.add(ctx, data)
 }
 
 // CreateSession opens a session. An explicit name is the session's handle
@@ -316,7 +313,7 @@ func (r *Runtime) CreateProcess(sessionID string, input string, spec manifest.Ma
 	if err != nil {
 		return ProcessSnapshot{}, err
 	}
-	program, ok := r.programs.get(ProgramID(spec.Program))
+	program, ok := r.programs[ProgramID(spec.Program)]
 	if !ok {
 		return ProcessSnapshot{}, fmt.Errorf("%w: program %q is not registered", errs.Invalid, spec.Program)
 	}
@@ -407,7 +404,8 @@ func (r *Runtime) ResolveTask(taskID, token string, resolution durable.TaskResol
 	}
 
 	// The resolution stands whether or not the wake works: a process that cannot
-	// resume now (its program is not loaded) is woken by a later sweep.
+	// resume now (its program is not loaded) is woken by the first sweep after a
+	// restart that loads it.
 	if err := r.wake(record.Scope.ProcessID); err != nil {
 		slog.Warn("wake process after task resolution", "process_id", record.Scope.ProcessID, "task_id", record.ID, "error", err)
 	}

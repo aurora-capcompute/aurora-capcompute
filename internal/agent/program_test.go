@@ -1,9 +1,7 @@
 package agent
 
 import (
-	"context"
 	"encoding/json"
-	"testing"
 )
 
 // testProgram is a conversational test program as an app hands it over: string
@@ -16,15 +14,5 @@ func testProgram(id string, wasm []byte) ProgramData {
 		Description: "a test program",
 		Input:       json.RawMessage(`{"type":"string"}`),
 		Output:      json.RawMessage(`{"type":"string"}`),
-	}
-}
-
-// addTestProgram registers one conversational program on a runtime. The runtime
-// boots with none — it reads no filesystem — so every test that runs a process
-// adds its program first.
-func addTestProgram(t *testing.T, runtime *Runtime, id string, wasm []byte) {
-	t.Helper()
-	if err := runtime.AddProgram(context.Background(), testProgram(id, wasm)); err != nil {
-		t.Fatalf("add program %s: %v", id, err)
 	}
 }

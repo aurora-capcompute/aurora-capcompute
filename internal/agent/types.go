@@ -53,10 +53,14 @@ type DispatcherProvider interface {
 // interfaces and orchestration only.
 type Config struct {
 	Dispatchers DispatcherProvider
-	Log         eventlog.Log
-	Now         func() time.Time
-	TaskSecret  []byte
-	TaskTTL     time.Duration
+	// Programs are compiled once, at boot, and stay for the runtime's life. A
+	// process restored from an earlier life runs only if its program comes back
+	// with the same identity.
+	Programs   []ProgramData
+	Log        eventlog.Log
+	Now        func() time.Time
+	TaskSecret []byte
+	TaskTTL    time.Duration
 
 	// MaxConcurrentProcesses bounds simultaneously executing process quanta across the
 	// runtime (0 = a default of 16).
@@ -78,7 +82,7 @@ type Runtime struct {
 	// complete on shutdown to persist final state.
 	baseCtx         context.Context
 	cancel          context.CancelFunc
-	programs        *programRegistry
+	programs        programRegistry
 	pool            *pool
 	taints          *monitor.Taints[durable.ProcessContext]
 	log             eventlog.Log

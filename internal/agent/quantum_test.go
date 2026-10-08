@@ -11,11 +11,12 @@ import (
 	"github.com/aurora-capcompute/capcompute"
 )
 
-// seamRuntime is a runtime with no programs registered.
-func seamRuntime(t *testing.T) *Runtime {
+// seamRuntime is a runtime with only the given programs registered.
+func seamRuntime(t *testing.T, programs ...ProgramData) *Runtime {
 	t.Helper()
 	runtime, err := NewRuntime(context.Background(), Config{
 		Dispatchers: &runtimeDispatchers{},
+		Programs:    programs,
 		Log:         newMemLog(),
 		TaskSecret:  []byte("seam-secret"),
 	})
@@ -36,7 +37,7 @@ func seamRuntime(t *testing.T) *Runtime {
 // whose program is not loaded, or is loaded under a different identity, fails
 // that quantum rather than run under whatever bytes are registered now.
 func TestQuantumRefusesAnUnboundProgram(t *testing.T) {
-	runtime := seamRuntime(t)
+	runtime := seamRuntime(t, testProgram("program@1", buildProgram(t)))
 	cred := durable.ProcessContext{SessionID: "s1", ProcessID: "p1", Revision: 1}
 
 	result := runtime.runQuantum(context.Background(), cred, "unloaded@1", "digest")
@@ -44,7 +45,6 @@ func TestQuantumRefusesAnUnboundProgram(t *testing.T) {
 		t.Fatalf("quantum of an unloaded program = %+v, want a failed conflict", result)
 	}
 
-	addTestProgram(t, runtime, "program@1", buildProgram(t))
 	result = runtime.runQuantum(context.Background(), cred, "program@1", "stale")
 	if result.status != capcompute.ResumeFailed || !errors.Is(result.err, errs.Conflict) {
 		t.Fatalf("quantum under a stale digest = %+v, want a failed conflict", result)

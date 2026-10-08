@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"sync"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/errs"
 	"github.com/aurora-capcompute/capcompute"
@@ -83,40 +82,29 @@ func (p compiledProgram) validate(what string, schema *jsonschema.Schema, text s
 	return nil
 }
 
-// programRegistry holds the compiled programs a runtime can run. It never calls
-// out while it holds its lock, so a caller may consult it under r.mu.
-type programRegistry struct {
-	memoryPages uint32
+// programRegistry holds the compiled programs a runtime can run. It is built
+// once, before the runtime serves, and never changes, so it needs no lock.
+type programRegistry map[ProgramID]compiledProgram
 
-	mu       sync.RWMutex
-	programs map[ProgramID]compiledProgram
-}
-
-func newProgramRegistry(memoryPages uint32) *programRegistry {
-	return &programRegistry{memoryPages: memoryPages, programs: make(map[ProgramID]compiledProgram)}
-}
-
-// add compiles a program and registers it under a free id.
-func (r *programRegistry) add(ctx context.Context, data ProgramData) error {
-	// Compiling is the slow part and touches nothing shared, so it happens before
-	// the lock: a registration must not hold every spawn for the length of a wasm
-	// compile. The id is claimed under the lock below, where it is decided.
-	program, err := r.compile(ctx, data)
-	if err != nil {
-		return err
+// newProgramRegistry compiles every program. An id may appear once.
+func newProgramRegistry(ctx context.Context, programs []ProgramData) (programRegistry, error) {
+	registry := make(programRegistry, len(programs))
+	for _, data := range programs {
+		if _, taken := registry[data.ID]; taken {
+			registry.close(ctx)
+			return nil, fmt.Errorf("%w: program %q is listed twice", errs.Invalid, data.ID)
+		}
+		program, err := compileProgram(ctx, data)
+		if err != nil {
+			registry.close(ctx)
+			return nil, err
+		}
+		registry[data.ID] = program
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if existing, taken := r.programs[data.ID]; taken {
-		_ = program.image.Close(ctx)
-		return fmt.Errorf("%w: program %q is already registered with identity %s",
-			errs.Conflict, data.ID, existing.Digest)
-	}
-	r.programs[data.ID] = program
-	return nil
+	return registry, nil
 }
 
-func (r *programRegistry) compile(ctx context.Context, data ProgramData) (compiledProgram, error) {
+func compileProgram(ctx context.Context, data ProgramData) (compiledProgram, error) {
 	description := strings.TrimSpace(data.Description)
 	if description == "" {
 		return compiledProgram{}, fmt.Errorf("%w: program %q interface: a description is required", errs.Invalid, data.ID)
@@ -135,7 +123,7 @@ func (r *programRegistry) compile(ctx context.Context, data ProgramData) (compil
 			Wasm: []extism.Wasm{extism.WasmData{Data: data.SourceCode, Hash: hex.EncodeToString(wasmSum[:]), Name: data.ID.String()}},
 		},
 		PluginConfig:   extism.PluginConfig{EnableWasi: true},
-		MaxMemoryPages: r.memoryPages,
+		MaxMemoryPages: processMemoryPages,
 	})
 	if err != nil {
 		return compiledProgram{}, fmt.Errorf("compile program %q: %w", data.ID, err)
@@ -183,18 +171,11 @@ func compileSchema(what string, document json.RawMessage) (json.RawMessage, *jso
 	return json.RawMessage(compact.Bytes()), schema, nil
 }
 
-func (r *programRegistry) get(id ProgramID) (compiledProgram, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	program, ok := r.programs[id]
-	return program, ok
-}
-
 // bound returns the program a process was created from, and refuses when the
 // registry no longer holds that exact identity: a process never runs under
 // changed code.
-func (r *programRegistry) bound(id ProgramID, digest string) (compiledProgram, error) {
-	program, ok := r.get(id)
+func (r programRegistry) bound(id ProgramID, digest string) (compiledProgram, error) {
+	program, ok := r[id]
 	if !ok {
 		return compiledProgram{}, fmt.Errorf("%w: program %q is not loaded", errs.Conflict, id)
 	}
@@ -206,11 +187,9 @@ func (r *programRegistry) bound(id ProgramID, digest string) (compiledProgram, e
 	return program, nil
 }
 
-func (r *programRegistry) list() []Program {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	out := make([]Program, 0, len(r.programs))
-	for _, program := range r.programs {
+func (r programRegistry) list() []Program {
+	out := make([]Program, 0, len(r))
+	for _, program := range r {
 		out = append(out, program.Program)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
@@ -218,15 +197,12 @@ func (r *programRegistry) list() []Program {
 }
 
 // close releases every image.
-func (r *programRegistry) close(ctx context.Context) []error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+func (r programRegistry) close(ctx context.Context) []error {
 	var failures []error
-	for id, program := range r.programs {
+	for _, program := range r {
 		if err := program.image.Close(ctx); err != nil {
 			failures = append(failures, err)
 		}
-		delete(r.programs, id)
 	}
 	return failures
 }
