@@ -23,9 +23,9 @@ func (p *vanishedToolDispatchers) ValidateConfig(toolType string, settings json.
 }
 
 // A historical run whose manifest names a decommissioned tool type must not
-// prevent the runtime from booting: it is quarantined — restored verbatim and
-// visible — and a retry fails with the provider's error instead of running.
-func TestRestoreQuarantinesStaleManifests(t *testing.T) {
+// prevent the runtime from booting: it is restored verbatim and visible, and a
+// retry fails with the provider's error instead of running.
+func TestRestoreKeepsARunWhoseDriverIsGone(t *testing.T) {
 	store := newRuntimeStore()
 	now := time.Now().UTC().Add(-time.Hour)
 	store.seed(
@@ -55,20 +55,20 @@ func TestRestoreQuarantinesStaleManifests(t *testing.T) {
 		_ = runtime.Close(ctx)
 	})
 
-	// The quarantined run is visible with its manifest intact.
+	// The run is visible with its manifest intact.
 	snap, err := runtime.GetProcess("run_old")
 	if err != nil {
-		t.Fatalf("get quarantined run: %v", err)
+		t.Fatalf("get run: %v", err)
 	}
 	if len(snap.Manifest.Syscalls) != 1 || snap.Manifest.Syscalls[0].Syscall != "core.gone" {
-		t.Fatalf("quarantined manifest = %+v", snap.Manifest)
+		t.Fatalf("manifest = %+v", snap.Manifest)
 	}
 
 	// Re-driving it fails at manifest/driver build, not silently.
 	if _, err := runtime.Retry("run_old", RetryRestart); err == nil {
 		proc := waitForProcessFailed(t, runtime, "run_old")
 		if proc.Error == "" {
-			t.Fatal("retried quarantined run finished without an error")
+			t.Fatal("retried run finished without an error")
 		}
 	}
 }

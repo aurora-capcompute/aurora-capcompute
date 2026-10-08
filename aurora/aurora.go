@@ -17,13 +17,8 @@ import (
 	"context"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 )
 
 func NewRuntime(ctx context.Context, config Config) (Runtime, error) {
 	return agent.NewRuntime(ctx, config)
-}
-
-func ValidateManifest(m Manifest, provider DispatcherProvider) (Manifest, error) {
-	return manifest.Validate(m, provider)
 }

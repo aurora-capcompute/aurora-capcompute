@@ -9,7 +9,6 @@ import (
 	"sort"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 )
 
 // Restore: rebuild in-memory state by folding each session's event stream.
@@ -71,22 +70,8 @@ func (r *Runtime) restoreSession(proj durable.Projection, journals map[string]ma
 	sort.Slice(procs, func(i, j int) bool { return procs[i].CreatedAt.Before(procs[j].CreatedAt) })
 
 	for _, sr := range procs {
-		// Quarantine, never refuse to boot: a historical process whose manifest no
-		// longer validates against the compiled driver set (a decommissioned
-		// driver type) is restored verbatim — visible, auditable — and any later
-		// execution attempt fails with the provider's error. Dispatcher
-		// upgrades thereby follow the same drain-and-deprecate story as
-		// program upgrades.
-		em, err := manifest.Validate(sr.Manifest, r.dispatchers)
-		if err != nil {
-			slog.Warn("process manifest no longer validates against the compiled driver set; quarantining",
-				"process_id", sr.ID, "session_id", sr.SessionID, "err", err)
-			em = sr.Manifest
-		}
-		// Processes are always restored regardless of program registration state:
-		// programs are added after restore via AddProgram, so r.programs is empty
-		// here. If the program is unavailable when execution is attempted, execute()
-		// will fail the process cleanly at that point (program == nil check).
+		// The manifest was validated when the process was created. A driver
+		// removed since then fails the process when it next runs, not the boot.
 		status := sr.Status
 		if status == durable.ProcessQueued || status == durable.ProcessRunning || status == durable.ProcessStopping {
 			status = durable.ProcessInterrupted
@@ -104,14 +89,11 @@ func (r *Runtime) restoreSession(proj durable.Projection, journals map[string]ma
 			completedAt:  copyTime(sr.CompletedAt),
 			answer:       sr.Answer,
 			err:          sr.Error,
-			manifest:     em.Clone(),
+			manifest:     sr.Manifest,
 			digest:       sr.ProgramDigest,
 			labels:       append([]string(nil), sr.Labels...),
 			forkOffset:   sr.ForkOffset,
 			abortRetries: sr.AbortRetries,
-		}
-		if proc.revision == 0 {
-			proc.revision = 1
 		}
 		if j := journals[proc.id][proc.revision]; j != nil {
 			proc.journal = j

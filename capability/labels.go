@@ -43,26 +43,3 @@ func NormalizeLabels(what string, labels []string) ([]string, error) {
 	sort.Strings(out)
 	return out, nil
 }
-
-// BlockedBy returns the sorted intersection of a call's forbidden labels and the
-// process's accumulated taint (Taint) — the labels a self-classifying driver
-// must refuse to let flow into this operation. Empty means the sink is clear.
-// A driver checks this before its side effect; the runtime's flow monitor performs
-// the same check for any Forbid its entry declares.
-func BlockedBy(taint, forbid []string) []string {
-	if len(taint) == 0 || len(forbid) == 0 {
-		return nil
-	}
-	has := make(map[string]struct{}, len(taint))
-	for _, label := range taint {
-		has[label] = struct{}{}
-	}
-	var blocked []string
-	for _, label := range forbid {
-		if _, ok := has[label]; ok {
-			blocked = append(blocked, label)
-		}
-	}
-	sort.Strings(blocked)
-	return blocked
-}

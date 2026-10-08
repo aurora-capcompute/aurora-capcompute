@@ -109,7 +109,7 @@ func (r *programRegistry) add(ctx context.Context, data ProgramData) error {
 	defer r.mu.Unlock()
 	if existing, taken := r.programs[data.ID]; taken {
 		_ = program.image.Close(ctx)
-		return fmt.Errorf("%w: program %q is already registered with identity %s; remove it first",
+		return fmt.Errorf("%w: program %q is already registered with identity %s",
 			errs.Conflict, data.ID, existing.Digest)
 	}
 	r.programs[data.ID] = program
@@ -200,7 +200,7 @@ func (r *programRegistry) bound(id ProgramID, digest string) (compiledProgram, e
 	}
 	if program.Digest != digest {
 		return compiledProgram{}, fmt.Errorf(
-			"%w: program %q changed (loaded %s, process bound to %s): a process is immutable — its code and interface are fixed; spawn a new process from the new program, or kill this one to settle its effects",
+			"%w: program %q changed (loaded %s, process bound to %s): a process is immutable — its code and interface are fixed; spawn a new process from the new program",
 			errs.Conflict, id, program.Digest, digest)
 	}
 	return program, nil

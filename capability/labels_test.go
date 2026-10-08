@@ -17,15 +17,3 @@ func TestNormalizeLabels(t *testing.T) {
 		t.Fatal("expected the reserved syscall: prefix to be rejected")
 	}
 }
-
-func TestBlockedBy(t *testing.T) {
-	if got := BlockedBy([]string{"untrusted_web", "pii"}, []string{"secret", "untrusted_web"}); len(got) != 1 || got[0] != "untrusted_web" {
-		t.Fatalf("got %v, want [untrusted_web]", got)
-	}
-	if got := BlockedBy(nil, []string{"secret"}); got != nil {
-		t.Fatalf("no taint should block nothing, got %v", got)
-	}
-	if got := BlockedBy([]string{"secret"}, nil); got != nil {
-		t.Fatalf("no forbid should block nothing, got %v", got)
-	}
-}
