@@ -65,12 +65,12 @@ type Config struct {
 	// MaxConcurrentProcesses bounds simultaneously executing process quanta across the
 	// runtime (0 = a default of 16).
 	MaxConcurrentProcesses int
-	// QuantumDeadline bounds one guest quantum's wall-clock time (0 = a default
-	// of 2 minutes). A guest still running at the deadline is stopped, so an
-	// infinite loop cannot hold a slot forever. Syscalls that wait on the outside
-	// world yield (they do not spin), so this bounds only a guest's own
-	// uninterrupted compute between yields; a process stopped by the deadline is
-	// interrupted, not failed, and re-drives deterministically by replay.
+	// QuantumDeadline bounds one quantum's wall-clock time (0 = a default of 30
+	// minutes). A quantum runs until the guest yields or ends, and it includes
+	// the driver calls the guest makes, so this bounds a whole run between two
+	// yields, not only the guest's own compute. A quantum still running at the
+	// deadline is stopped, so an infinite loop cannot hold a slot forever. The
+	// process is interrupted, not failed: a retry resumes it by replay.
 	QuantumDeadline time.Duration
 }
 

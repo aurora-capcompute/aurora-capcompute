@@ -72,7 +72,7 @@ read, _ := runtime.GetSession(sess.ID)                     // journals and tasks
 | `Now` | `time.Now` | The clock |
 | `TaskTTL` | 24h | When an unanswered approval expires |
 | `MaxConcurrentProcesses` | 16 | Worker pool size |
-| `QuantumDeadline` | 2 min | Wall-clock bound on one quantum |
+| `QuantumDeadline` | 30 min | Wall-clock bound on one quantum, including its driver calls |
 
 Fixed bounds: 256 MiB of guest memory, and at most 10 aborts of a section. The
 manifest version is 4.

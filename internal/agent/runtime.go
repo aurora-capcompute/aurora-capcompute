@@ -35,9 +35,10 @@ const (
 	// processMemoryPages caps a guest's linear memory at 256 MiB, so no single
 	// guest can walk the runtime toward the 4 GiB wasm ceiling.
 	processMemoryPages = 4096
-	// defaultQuantumDeadline stops a guest that spins without yielding after two
-	// minutes of wall-clock.
-	defaultQuantumDeadline = 2 * time.Minute
+	// defaultQuantumDeadline stops a quantum after 30 minutes of wall-clock. A
+	// quantum includes the driver calls it makes, so the bound must hold an agent
+	// run of many LLM and tool calls between two yields.
+	defaultQuantumDeadline = 30 * time.Minute
 	// maxAbortRetries bounds how many times a process may abort and re-run the
 	// section it abandoned before the retry is refused.
 	maxAbortRetries = 10
