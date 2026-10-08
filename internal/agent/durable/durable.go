@@ -24,7 +24,6 @@ const (
 	ProcessQueued      ProcessStatus = "queued"
 	ProcessRunning     ProcessStatus = "running"
 	ProcessStopping    ProcessStatus = "stopping"
-	ProcessYielded     ProcessStatus = "yielded"
 	ProcessWaitingTask ProcessStatus = "waiting_for_task"
 	ProcessInterrupted ProcessStatus = "interrupted"
 	ProcessCompleted   ProcessStatus = "completed"

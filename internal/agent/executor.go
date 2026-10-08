@@ -67,11 +67,9 @@ func (r *Runtime) execute(processID string) {
 		}
 		r.finish(processID, durable.ProcessCompleted, answer, nil)
 	case capcompute.ResumeYielded:
-		if hasPendingTask(r.tasks.List(processID)) {
-			r.finish(processID, durable.ProcessWaitingTask, "", nil)
-		} else {
-			r.finish(processID, durable.ProcessYielded, "", nil)
-		}
+		// Only the task layer yields, so the process waits on a task. If the
+		// task was settled before this point, the sweep wakes the process.
+		r.finish(processID, durable.ProcessWaitingTask, "", nil)
 	case capcompute.ResumeStopped:
 		r.mu.Lock()
 		closing := r.closed
@@ -168,7 +166,7 @@ func (r *Runtime) finishLocked(proc *processState, status durable.ProcessStatus,
 	}
 	session := r.sessions[proc.sessionID]
 	if session != nil {
-		if status != durable.ProcessYielded && status != durable.ProcessWaitingTask && session.activeProcessID == proc.id {
+		if status != durable.ProcessWaitingTask && session.activeProcessID == proc.id {
 			session.activeProcessID = ""
 		}
 		session.updatedAt = now

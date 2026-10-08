@@ -143,22 +143,6 @@ func (r *Runtime) restoreSession(proj durable.Projection, journals map[string]ma
 			}
 		}
 	}
-	// A yielded process parked on no task, so nothing will wake it. Fold it to
-	// interrupted, the re-drivable status, so recovery resumes it like any
-	// cut-off process. A process waiting on a task the crash left resolved is
-	// woken by the task sweep.
-	for _, processID := range session.processIDs {
-		proc := r.processes[processID]
-		if proc == nil || proc.status != durable.ProcessYielded {
-			continue
-		}
-		slog.Info("yielded process lost its wakeup in a crash; folding to interrupted", "process_id", proc.id)
-		proc.status = durable.ProcessInterrupted
-		if err := r.appendProcess(proc); err != nil {
-			return err
-		}
-	}
-
 	if session.activeProcessID != "" && r.processes[session.activeProcessID] == nil {
 		slog.Info("clearing active process from session: the process was not restored",
 			"session_id", session.id, "process_id", session.activeProcessID)

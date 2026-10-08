@@ -159,7 +159,7 @@ func Fold(events []eventlog.Event) (Projection, error) {
 // neither completed, failed, nor stopped, so it can still make progress.
 func isActiveStatus(status ProcessStatus) bool {
 	switch status {
-	case ProcessQueued, ProcessRunning, ProcessStopping, ProcessYielded, ProcessWaitingTask, ProcessInterrupted:
+	case ProcessQueued, ProcessRunning, ProcessStopping, ProcessWaitingTask, ProcessInterrupted:
 		return true
 	default:
 		return false

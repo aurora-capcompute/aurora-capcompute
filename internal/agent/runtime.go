@@ -429,7 +429,7 @@ func (r *Runtime) Stop(processID string) (ProcessSnapshot, error) {
 		if proc.stop != nil {
 			proc.stop()
 		}
-	case durable.ProcessYielded, durable.ProcessWaitingTask:
+	case durable.ProcessWaitingTask:
 		// A parked process stops where it stands. Its journal is the record of
 		// what ran — nothing is undone — so an open savepoint section is left
 		// open, and a later retry resumes or restarts from it.
@@ -465,7 +465,7 @@ func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, erro
 		return ProcessSnapshot{}, err
 	}
 	switch proc.status {
-	case durable.ProcessYielded, durable.ProcessWaitingTask, durable.ProcessStopped, durable.ProcessFailed, durable.ProcessInterrupted:
+	case durable.ProcessWaitingTask, durable.ProcessStopped, durable.ProcessFailed, durable.ProcessInterrupted:
 	case durable.ProcessCompleted:
 		// A completed process has nothing to resume, but it can be restarted from
 		// scratch (re-run as a new copy-on-write revision).
@@ -495,7 +495,7 @@ func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, erro
 		// the log as an audited, closed revision; nothing it did is undone.
 		proc.err = ""
 		r.forkJournalLocked(proc, 0)
-	} else if proc.status == durable.ProcessYielded || proc.status == durable.ProcessWaitingTask {
+	} else if proc.status == durable.ProcessWaitingTask {
 		// Resume from a park: no fork. The journal's open intent at the tail is
 		// re-driven by replay, and a resolved task's stored authorization is
 		// injected by the task layer.

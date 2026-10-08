@@ -34,7 +34,6 @@ const (
 	ProcessQueued      = durable.ProcessQueued
 	ProcessRunning     = durable.ProcessRunning
 	ProcessStopping    = durable.ProcessStopping
-	ProcessYielded     = durable.ProcessYielded
 	ProcessWaitingTask = durable.ProcessWaitingTask
 	ProcessInterrupted = durable.ProcessInterrupted
 	ProcessCompleted   = durable.ProcessCompleted
