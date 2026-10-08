@@ -48,3 +48,19 @@ func TestApprovalPromptMarksCutArguments(t *testing.T) {
 		t.Fatalf("prompt is %d bytes and lacks the cut marker: %.120q…", len(prompt), prompt)
 	}
 }
+
+// An entry whose arguments do not show what will run renders the call itself.
+func TestApprovalPromptUsesTheEntrysRendering(t *testing.T) {
+	guarded := entry("core.command", "operation", "list")
+	guarded.RequireApproval = true
+	guarded.Prompt = func(sys.Syscall) string { return `run: ["/bin/ls","/srv"]` }
+	table := NewTable()
+	if err := table.Add(Family{Entries: []Entry{guarded}}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	call := sys.Syscall{Name: "core.command", Args: json.RawMessage(`{"operation":"list"}`)}
+	result, _ := NewDispatcher[string](table).Dispatch(context.Background(), "p1", call, sys.Authorization{})
+	if prompt := result.Message(); !strings.Contains(prompt, `run: ["/bin/ls","/srv"]`) || strings.Contains(prompt, "args:") {
+		t.Fatalf("prompt = %q, want the entry's rendering in place of the arguments", prompt)
+	}
+}

@@ -86,7 +86,10 @@ type Entry struct {
 	// RequireApproval parks the call until a human resolves it. It is enforced
 	// below the replay tape, so the yield is journaled exactly once.
 	RequireApproval bool
-	Handler         Handler
+	// Prompt renders a call for the human who approves it, when the arguments
+	// alone do not show what will run. Nil quotes the arguments.
+	Prompt  func(sys.Syscall) string
+	Handler Handler
 }
 
 // Family is everything one contributor has to say about one syscall: the cases
@@ -488,26 +491,32 @@ func (d *Dispatcher[K]) Dispatch(ctx context.Context, _ K, call sys.Syscall, aut
 // summary; the task's syscall always carries the complete arguments.
 const approvalPromptArgsLimit = 4096
 
-// approvalPrompt is what a human is asked to approve: the operation and the
-// exact arguments it would run with, so an approval is never given blind.
-// Arguments past the cap are cut with a marker that says so.
+// approvalPrompt is what a human is asked to approve: the operation and what it
+// would run with — the entry's own rendering, else the exact arguments — so an
+// approval is never given blind. Detail past the cap is cut with a marker that
+// says so.
 func approvalPrompt(entry Entry, call sys.Syscall) string {
 	prompt := fmt.Sprintf("Approve %s", entry.Key)
 	if entry.Description != "" {
 		prompt += ": " + entry.Description
 	}
-	args := compactArgs(call.Args)
-	if args == "" {
+	var detail string
+	if entry.Prompt != nil {
+		detail = entry.Prompt(call)
+	} else if args := compactArgs(call.Args); args != "" {
+		detail = "args: " + args
+	}
+	if detail == "" {
 		return prompt
 	}
-	if len(args) > approvalPromptArgsLimit {
+	if len(detail) > approvalPromptArgsLimit {
 		cut := approvalPromptArgsLimit
-		for cut > 0 && !utf8.RuneStart(args[cut]) {
+		for cut > 0 && !utf8.RuneStart(detail[cut]) {
 			cut--
 		}
-		args = fmt.Sprintf("%s… (%d more bytes; the task's syscall holds them all)", args[:cut], len(args)-cut)
+		detail = fmt.Sprintf("%s… (%d more bytes; the task's syscall holds them all)", detail[:cut], len(detail)-cut)
 	}
-	return prompt + "\nargs: " + args
+	return prompt + "\n" + detail
 }
 
 // compactArgs renders call arguments on one line; arguments that are not JSON
