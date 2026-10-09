@@ -31,9 +31,7 @@ type timerRequest struct {
 }
 
 type timerDispatcher struct {
-	next        sys.Dispatcher[durable.ProcessContext]
-	maxDuration time.Duration
-	hidden      bool
+	next sys.Dispatcher[durable.ProcessContext]
 }
 
 func newTimerDispatcher(next sys.Dispatcher[durable.ProcessContext], grant manifest.Syscall, table *capability.Table) (*timerDispatcher, error) {
@@ -47,21 +45,23 @@ func newTimerDispatcher(next sys.Dispatcher[durable.ProcessContext], grant manif
 	if maxDuration <= 0 {
 		maxDuration = defaultMaxTimer
 	}
-	// Declared where it is built, so the bound the guest is told about is the
-	// bound this dispatcher enforces.
+	// Declared where it is built: the bound the guest is told about is the
+	// bound the Validator enforces, through the schema.
 	err := table.Reserve(capability.Descriptor{
 		Name: manifest.TimerSyscall,
 		Description: fmt.Sprintf(
 			"Set a relative timer and be replayed when it fires. The process pauses until the duration elapses, then continues. Maximum %s.",
 			maxDuration,
 		),
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"duration_seconds":{"type":"integer","minimum":1},"label":{"type":"string"}},"required":["duration_seconds"],"additionalProperties":false}`),
-		Hidden:      grant.Hidden,
+		InputSchema: json.RawMessage(fmt.Sprintf(
+			`{"type":"object","properties":{"duration_seconds":{"type":"integer","minimum":1,"maximum":%d},"label":{"type":"string"}},"required":["duration_seconds"],"additionalProperties":false}`,
+			int64(maxDuration/time.Second))),
+		Hidden: grant.Hidden,
 	})
 	if err != nil {
 		return nil, err
 	}
-	return &timerDispatcher{next: next, maxDuration: maxDuration, hidden: grant.Hidden}, nil
+	return &timerDispatcher{next: next}, nil
 }
 
 // timerFireAt is when a timer task fires: its creation plus the duration the
@@ -93,8 +93,8 @@ func timerTaskRequest(record durable.TaskRecord) (timerRequest, bool) {
 	return request, true
 }
 
-// Dispatch validates the request and yields a durable task. A valid call
-// always yields; invalid input fails immediately so the agent gets feedback.
+// Dispatch yields a durable task. The Validator already held the request to the
+// schema, including the maximum duration, so a call that reaches here is valid.
 func (t *timerDispatcher) Dispatch(ctx context.Context, cred durable.ProcessContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	if syscall.Name != manifest.TimerSyscall {
 		return t.next.Dispatch(ctx, cred, syscall, auth)
@@ -102,16 +102,6 @@ func (t *timerDispatcher) Dispatch(ctx context.Context, cred durable.ProcessCont
 	var request timerRequest
 	if err := json.Unmarshal(syscall.Args, &request); err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode sys.timer request: %v", err)), nil
-	}
-	if request.DurationSeconds <= 0 {
-		return sys.FailCode(sys.ErrnoInvalidArgs, "duration_seconds must be positive"), nil
-	}
-	// Bound the seconds BEFORE converting to a Duration: DurationSeconds is an
-	// int64 and `* time.Second` (1e9) overflows to a negative Duration past ~9.2e9
-	// seconds, which would then slip past a post-conversion `> maxDuration` check.
-	maxSeconds := int64(t.maxDuration / time.Second)
-	if request.DurationSeconds > maxSeconds {
-		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("duration_seconds must be at most %d", maxSeconds)), nil
 	}
 	duration := time.Duration(request.DurationSeconds) * time.Second
 	if request.Label != "" {

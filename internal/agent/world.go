@@ -36,7 +36,7 @@ func newWorldDispatcher(next sys.Dispatcher[durable.ProcessContext], now func() 
 		},
 		{
 			Name:        sys.SyscallRandom,
-			Description: "draw random bytes (journaled: replay returns the recorded bytes)",
+			Description: "draw random bytes, 16 by default (journaled: replay returns the recorded bytes)",
 			InputSchema: json.RawMessage(`{"type":"object","properties":{"bytes":{"type":"integer","minimum":1,"maximum":64}},"additionalProperties":false}`),
 			Hidden:      true,
 		},
@@ -49,39 +49,25 @@ func newWorldDispatcher(next sys.Dispatcher[durable.ProcessContext], now func() 
 }
 
 type randomArgs struct {
-	// Bytes is how much entropy to draw (default 16, max 64).
+	// Bytes is how much entropy to draw. The schema bounds it to 1..64.
 	Bytes int `json:"bytes"`
 }
 
 func (d *worldDispatcher) Dispatch(ctx context.Context, cred durable.ProcessContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	switch syscall.Name {
 	case sys.SyscallNow:
-		payload, err := json.Marshal(map[string]int64{"unix_ms": d.now().UTC().UnixMilli()})
-		if err != nil {
-			return sys.Fail(err.Error()), nil
-		}
+		payload, _ := json.Marshal(map[string]int64{"unix_ms": d.now().UTC().UnixMilli()})
 		return sys.Result(payload), nil
 	case sys.SyscallRandom:
 		args := randomArgs{Bytes: 16}
-		if len(syscall.Args) > 0 {
-			if err := json.Unmarshal(syscall.Args, &args); err != nil {
-				return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode sys.random: %v", err)), nil
-			}
-		}
-		if args.Bytes <= 0 {
-			args.Bytes = 16
-		}
-		if args.Bytes > 64 {
-			return sys.FailCode(sys.ErrnoInvalidArgs, "sys.random: at most 64 bytes per call"), nil
+		if err := json.Unmarshal(syscall.Args, &args); err != nil {
+			return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode sys.random: %v", err)), nil
 		}
 		buf := make([]byte, args.Bytes)
 		if _, err := io.ReadFull(d.rand, buf); err != nil {
 			return sys.Fail(fmt.Sprintf("sys.random: %v", err)), nil
 		}
-		payload, err := json.Marshal(map[string]string{"hex": hex.EncodeToString(buf)})
-		if err != nil {
-			return sys.Fail(err.Error()), nil
-		}
+		payload, _ := json.Marshal(map[string]string{"hex": hex.EncodeToString(buf)})
 		return sys.Result(payload), nil
 	default:
 		return d.next.Dispatch(ctx, cred, syscall, auth)

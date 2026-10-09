@@ -73,9 +73,6 @@ func (r *Runtime) sessionSnapshotLocked(session *sessionState) SessionSnapshot {
 	procs := make([]ProcessLog, 0, len(session.processIDs))
 	for _, processID := range session.processIDs {
 		proc := r.processes[processID]
-		if proc == nil {
-			continue
-		}
 		records := r.tasks.List(proc.id)
 		tasks := make([]TaskSnapshot, 0, len(records))
 		for _, record := range records {
@@ -95,10 +92,6 @@ func (r *Runtime) sessionSnapshotLocked(session *sessionState) SessionSnapshot {
 }
 
 func (r *Runtime) processSnapshotLocked(proc *processState) ProcessSnapshot {
-	journalLength := 0
-	if proc.journal != nil {
-		journalLength = proc.journal.Length()
-	}
 	return ProcessSnapshot{
 		ID:            proc.id,
 		SessionID:     proc.sessionID,
@@ -109,7 +102,7 @@ func (r *Runtime) processSnapshotLocked(proc *processState) ProcessSnapshot {
 		Answer:        proc.answer,
 		Error:         proc.err,
 		Labels:        append([]string(nil), proc.labels...),
-		JournalLength: journalLength,
+		JournalLength: proc.journal.Length(),
 		CreatedAt:     proc.createdAt,
 		UpdatedAt:     proc.updatedAt,
 		StartedAt:     copyTime(proc.startedAt),

@@ -1,34 +1,33 @@
 package agent
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
-
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
 // Capability-journal events. Each journal record (an intent or a completion)
-// is a syscall.recorded event carrying the record verbatim plus the revision
-// that produced it. The fork structure (which revision shared which prefix) is
-// fully derivable from the flat set of (position, revision) pairs — no
-// separate fork event is needed.
+// is a syscall.recorded event carrying the record verbatim, stamped with the
+// revision that wrote it. The fork structure (which revision shared which
+// prefix) is fully derivable from the flat set of (position, revision) pairs —
+// no separate fork event is needed.
 const evSyscall = "syscall.recorded"
 
 type syscallRecordData struct {
-	Revision uint64           `json:"revision"` // mirrors ev.Rev for self-documentation
-	Record   journaled.Record `json:"record"`
+	Record journaled.Record `json:"record"`
 }
 
-// processHistory accumulates every (position, revision, record) triple written
-// for a process. It is the only copy of the records: every revision of the
+// processHistory holds every record written for a process, in every revision,
+// by position. It is the only copy of the records: every revision of the
 // process reads from it, with no parent-pointer chain.
 //
 // That works because revisions form a line. Each fork starts from the current
@@ -37,21 +36,17 @@ type syscallRecordData struct {
 // wrote there.
 type processHistory struct {
 	mu    sync.Mutex
-	byPos map[int][]histEntry
-}
-
-type histEntry struct {
-	revision uint64
-	record   journaled.Record
+	byPos map[int][]journaled.Record
 }
 
 func newProcessHistory() *processHistory {
-	return &processHistory{byPos: make(map[int][]histEntry)}
+	return &processHistory{byPos: make(map[int][]journaled.Record)}
 }
 
-func (h *processHistory) add(position int, revision uint64, rec journaled.Record) {
+// add keeps a record that its revision already stamped.
+func (h *processHistory) add(rec journaled.Record) {
 	h.mu.Lock()
-	h.byPos[position] = append(h.byPos[position], histEntry{revision: revision, record: rec})
+	h.byPos[rec.Position] = append(h.byPos[rec.Position], rec)
 	h.mu.Unlock()
 }
 
@@ -59,17 +54,16 @@ func (h *processHistory) add(position int, revision uint64, rec journaled.Record
 func (h *processHistory) getAt(position int, maxRev uint64) (journaled.Record, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	var best *histEntry
-	for i := range h.byPos[position] {
-		e := &h.byPos[position][i]
-		if e.revision <= maxRev && (best == nil || e.revision > best.revision) {
-			best = e
+	var best *journaled.Record
+	for i, rec := range h.byPos[position] {
+		if rec.Revision <= maxRev && (best == nil || rec.Revision > best.Revision) {
+			best = &h.byPos[position][i]
 		}
 	}
 	if best == nil {
 		return journaled.Record{}, false
 	}
-	return copyRecord(best.record), true
+	return copyRecord(*best), true
 }
 
 // length is one past the last record a revision wrote, or its fork offset when
@@ -79,8 +73,8 @@ func (h *processHistory) length(revision uint64, forkOffset int) int {
 	defer h.mu.Unlock()
 	length := forkOffset
 	for position, written := range h.byPos {
-		for _, e := range written {
-			if e.revision == revision && position >= length {
+		for _, rec := range written {
+			if rec.Revision == revision && position >= length {
 				length = position + 1
 			}
 		}
@@ -99,28 +93,25 @@ func (h *processHistory) entries() []JournalEntry {
 	entries := []JournalEntry{}
 	for position, written := range h.byPos {
 		for _, intent := range written {
-			if intent.record.Syscall == nil {
+			if intent.Kind != journaled.KindIntent {
 				continue // completions fold into their intent's entry
 			}
 			entry := JournalEntry{
 				Position: position,
-				Revision: intent.revision,
-				Syscall:  intent.record.Syscall.Copy(),
+				Revision: intent.Revision,
+				Syscall:  intent.Syscall.Copy(),
 				Outcome:  JournalOutcome{Status: sys.StatusYield, Message: "in flight"},
 			}
 			for _, completion := range h.byPos[position+1] {
-				if completion.revision == intent.revision && completion.record.Result != nil {
-					entry.Outcome = encodeOutcome(completion.record.Result.Copy())
+				if completion.Revision == intent.Revision {
+					entry.Outcome = encodeOutcome(completion.Result.Copy())
 				}
 			}
 			entries = append(entries, entry)
 		}
 	}
-	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].Position != entries[j].Position {
-			return entries[i].Position < entries[j].Position
-		}
-		return entries[i].Revision < entries[j].Revision
+	slices.SortFunc(entries, func(a, b JournalEntry) int {
+		return cmp.Or(cmp.Compare(a.Position, b.Position), cmp.Compare(a.Revision, b.Revision))
 	})
 	return entries
 }
@@ -176,14 +167,12 @@ func (j *logJournal) Length() int {
 }
 
 func (j *logJournal) Load(index int) (journaled.Record, error) {
-	if index >= j.Length() {
-		return journaled.Record{}, fmt.Errorf("journal record not found at index %d", index)
+	if index < j.Length() {
+		if rec, ok := j.history.getAt(index, j.rev); ok {
+			return rec, nil
+		}
 	}
-	rec, ok := j.history.getAt(index, j.rev)
-	if !ok {
-		return journaled.Record{}, fmt.Errorf("journal record not found at index %d", index)
-	}
-	return rec, nil
+	return journaled.Record{}, fmt.Errorf("journal record not found at index %d", index)
 }
 
 func (j *logJournal) Append(rec journaled.Record) error {
@@ -196,10 +185,7 @@ func (j *logJournal) Append(rec journaled.Record) error {
 	// Stamp the attempt: this revision wrote the record. Records served from
 	// the shared prefix keep the revision that first wrote them.
 	stored.Revision = j.rev
-	ev, err := durable.EncodeEvent(evSyscall, j.proc, j.rev, j.now(), syscallRecordData{
-		Revision: j.rev,
-		Record:   stored,
-	})
+	ev, err := durable.EncodeEvent(evSyscall, j.proc, j.rev, j.now(), syscallRecordData{Record: stored})
 	if err != nil {
 		return err
 	}
@@ -208,58 +194,37 @@ func (j *logJournal) Append(rec journaled.Record) error {
 	}
 	// The record is in the history before the length admits it, so a Load
 	// below Length always finds it.
-	j.history.add(rec.Position, j.rev, stored)
+	j.history.add(stored)
 	j.length++
 	return nil
 }
 
-// outermostOpenBegin scans the effective journal for the outermost sys.begin
-// savepoint that was never closed by a matching sys.commit, treating the
-// markers as balanced brackets over completed syscalls. It returns the fork
-// offset (one past that begin's completion record, so the marker itself is
-// replayed from history and its whole body re-executes live) and true when
-// such an open begin exists. The outermost still-open begin is the unit the
-// program was inside when it failed; forking there re-runs the whole declared
-// unit. With no open begin it returns false and the caller keeps the default
-// (replay everything, including recorded soft failures).
+// outermostOpenBegin finds the outermost sys.begin that no sys.commit closed,
+// counting only completed calls. It returns the fork offset one past that
+// begin's completion, so replay serves the marker and the section's whole body
+// runs live again. That section is the unit the program was inside when it
+// stopped. With no open begin it returns false.
+//
+// The journal is intent/completion pairs, so a call's intent is at an even
+// position and its completion follows it.
 func (j *logJournal) outermostOpenBegin() (int, bool) {
 	length := j.Length()
-	depth := 0
-	start := -1 // position of the outermost open begin's completion record
-	for i := range length {
-		rec, err := j.Load(i)
-		if err != nil {
-			return 0, false
-		}
-		if rec.Kind != journaled.KindIntent || rec.Syscall == nil {
-			continue
-		}
-		completed := i+1 < length
-		switch rec.Syscall.Name {
+	depth, forkOffset := 0, 0
+	for i := 0; i+1 < length; i += 2 {
+		intent, _ := j.Load(i)
+		switch intent.Syscall.Name {
 		case sys.SyscallBegin:
-			if !completed {
-				continue // an uncompleted begin intent never bracketed anything
-			}
 			if depth == 0 {
-				start = i + 1
+				forkOffset = i + 2
 			}
 			depth++
 		case sys.SyscallCommit:
-			if !completed {
-				continue
-			}
 			if depth > 0 {
 				depth--
-				if depth == 0 {
-					start = -1
-				}
 			}
 		}
 	}
-	if depth > 0 && start >= 0 {
-		return start + 1, true
-	}
-	return 0, false
+	return forkOffset, depth > 0
 }
 
 func encodeOutcome(result sys.SyscallResult) JournalOutcome {
@@ -288,7 +253,7 @@ func foldJournals(events []eventlog.Event) (map[string]*processHistory, error) {
 		if histories[ev.Proc] == nil {
 			histories[ev.Proc] = newProcessHistory()
 		}
-		histories[ev.Proc].add(sd.Record.Position, ev.Rev, sd.Record)
+		histories[ev.Proc].add(sd.Record)
 	}
 	return histories, nil
 }

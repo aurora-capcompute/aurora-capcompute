@@ -27,7 +27,7 @@ func newProgressDispatcher(next sys.Dispatcher[durable.ProcessContext], table *c
 	// Declared where it is built: the layer that serves sys.log is the layer that
 	// puts it in the grant set, so the two cannot come apart.
 	err := table.Reserve(capability.Descriptor{
-		Name:        callSysLog,
+		Name:        sys.SyscallLog,
 		Description: "report a short progress message to the user while working",
 		Hidden:      true,
 	})
@@ -38,7 +38,7 @@ func newProgressDispatcher(next sys.Dispatcher[durable.ProcessContext], table *c
 }
 
 func (d *progressDispatcher) Dispatch(ctx context.Context, cred durable.ProcessContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
-	if syscall.Name == callSysLog {
+	if syscall.Name == sys.SyscallLog {
 		var args progressArgs
 		if err := json.Unmarshal(syscall.Args, &args); err != nil {
 			return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode sys.log: %v", err)), nil

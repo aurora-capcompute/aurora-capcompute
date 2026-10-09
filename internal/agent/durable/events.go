@@ -2,9 +2,12 @@ package durable
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
@@ -78,69 +81,61 @@ func marshalVerbatim(payload any) (json.RawMessage, error) {
 	return json.RawMessage(bytes.TrimRight(buf.Bytes(), "\n")), nil
 }
 
-// Projection is the durable state folded from a session's event stream: the same
-// StoredState + task records the runtime previously loaded from the CRUD stores,
-// now derived from the append-only log.
+// Projection is the durable state folded from a session's event stream.
 type Projection struct {
-	Session   Session
-	Processes map[string]Process
-	Tasks     map[string]TaskRecord
+	Session Session
+	// Processes is in creation order, then id.
+	Processes []Process
+	// Tasks is in creation order.
+	Tasks []TaskRecord
 }
 
 // Fold reconstructs a session's durable projection from its event stream. Events
 // must be in append order (ascending Seq). Folding is last-writer-wins per id.
+// A stream starts with its session.state event: the session exists before
+// anything else is appended to it.
 func Fold(events []eventlog.Event) (Projection, error) {
-	proj := Projection{
-		Processes: make(map[string]Process),
-		Tasks:     make(map[string]TaskRecord),
-	}
-	var sessionEvent *Session
+	var session Session
+	processes := make(map[string]Process)
+	tasks := make(map[string]TaskRecord)
 	for _, ev := range events {
 		switch ev.Kind {
 		case evSessionState:
-			var s Session
-			if err := json.Unmarshal(ev.Data, &s); err != nil {
+			if err := json.Unmarshal(ev.Data, &session); err != nil {
 				return Projection{}, fmt.Errorf("decode session.state: %w", err)
 			}
-			sessionEvent = &s
 		case evProcessState:
 			var r Process
 			if err := json.Unmarshal(ev.Data, &r); err != nil {
 				return Projection{}, fmt.Errorf("decode proc.state: %w", err)
 			}
-			proj.Processes[r.ID] = r
+			processes[r.ID] = r
 		case evTaskCreated, evTaskResolved:
 			var td taskEventData
 			if err := json.Unmarshal(ev.Data, &td); err != nil {
 				return Projection{}, fmt.Errorf("decode %s: %w", ev.Kind, err)
 			}
 			td.Record.TokenHash = td.TokenHash
-			proj.Tasks[td.Record.ID] = td.Record
+			tasks[td.Record.ID] = td.Record
 		}
-		// syscall.recorded belongs to the journal view
-		// (foldJournals); any other kind is skipped.
+		// syscall.recorded belongs to the journal view (foldJournals). Any other
+		// kind is skipped.
 	}
-	if sessionEvent == nil {
-		return proj, nil // no session.state event: nothing to restore
+	proj := Projection{
+		// The session.state event carries the session's explicit identity — id,
+		// name, tags, creation time. Its last update and active process are
+		// derived from its processes below.
+		Session: session,
+		// The order is deterministic, so nothing derived here — least of all
+		// ActiveProcessID — depends on Go's map iteration order.
+		Processes: slices.SortedFunc(maps.Values(processes), func(a, b Process) int {
+			return cmp.Or(a.CreatedAt.Compare(b.CreatedAt), strings.Compare(a.ID, b.ID))
+		}),
+		Tasks: slices.SortedFunc(maps.Values(tasks), func(a, b TaskRecord) int {
+			return a.CreatedAt.Compare(b.CreatedAt)
+		}),
 	}
-	// The session.state event carries the session's explicit identity — id,
-	// name, tags, creation time. Its last update and active process are derived
-	// from its processes. This is what lets a named session with no
-	// processes persist, and a rename survive a restart.
-	proj.Session = *sessionEvent
-	ordered := make([]Process, 0, len(proj.Processes))
 	for _, proc := range proj.Processes {
-		ordered = append(ordered, proc)
-	}
-	// Deterministic order (creation time, then id) so nothing derived here —
-	// least of all ActiveProcessID — depends on Go's map iteration order.
-	sort.Slice(ordered, func(i, j int) bool {
-		if !ordered[i].CreatedAt.Equal(ordered[j].CreatedAt) {
-			return ordered[i].CreatedAt.Before(ordered[j].CreatedAt)
-		}
-		return ordered[i].ID < ordered[j].ID
-	})
-	for _, proc := range ordered {
 		if proc.UpdatedAt.After(proj.Session.UpdatedAt) {
 			proj.Session.UpdatedAt = proc.UpdatedAt
 		}
@@ -161,15 +156,4 @@ func isActiveStatus(status ProcessStatus) bool {
 	default:
 		return false
 	}
-}
-
-// TaskList returns the projection's task records sorted by creation time, the
-// order callers expect from the old TaskStore.List.
-func (p Projection) TaskList() []TaskRecord {
-	out := make([]TaskRecord, 0, len(p.Tasks))
-	for _, rec := range p.Tasks {
-		out = append(out, rec)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
-	return out
 }

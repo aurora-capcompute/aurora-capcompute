@@ -5,13 +5,11 @@ package agent
 
 import (
 	"context"
-	"log/slog"
-	"sort"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 )
 
-// Restore: rebuild in-memory state by folding each session's event stream.
+// restore rebuilds in-memory state by folding each session's event stream.
 func (r *Runtime) restore(ctx context.Context) error {
 	sessions, err := r.log.Sessions(ctx)
 	if err != nil {
@@ -33,20 +31,17 @@ func (r *Runtime) restore(ctx context.Context) error {
 		if err := r.restoreSession(proj, histories); err != nil {
 			return err
 		}
-		r.tasks.seed(proj.TaskList())
+		r.tasks.seed(proj.Tasks)
 	}
 	return nil
 }
 
-// restoreSession folds one session's projection back into memory: it rebuilds the
-// session, its processes (in creation order, deriving conversation history from
-// completed processes), and opens each process's journal at its current revision. Processes left mid-flight
-// by a crash are marked interrupted and re-recorded.
+// restoreSession folds one session's projection back into memory: the session,
+// its processes in creation order, and each process's journal at its current
+// revision. A process a crash left mid-flight is marked interrupted and
+// recorded again.
 func (r *Runtime) restoreSession(proj durable.Projection, histories map[string]*processHistory) error {
 	stored := proj.Session
-	if stored.ID == "" {
-		return nil
-	}
 	session := &sessionState{
 		id:              stored.ID,
 		name:            stored.Name,
@@ -57,13 +52,7 @@ func (r *Runtime) restoreSession(proj durable.Projection, histories map[string]*
 	}
 	r.sessions[session.id] = session
 
-	procs := make([]durable.Process, 0, len(proj.Processes))
 	for _, sr := range proj.Processes {
-		procs = append(procs, sr)
-	}
-	sort.Slice(procs, func(i, j int) bool { return procs[i].CreatedAt.Before(procs[j].CreatedAt) })
-
-	for _, sr := range procs {
 		// The manifest was validated when the process was created. A driver
 		// removed since then fails the process when it next runs, not the boot.
 		status := sr.Status
@@ -79,13 +68,13 @@ func (r *Runtime) restoreSession(proj durable.Projection, histories map[string]*
 			revision:     sr.Revision,
 			createdAt:    sr.CreatedAt,
 			updatedAt:    sr.UpdatedAt,
-			startedAt:    copyTime(sr.StartedAt),
-			completedAt:  copyTime(sr.CompletedAt),
+			startedAt:    sr.StartedAt,
+			completedAt:  sr.CompletedAt,
 			answer:       sr.Answer,
 			err:          sr.Error,
 			manifest:     sr.Manifest,
 			digest:       sr.ProgramDigest,
-			labels:       append([]string(nil), sr.Labels...),
+			labels:       sr.Labels,
 			forkOffset:   sr.ForkOffset,
 			abortRetries: sr.AbortRetries,
 		}
@@ -104,11 +93,6 @@ func (r *Runtime) restoreSession(proj durable.Projection, histories map[string]*
 				return err
 			}
 		}
-	}
-	if session.activeProcessID != "" && r.processes[session.activeProcessID] == nil {
-		slog.Info("clearing active process from session: the process was not restored",
-			"session_id", session.id, "process_id", session.activeProcessID)
-		session.activeProcessID = ""
 	}
 	return nil
 }

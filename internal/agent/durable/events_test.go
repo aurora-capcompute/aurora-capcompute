@@ -37,7 +37,10 @@ func TestFoldReconstructsLatestRunAndSessionState(t *testing.T) {
 		!proj.Session.UpdatedAt.Equal(now.Add(time.Second)) {
 		t.Fatalf("session = %+v, want th1, its tags, the run's last update", proj.Session)
 	}
-	proc := proj.Processes["proc1"]
+	if len(proj.Processes) != 1 {
+		t.Fatalf("processes = %+v, want one", proj.Processes)
+	}
+	proc := proj.Processes[0]
 	if proc.Status != ProcessCompleted || proc.Answer != "done" {
 		t.Fatalf("run folded to %+v, want completed/done", proc)
 	}
@@ -62,16 +65,15 @@ func TestFoldTaskLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fold: %v", err)
 	}
-	got := proj.Tasks["task1"]
+	if len(proj.Tasks) != 1 || proj.Tasks[0].ID != "task1" {
+		t.Fatalf("tasks = %+v, want task1", proj.Tasks)
+	}
+	got := proj.Tasks[0]
 	if got.State != TaskApproved {
 		t.Fatalf("task state = %q, want approved", got.State)
 	}
 	// TokenHash must survive the round-trip even though TaskRecord omits it from JSON.
 	if len(got.TokenHash) != 3 || got.TokenHash[0] != 1 {
 		t.Fatalf("token hash not preserved: %v", got.TokenHash)
-	}
-	list := proj.TaskList()
-	if len(list) != 1 || list[0].ID != "task1" {
-		t.Fatalf("task list = %+v", list)
 	}
 }

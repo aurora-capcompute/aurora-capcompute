@@ -7,7 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/errs"
@@ -192,7 +192,7 @@ func (r programRegistry) list() []Program {
 	for _, program := range r {
 		out = append(out, program.Program)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	slices.SortFunc(out, func(a, b Program) int { return strings.Compare(string(a.ID), string(b.ID)) })
 	return out
 }
 

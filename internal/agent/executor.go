@@ -13,13 +13,9 @@ func (r *Runtime) execute(processID string) {
 
 	r.mu.Lock()
 	proc := r.processes[processID]
-	if proc == nil {
-		r.mu.Unlock()
-		return
-	}
 	if proc.stopRequested {
 		r.mu.Unlock()
-		r.stopProcess(processID, context.Canceled)
+		r.finish(processID, durable.ProcessStopped, "", context.Canceled)
 		return
 	}
 	cred := proc.context()
@@ -86,7 +82,10 @@ func (r *Runtime) execute(processID string) {
 			// stands, and a retry resumes from the last open savepoint.
 			r.finish(processID, durable.ProcessInterrupted, "", result.err)
 		default:
-			r.stopProcess(processID, result.err)
+			// A stop walks away from the revision where it stands: its journal
+			// is the record of what ran, and a later retry resumes or restarts
+			// from there.
+			r.finish(processID, durable.ProcessStopped, "", result.err)
 		}
 	default:
 		r.failProcess(processID, result.err)
@@ -135,9 +134,6 @@ func (r *Runtime) finish(processID string, status durable.ProcessStatus, answer 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	proc := r.processes[processID]
-	if proc == nil {
-		return
-	}
 	r.finishLocked(proc, status, answer, err)
 	_ = r.appendProcess(proc)
 }
@@ -165,10 +161,8 @@ func (r *Runtime) finishLocked(proc *processState, status durable.ProcessStatus,
 		r.taints.ForgetProcess(proc.context())
 	}
 	session := r.sessions[proc.sessionID]
-	if session != nil {
-		if status != durable.ProcessWaitingTask && session.activeProcessID == proc.id {
-			session.activeProcessID = ""
-		}
-		session.updatedAt = now
+	if status != durable.ProcessWaitingTask && session.activeProcessID == proc.id {
+		session.activeProcessID = ""
 	}
+	session.updatedAt = now
 }

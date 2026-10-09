@@ -194,7 +194,7 @@ func TestRuntimePassesManifestToDispatcherProvider(t *testing.T) {
 	// The program brackets its one turn in a sys.begin/sys.commit savepoint, so
 	// the journal narrative is input → begin → chat → commit → finish.
 	names := journalNames(t, runtime, proc.ID)
-	want := []string{callSysInput, sys.SyscallBegin, "core.openaiApi", sys.SyscallCommit, callSysOutput}
+	want := []string{sys.SyscallInput, sys.SyscallBegin, "core.openaiApi", sys.SyscallCommit, sys.SyscallOutput}
 	if len(names) != len(want) {
 		t.Fatalf("journal = %v, want %v", names, want)
 	}

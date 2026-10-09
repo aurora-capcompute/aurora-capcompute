@@ -42,10 +42,10 @@ func TestSysInputStampsHistoryLabels(t *testing.T) {
 		{Role: "user", Content: "what is Hwaas"},
 		{Role: "assistant", Content: "HwaaS is …", Labels: []string{"onyx_data"}},
 	}
-	l, _ := mustLifecycle(t, nopNext{}, "next task", history, manifest.Manifest{}, 1, nil)
+	l, _ := mustLifecycle(t, nopNext{}, "next task", history, manifest.Manifest{}, 1, acceptAnswer)
 
 	result, err := l.Dispatch(context.Background(), durable.ProcessContext{},
-		sys.Syscall{Name: callSysInput}, sys.Authorization{})
+		sys.Syscall{Name: sys.SyscallInput}, sys.Authorization{})
 	if err != nil {
 		t.Fatalf("dispatch sys.input: %v", err)
 	}
@@ -60,9 +60,9 @@ func TestSysInputStampsHistoryLabels(t *testing.T) {
 // History with no labels stamps nothing — a fresh session doesn't spuriously
 // taint the run.
 func TestSysInputUnlabeledHistoryTaintsNothing(t *testing.T) {
-	l, _ := mustLifecycle(t, nopNext{}, "task", []HistoryMessage{{Role: "assistant", Content: "clean"}}, manifest.Manifest{}, 1, nil)
+	l, _ := mustLifecycle(t, nopNext{}, "task", []HistoryMessage{{Role: "assistant", Content: "clean"}}, manifest.Manifest{}, 1, acceptAnswer)
 	result, err := l.Dispatch(context.Background(), durable.ProcessContext{},
-		sys.Syscall{Name: callSysInput}, sys.Authorization{})
+		sys.Syscall{Name: sys.SyscallInput}, sys.Authorization{})
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}

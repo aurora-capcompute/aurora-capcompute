@@ -2,15 +2,14 @@
 // orchestration runtime on the capcompute processor. It owns session and process
 // lifecycle, the intent/completion replay journal over the event log, durable
 // approval tasks and timers, retries, scheduling, and execution of
-// caller-supplied Wasm programs — all folded from a single
-// append-only event log, with no mutable row store.
+// caller-supplied Wasm programs — all folded from a single append-only event
+// log, with no mutable row store.
 //
 // It owns no capabilities, dispatchers, stores, or channels: programs,
 // dispatchers and the event log are injected through Config, and a final
 // product is an assembly — a main() composing this runtime with concrete
 // stores, capability drivers, and whatever communication channels that product
-// speaks. None of those live
-// here. The types here are thin re-exports of the internal/agent runtime.
+// speaks. The types here are thin re-exports of the internal/agent runtime.
 package aurora
 
 import (

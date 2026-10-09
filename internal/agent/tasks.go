@@ -1,9 +1,10 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 
@@ -11,10 +12,10 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
 )
 
-// eventTaskStore implements durable.TaskStore over the append-only event log. It keeps
-// an in-memory projection (seeded from the log on restore, updated on each op)
-// and appends a task.created / task.resolved event for every
-// mutation, so durable task state lives only in the log.
+// eventTaskStore is the task layer's store (task.Store) over the append-only
+// event log. It keeps an in-memory projection, seeded from the log on restore,
+// and appends a task.created or task.resolved event for every mutation, so
+// durable task state lives only in the log.
 type eventTaskStore struct {
 	log eventlog.Log
 	now func() time.Time
@@ -49,22 +50,14 @@ func (s *eventTaskStore) Find(_ context.Context, scope durable.ProcessContext, p
 
 func (s *eventTaskStore) Create(ctx context.Context, record durable.TaskRecord) error {
 	s.mu.Lock()
-	key := record.ID
-	if _, exists := s.records[key]; exists {
-		s.mu.Unlock()
+	defer s.mu.Unlock()
+	if _, exists := s.records[record.ID]; exists {
 		return durable.ErrTaskConflict
 	}
-	ev, err := durable.TaskCreatedEvent(s.now().UTC(), record)
-	if err != nil {
-		s.mu.Unlock()
+	if err := s.appendLocked(ctx, durable.TaskCreatedEvent, record); err != nil {
 		return err
 	}
-	if _, err := s.log.Append(ctx, record.Scope.SessionID, ev); err != nil {
-		s.mu.Unlock()
-		return err
-	}
-	s.records[key] = cloneTaskRecord(record)
-	s.mu.Unlock()
+	s.records[record.ID] = cloneTaskRecord(record)
 	return nil
 }
 
@@ -78,53 +71,38 @@ func (s *eventTaskStore) List(processID string) []durable.TaskRecord {
 			out = append(out, cloneTaskRecord(record))
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	slices.SortFunc(out, func(a, b durable.TaskRecord) int { return a.CreatedAt.Compare(b.CreatedAt) })
 	return out
 }
 
 func (s *eventTaskStore) Resolve(ctx context.Context, taskID string, tokenHash []byte, resolution durable.TaskResolution, now time.Time) (durable.TaskRecord, error) {
 	s.mu.Lock()
-	key := taskID
-	record, ok := s.records[key]
-	if !ok {
-		s.mu.Unlock()
+	defer s.mu.Unlock()
+	record, ok := s.records[taskID]
+	switch {
+	case !ok:
 		return durable.TaskRecord{}, durable.ErrTaskNotFound
-	}
-	if !hmac.Equal(record.TokenHash, tokenHash) {
-		s.mu.Unlock()
+	case !hmac.Equal(record.TokenHash, tokenHash):
 		return durable.TaskRecord{}, durable.ErrTaskUnauthorized
-	}
-	if record.State != durable.TaskPending {
-		// Idempotent re-resolution with the same decision returns the existing
-		// record; a conflicting decision is rejected.
+	case record.State != durable.TaskPending:
+		// The same decision again returns the existing record. A different
+		// decision is a conflict.
 		if record.Resolution.Decision == resolution.Decision &&
-			string(record.Resolution.Data) == string(resolution.Data) &&
+			bytes.Equal(record.Resolution.Data, resolution.Data) &&
 			record.Resolution.Reason == resolution.Reason {
-			s.mu.Unlock()
 			return cloneTaskRecord(record), nil
 		}
-		s.mu.Unlock()
 		return durable.TaskRecord{}, durable.ErrTaskConflict
-	}
-	if record.ExpiresAt != nil && !now.Before(*record.ExpiresAt) {
-		s.mu.Unlock()
+	case record.ExpiresAt != nil && !now.Before(*record.ExpiresAt):
 		return durable.TaskRecord{}, durable.ErrTaskGone
 	}
 	record.State = resolution.Decision
 	record.Resolution = resolution
-	resolvedAt := now
-	record.ResolvedAt = &resolvedAt
-	ev, err := durable.TaskResolvedEvent(s.now().UTC(), record)
-	if err != nil {
-		s.mu.Unlock()
+	record.ResolvedAt = &now
+	if err := s.appendLocked(ctx, durable.TaskResolvedEvent, record); err != nil {
 		return durable.TaskRecord{}, err
 	}
-	if _, err := s.log.Append(ctx, record.Scope.SessionID, ev); err != nil {
-		s.mu.Unlock()
-		return durable.TaskRecord{}, err
-	}
-	s.records[key] = cloneTaskRecord(record)
-	s.mu.Unlock()
+	s.records[taskID] = cloneTaskRecord(record)
 	return cloneTaskRecord(record), nil
 }
 
@@ -147,11 +125,7 @@ func (s *eventTaskStore) Due(now time.Time) []string {
 func (s *eventTaskStore) Settle(ctx context.Context, taskID string, now time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	key := taskID
-	record, ok := s.records[key]
-	if !ok {
-		return durable.ErrTaskNotFound
-	}
+	record := s.records[taskID]
 	if !due(record, now) {
 		return nil
 	}
@@ -160,17 +134,22 @@ func (s *eventTaskStore) Settle(ctx context.Context, taskID string, now time.Tim
 		record.Resolution = durable.TaskResolution{Decision: durable.TaskCompleted, Actor: "timer", Data: fired}
 	}
 	record.State = record.Resolution.Decision
-	resolvedAt := now
-	record.ResolvedAt = &resolvedAt
-	ev, err := durable.TaskResolvedEvent(s.now().UTC(), record)
+	record.ResolvedAt = &now
+	if err := s.appendLocked(ctx, durable.TaskResolvedEvent, record); err != nil {
+		return err
+	}
+	s.records[taskID] = cloneTaskRecord(record)
+	return nil
+}
+
+// appendLocked records one task event on the task's session stream.
+func (s *eventTaskStore) appendLocked(ctx context.Context, event func(time.Time, durable.TaskRecord) (eventlog.Event, error), record durable.TaskRecord) error {
+	ev, err := event(s.now().UTC(), record)
 	if err != nil {
 		return err
 	}
-	if _, err := s.log.Append(ctx, record.Scope.SessionID, ev); err != nil {
-		return err
-	}
-	s.records[key] = cloneTaskRecord(record)
-	return nil
+	_, err = s.log.Append(ctx, record.Scope.SessionID, ev)
+	return err
 }
 
 // due reports whether a pending task's deadline has passed: a timer's fire

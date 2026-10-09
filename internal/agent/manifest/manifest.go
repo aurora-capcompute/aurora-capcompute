@@ -136,25 +136,22 @@ type ConfigValidator interface {
 	ValidateConfig(syscall string, config json.RawMessage) error
 }
 
+// Validate checks a manifest at the door and returns its canonical form: names
+// trimmed and settings normalized. It works on a copy, so the caller's manifest
+// does not change.
 func Validate(spec Manifest, validator ConfigValidator) (Manifest, error) {
-	if validator == nil {
-		return Manifest{}, fmt.Errorf("%w: dispatcher provider is required", errs.Invalid)
-	}
 	if spec.Version != Version {
 		return Manifest{}, fmt.Errorf("%w: manifest version must be %d", errs.Invalid, Version)
 	}
-	if err := validateManifest(&spec, validator); err != nil {
+	spec = spec.Clone()
+	spec.Program = strings.TrimSpace(spec.Program)
+	if err := validateSyscalls(spec.Syscalls, validator); err != nil {
 		return Manifest{}, err
 	}
 	if spec.Program == "" {
 		return Manifest{}, fmt.Errorf("%w: a program is required", errs.Invalid)
 	}
-	return spec.Clone(), nil
-}
-
-func validateManifest(manifest *Manifest, validator ConfigValidator) error {
-	manifest.Program = strings.TrimSpace(manifest.Program)
-	return validateSyscalls(manifest.Syscalls, validator)
+	return spec, nil
 }
 
 func validateSyscalls(syscalls []Syscall, validator ConfigValidator) error {
@@ -175,19 +172,22 @@ func validateSyscalls(syscalls []Syscall, validator ConfigValidator) error {
 			return fmt.Errorf("%w: syscall %q is in the reserved %q namespace and may not be granted", errs.Invalid, syscall.Syscall, reservedSyscallPrefix)
 		}
 
-		if syscall.Syscall == TimerSyscall {
+		switch syscall.Syscall {
+		case TimerSyscall:
 			normalized, err := normalizeTimerSettings(syscall.Config)
 			if err != nil {
 				return fmt.Errorf("%w: sys.timer settings: %v", errs.Invalid, err)
 			}
 			syscall.Config = normalized
-		} else if syscall.Syscall == DeclassifySyscall {
+		case DeclassifySyscall:
 			if len(bytes.TrimSpace(syscall.Config)) > 0 {
 				return fmt.Errorf("%w: %s takes no settings", errs.Invalid, DeclassifySyscall)
 			}
 			syscall.Config = nil
-		} else if err := validator.ValidateConfig(syscall.Syscall, syscall.Config); err != nil {
-			return fmt.Errorf("%w: syscall %q config: %v", errs.Invalid, syscall.Syscall, err)
+		default:
+			if err := validator.ValidateConfig(syscall.Syscall, syscall.Config); err != nil {
+				return fmt.Errorf("%w: syscall %q config: %v", errs.Invalid, syscall.Syscall, err)
+			}
 		}
 
 		seen[syscall.Syscall] = struct{}{}
@@ -217,17 +217,12 @@ func normalizeTimerSettings(raw json.RawMessage) (json.RawMessage, error) {
 
 func (m Manifest) Clone() Manifest {
 	out := m
-	out.History = cloneBoolPtr(m.History)
+	if m.History != nil {
+		history := *m.History
+		out.History = &history
+	}
 	out.Syscalls = cloneSyscalls(m.Syscalls)
 	return out
-}
-
-func cloneBoolPtr(p *bool) *bool {
-	if p == nil {
-		return nil
-	}
-	v := *p
-	return &v
 }
 
 func cloneSyscalls(syscalls []Syscall) []Syscall {

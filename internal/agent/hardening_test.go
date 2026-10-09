@@ -8,8 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
+	"github.com/aurora-capcompute/aurora-capcompute/monitor"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
@@ -21,9 +23,9 @@ func TestSysInputOmitsHistoryLabelsFromGuestPayload(t *testing.T) {
 		{Role: "user", Content: "q"},
 		{Role: "assistant", Content: "a", Labels: []string{"untrusted_web", "credential:ONYX@abc"}},
 	}
-	l, _ := mustLifecycle(t, nopNext{}, "task", history, manifest.Manifest{}, 1, nil)
+	l, _ := mustLifecycle(t, nopNext{}, "task", history, manifest.Manifest{}, 1, acceptAnswer)
 	result, err := l.Dispatch(context.Background(), durable.ProcessContext{},
-		sys.Syscall{Abi: sys.ABIVersion, Name: callSysInput}, sys.Authorization{})
+		sys.Syscall{Abi: sys.ABIVersion, Name: sys.SyscallInput}, sys.Authorization{})
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
@@ -76,7 +78,7 @@ func TestValidateManifestDeclassifyGrant(t *testing.T) {
 // path reachable; it does not let the guest self-lift.
 func TestLifecyclePublishesDeclassifyWhenGranted(t *testing.T) {
 	_, grantedTable := mustLifecycle(t, nopNext{}, "msg", nil,
-		manifest.Manifest{Syscalls: []manifest.Syscall{{Syscall: manifest.DeclassifySyscall}}}, 1, nil)
+		manifest.Manifest{Syscalls: []manifest.Syscall{{Syscall: manifest.DeclassifySyscall}}}, 1, acceptAnswer)
 	cap, ok := grantedTable.Descriptor(manifest.DeclassifySyscall)
 	if !ok {
 		t.Fatal("a manifest granting sys.declassify must advertise it in the grant set")
@@ -87,20 +89,25 @@ func TestLifecyclePublishesDeclassifyWhenGranted(t *testing.T) {
 	if len(cap.InputSchema) == 0 {
 		t.Fatal("sys.declassify must carry an input schema for the Validator")
 	}
-	_, ungrantedTable := mustLifecycle(t, nopNext{}, "msg", nil, manifest.Manifest{}, 1, nil)
+	_, ungrantedTable := mustLifecycle(t, nopNext{}, "msg", nil, manifest.Manifest{}, 1, acceptAnswer)
 	if _, ok := ungrantedTable.Descriptor(manifest.DeclassifySyscall); ok {
 		t.Fatal("sys.declassify must not appear unless the manifest grants it (opt-in)")
 	}
 }
 
-// A guest-supplied duration_seconds large enough to overflow int64 nanoseconds
-// must be rejected — not accepted via a wrapped-negative Duration slipping past
-// the max-duration bound.
-func TestTimerRejectsOverflowingDuration(t *testing.T) {
-	td := &timerDispatcher{next: nopNext{}, maxDuration: defaultMaxTimer}
+// The timer's schema carries the maximum duration, so the Validator refuses a
+// duration past the bound — including one large enough to overflow int64
+// nanoseconds — before the timer converts it.
+func TestTimerSchemaBoundsDuration(t *testing.T) {
+	table := capability.NewTable()
+	timer, err := newTimerDispatcher(nopNext{}, manifest.Syscall{Syscall: manifest.TimerSyscall}, table)
+	if err != nil {
+		t.Fatalf("new timer: %v", err)
+	}
+	validated := monitor.NewValidator(table, sys.Dispatcher[durable.ProcessContext](timer))
 	dispatch := func(seconds int64) sys.SyscallResult {
 		t.Helper()
-		r, err := td.Dispatch(context.Background(), durable.ProcessContext{},
+		r, err := validated.Dispatch(context.Background(), durable.ProcessContext{},
 			sys.Syscall{Abi: sys.ABIVersion, Name: manifest.TimerSyscall,
 				Args: json.RawMessage(fmt.Sprintf(`{"duration_seconds":%d}`, seconds))},
 			sys.Authorization{})
@@ -110,7 +117,7 @@ func TestTimerRejectsOverflowingDuration(t *testing.T) {
 		return r
 	}
 	if r := dispatch(1 << 62); r.Status() != sys.StatusFailed || r.Errno() != sys.ErrnoInvalidArgs {
-		t.Fatalf("overflowing duration = %v/%v, want failed/invalid_args (bound must not be bypassed)", r.Status(), r.Errno())
+		t.Fatalf("overflowing duration = %v/%v, want failed/invalid_args", r.Status(), r.Errno())
 	}
 	if r := dispatch(int64(defaultMaxTimer/time.Second) + 1); r.Status() != sys.StatusFailed {
 		t.Fatalf("over-max duration = %v, want failed", r.Status())

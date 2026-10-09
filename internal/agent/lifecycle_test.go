@@ -19,11 +19,11 @@ import (
 // TestLifecycleAbortArgs: sys.abort carries the guest's reason; malformed args
 // are rejected at dispatch and empty args are a bare "give up".
 func TestLifecycleAbortArgs(t *testing.T) {
-	l, _ := mustLifecycle(t, stubNext{}, "msg", nil, manifest.Manifest{}, 1, nil)
+	l, _ := mustLifecycle(t, stubNext{}, "msg", nil, manifest.Manifest{}, 1, acceptAnswer)
 	dispatch := func(args string) sys.SyscallResult {
 		t.Helper()
 		result, err := l.Dispatch(context.Background(), durable.ProcessContext{},
-			sys.Syscall{Abi: sys.ABIVersion, Name: callSysAbort, Args: json.RawMessage(args)},
+			sys.Syscall{Abi: sys.ABIVersion, Name: sys.SyscallAbort, Args: json.RawMessage(args)},
 			sys.Authorization{})
 		if err != nil {
 			t.Fatalf("dispatch: %v", err)
@@ -56,7 +56,7 @@ func TestLifecycleValidatesAnswer(t *testing.T) {
 	output := func(args string) sys.SyscallResult {
 		t.Helper()
 		result, err := l.Dispatch(context.Background(), durable.ProcessContext{},
-			sys.Syscall{Abi: sys.ABIVersion, Name: callSysOutput, Args: json.RawMessage(args)},
+			sys.Syscall{Abi: sys.ABIVersion, Name: sys.SyscallOutput, Args: json.RawMessage(args)},
 			sys.Authorization{})
 		if err != nil {
 			t.Fatalf("dispatch: %v", err)
@@ -72,6 +72,9 @@ func TestLifecycleValidatesAnswer(t *testing.T) {
 }
 
 type stubNext struct{}
+
+// acceptAnswer is an output schema that accepts every answer.
+func acceptAnswer(string) error { return nil }
 
 // mustLifecycle builds the lifecycle layer over a fresh grant table — the table
 // is where it declares sys.input/output/abort, so every test needs one.

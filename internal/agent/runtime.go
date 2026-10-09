@@ -1,14 +1,13 @@
 // Package agent is the runtime: it owns session and process lifecycle, the
 // scheduler-driven quanta that resume Wasm programs on the capcompute processor,
 // durable approval tasks and timers, retries, and the session read the public
-// API exposes. All
-// durable state is a fold of one append-only event stream per session — the
-// runtime keeps no mutable row store, and restore rebuilds in-memory state by
-// replaying each stream from the beginning.
+// API exposes. All durable state is a fold of one append-only event stream per
+// session — the runtime keeps no mutable row store, and restore rebuilds
+// in-memory state by replaying each stream from the beginning.
 //
 // It does not own capability implementations, program bytes, or any concrete
-// store: dispatchers, programs and the event log are injected. The aurora package re-exports this package's types
-// as the module's public surface.
+// store: dispatchers, programs and the event log are injected. The aurora
+// package re-exports this package's types as the module's public surface.
 package agent
 
 import (
@@ -18,7 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -70,7 +69,7 @@ func reconcileGrants(advertised []capability.Descriptor, manifest manifest.Manif
 		}
 	}
 	if len(leaked) > 0 {
-		sort.Strings(leaked)
+		slices.Sort(leaked)
 		return fmt.Errorf("%w: dispatcher provider advertises capabilities the manifest did not grant: %s",
 			errs.Invalid, strings.Join(leaked, ", "))
 	}
@@ -194,8 +193,7 @@ func (r *Runtime) parkedOnSettledTasks() []string {
 // state alone, so the resolver and the sweep may both call it.
 func (r *Runtime) wake(processID string) error {
 	r.mu.Lock()
-	proc := r.processes[processID]
-	waiting := proc != nil && proc.status == durable.ProcessWaitingTask
+	waiting := r.processes[processID].status == durable.ProcessWaitingTask
 	r.mu.Unlock()
 	if !waiting {
 		return nil
@@ -233,8 +231,8 @@ func (r *Runtime) CreateSession(name string, tags map[string]string) (SessionSna
 	return r.sessionSnapshotLocked(session), nil
 }
 
-// RenameSession changes a session's explicit handle. The new name must be free
-// empty clears it (the id becomes the handle again).
+// RenameSession changes a session's explicit handle. The new name must be free.
+// An empty name clears it, and the id becomes the handle again.
 func (r *Runtime) RenameSession(sessionID, name string) (SessionSnapshot, error) {
 	name = strings.TrimSpace(name)
 	r.mu.Lock()
@@ -259,8 +257,8 @@ func (r *Runtime) RenameSession(sessionID, name string) (SessionSnapshot, error)
 	return r.sessionSnapshotLocked(session), nil
 }
 
-// checkSessionNameFreeLocked rejects a name already held by another session of
-// another session. An empty name is always free (unnamed sessions coexist).
+// checkSessionNameFreeLocked rejects a name another session already holds. An
+// empty name is always free: unnamed sessions coexist.
 func (r *Runtime) checkSessionNameFreeLocked(name, exceptID string) error {
 	if name == "" {
 		return nil
@@ -475,7 +473,7 @@ func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, erro
 	session := r.sessions[proc.sessionID]
 	// Only the latest process in a session may be retried: an earlier one's
 	// answer is already folded into the history the later ones read.
-	if len(session.processIDs) == 0 || session.processIDs[len(session.processIDs)-1] != proc.id {
+	if session.processIDs[len(session.processIDs)-1] != proc.id {
 		r.mu.Unlock()
 		return ProcessSnapshot{}, fmt.Errorf("%w: only the latest session process can be retried", errs.Conflict)
 	}
@@ -484,22 +482,21 @@ func (r *Runtime) Retry(processID string, mode RetryMode) (ProcessSnapshot, erro
 		return ProcessSnapshot{}, fmt.Errorf("%w: session already has active process %s", errs.Conflict, session.activeProcessID)
 	}
 
-	if mode == RetryRestart {
+	switch forkOffset, open := proc.journal.outermostOpenBegin(); {
+	case mode == RetryRestart:
 		// Hard restart: fork from the beginning, giving the program a completely
 		// fresh revision with no shared prefix. The abandoned attempt stays in
-		// the log as an audited, closed revision; nothing it did is undone.
-		proc.err = ""
+		// the log as an audited, closed revision. Nothing it did is undone.
 		r.forkJournalLocked(proc, 0)
-	} else if proc.status == durable.ProcessWaitingTask {
-		// Resume from a park: no fork. The journal's open intent at the tail is
-		// re-driven by replay, and a resolved task's stored authorization is
-		// injected by the task layer.
-	} else if forkOffset, open := proc.journal.outermostOpenBegin(); open {
-		// Failed/stopped inside a savepoint section: fork at the section's
+	case proc.status == durable.ProcessWaitingTask:
+		// Resume from a park: no fork. Replay drives the journal's open intent at
+		// the tail again, and the task layer injects a resolved task's stored
+		// authorization.
+	case open:
+		// Failed or stopped inside a savepoint section: fork at the section's
 		// sys.begin so the whole declared unit re-executes live. That is what
 		// the brackets are for — without the fork, a deterministic failure
 		// replays its broken completion to the same wall forever.
-		proc.err = ""
 		r.forkJournalLocked(proc, forkOffset)
 	}
 	// Nothing bracketed: same revision, no fork. A resume continues the attempt —
@@ -529,10 +526,9 @@ func (r *Runtime) relaunchLocked(proc *processState) (ProcessSnapshot, error) {
 	proc.startedAt = nil
 	proc.completedAt = nil
 	proc.updatedAt = r.now().UTC()
-	if session := r.sessions[proc.sessionID]; session != nil {
-		session.activeProcessID = proc.id
-		session.updatedAt = proc.updatedAt
-	}
+	session := r.sessions[proc.sessionID]
+	session.activeProcessID = proc.id
+	session.updatedAt = proc.updatedAt
 	if err := r.appendProcess(proc); err != nil {
 		r.mu.Unlock()
 		return ProcessSnapshot{}, err
@@ -569,9 +565,10 @@ func (r *Runtime) Close(ctx context.Context) error {
 		return nil
 	}
 	r.closed = true
-	stops := make([]func(), 0)
+	// A process holds a stop function only while a quantum runs it.
+	var stops []func()
 	for _, proc := range r.processes {
-		if proc.stop != nil && (proc.status == durable.ProcessRunning || proc.status == durable.ProcessStopping || proc.status == durable.ProcessQueued) {
+		if proc.stop != nil {
 			stops = append(stops, proc.stop)
 		}
 	}

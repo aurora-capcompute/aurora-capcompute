@@ -1,8 +1,6 @@
 package aurora
 
-import (
-	"context"
-)
+import "context"
 
 type Runtime interface {
 	CreateSession(name string, tags map[string]string) (SessionSnapshot, error)

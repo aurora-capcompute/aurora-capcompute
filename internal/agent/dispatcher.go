@@ -7,7 +7,6 @@ import (
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/errs"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/task"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
@@ -28,10 +27,6 @@ import (
 func (r *Runtime) newDispatcher(ctx context.Context, cred durable.ProcessContext, program compiledProgram) (sys.Dispatcher[durable.ProcessContext], error) {
 	r.mu.Lock()
 	proc := r.processes[cred.ProcessID]
-	if proc == nil {
-		r.mu.Unlock()
-		return nil, fmt.Errorf("%w: process %s", errs.NotFound, cred.ProcessID)
-	}
 	spec := proc.manifest.Clone()
 	input := proc.input
 	var history []HistoryMessage
@@ -43,10 +38,6 @@ func (r *Runtime) newDispatcher(ctx context.Context, cred durable.ProcessContext
 	attempt := proc.attempt
 	journal := proc.journal
 	r.mu.Unlock()
-	if journal.rev != cred.Revision {
-		return nil, fmt.Errorf("%w: process %s journal is at revision %d, not %d",
-			errs.Conflict, cred.ProcessID, journal.rev, cred.Revision)
-	}
 
 	table, err := r.dispatchers.NewDispatcher(ctx, cred, spec)
 	if err != nil {

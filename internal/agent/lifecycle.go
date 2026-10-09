@@ -5,32 +5,24 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	manifestpkg "github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
-	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/aurora-capcompute/monitor"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-// Agent lifecycle syscalls. The guest fetches its input and reports its answer
-// through these calls so both are recorded on the replay journal — making the
-// per-process tape the full narrative: sys.input → capability calls → sys.output.
-const (
-	callSysInput  = sys.SyscallInput
-	callSysOutput = sys.SyscallOutput
-	// callSysLog is the side-effect-free progress report, served by the
-	// progress dispatcher below the task layer.
-	callSysLog = sys.SyscallLog
-	// callSysAbort abandons the open savepoint section instead of finishing: the
-	// runtime forks the journal at the section's sys.begin and re-runs it. This
-	// call is the guest's own way to abandon its revision — the only one that
-	// belongs on the journal; the host's own abandonments (a failure, a stop, a
-	// restart) are management state on the process, never journal records.
-	callSysAbort = sys.SyscallAbort
-)
+// The lifecycle dispatcher serves the agent protocol. The guest fetches its
+// input and reports its answer through these calls so both are recorded on the
+// replay journal — making the per-process tape the full narrative:
+// sys.input → capability calls → sys.output.
+//
+// sys.abort abandons the open savepoint section instead of finishing: the
+// runtime forks the journal at the section's sys.begin and re-runs it. It is the
+// guest's own way to abandon its revision, and the only one that belongs on the
+// journal. The host's own abandonments (a failure, a stop, a restart) are
+// management state on the process, never journal records.
 
 type finishArgs struct {
 	Answer string `json:"answer"`
@@ -120,14 +112,12 @@ func (l *lifecycleDispatcher) Dispatch(ctx context.Context, cred durable.Process
 		// failed result the guest can react to (correct the answer, publish
 		// again), journaled like any other failed observation — nothing is
 		// recorded as the terminal answer until it satisfies the interface.
-		if l.validateAnswer != nil {
-			var args finishArgs
-			if err := json.Unmarshal(syscall.Args, &args); err != nil {
-				return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode sys.output: %v", err)), nil
-			}
-			if err := l.validateAnswer(args.Answer); err != nil {
-				return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
-			}
+		var args finishArgs
+		if err := json.Unmarshal(syscall.Args, &args); err != nil {
+			return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode sys.output: %v", err)), nil
+		}
+		if err := l.validateAnswer(args.Answer); err != nil {
+			return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
 		}
 		return sys.Result(json.RawMessage(`{"ok":true}`)), nil
 	case sys.SyscallAbort:
@@ -158,49 +148,20 @@ func historyLabels(history []HistoryMessage) []string {
 	return labels
 }
 
-// answerFromJournal reads a completed process's answer from the tail of its
-// journal: the sys.output intent, and the completion that accepted it.
+// answerFromJournal reads a completed process's answer from its last call,
+// which must be a sys.output the output schema accepted: a guest that reports
+// completion without an accepted answer did not finish.
 func (r *Runtime) answerFromJournal(processID string) (string, error) {
-	journal, ok := r.liveJournal(processID)
-	if !ok {
-		return "", errors.New("agent process journal is unavailable")
-	}
-	length := journal.Length()
-	if length < 2 {
-		return "", errors.New("agent produced no journal records")
-	}
-	completion, err := journal.Load(length - 1)
-	if err != nil {
-		return "", err
-	}
-	if completion.Kind != journaled.KindCompletion {
-		return "", fmt.Errorf("agent did not finish (journal tail is %s)", completion.Kind)
-	}
-	intent, err := journal.Load(length - 2)
-	if err != nil {
-		return "", err
-	}
-	if intent.Syscall == nil || intent.Syscall.Name != sys.SyscallOutput {
-		name := ""
-		if intent.Syscall != nil {
-			name = intent.Syscall.Name
-		}
-		return "", fmt.Errorf("agent did not finish (last journal call was %q)", name)
-	}
-	// The sys.output completion must have SUCCEEDED. A schema-violating answer is
-	// journaled as a failed completion (the lifecycle validates it), and must
-	// never become the terminal answer just because the guest then returned
-	// {"status":"completed"} — the tail shape alone does not prove the answer was
-	// accepted.
-	if completion.Result == nil || completion.Result.Status() != sys.StatusResult {
-		return "", errors.New("agent did not finish (its final answer was rejected by the output schema)")
+	call, result, ok := r.lastCall(processID)
+	switch {
+	case !ok || call.Name != sys.SyscallOutput:
+		return "", errors.New("agent did not finish: its last call was not sys.output")
+	case result.Status() != sys.StatusResult:
+		return "", errors.New("agent did not finish: the output schema rejected its final answer")
 	}
 	var args finishArgs
-	if err := json.Unmarshal(intent.Syscall.Args, &args); err != nil {
-		return "", fmt.Errorf("decode finish answer: %w", err)
-	}
-	if strings.TrimSpace(args.Answer) == "" {
-		return "", errors.New("agent finish call is missing an answer")
+	if err := json.Unmarshal(call.Args, &args); err != nil {
+		return "", fmt.Errorf("decode the final answer: %w", err)
 	}
 	return args.Answer, nil
 }

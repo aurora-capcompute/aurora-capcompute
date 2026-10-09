@@ -21,43 +21,35 @@ import (
 	"log/slog"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
-	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-// liveJournal fetches a process's live journal under the runtime lock.
-func (r *Runtime) liveJournal(processID string) (*logJournal, bool) {
+// lastCall is the journal's last completed call: its syscall and its result.
+// The journal is intent/completion pairs, so an odd length ends in an open
+// intent and there is no last completed call.
+func (r *Runtime) lastCall(processID string) (sys.Syscall, sys.SyscallResult, bool) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	proc := r.processes[processID]
-	if proc == nil || proc.journal == nil {
-		return nil, false
+	journal := r.processes[processID].journal
+	r.mu.Unlock()
+	length := journal.Length()
+	if length == 0 || length%2 != 0 {
+		return sys.Syscall{}, sys.SyscallResult{}, false
 	}
-	return proc.journal, true
+	// Both positions are below the length, so both loads succeed.
+	intent, _ := journal.Load(length - 2)
+	completion, _ := journal.Load(length - 1)
+	return *intent.Syscall, *completion.Result, true
 }
 
-// guestAbort reports whether a process's journal ends in the guest's own
-// completed sys.abort, and the reason it declared — the completion path's cheap
-// dispatch test.
+// guestAbort reports whether the guest ended with its own sys.abort, and the
+// reason it gave.
 func (r *Runtime) guestAbort(processID string) (string, bool) {
-	journal, ok := r.liveJournal(processID)
-	if !ok {
-		return "", false
-	}
-	length := journal.Length()
-	if length < 2 {
-		return "", false
-	}
-	completion, err := journal.Load(length - 1)
-	if err != nil || completion.Kind != journaled.KindCompletion {
-		return "", false
-	}
-	intent, err := journal.Load(length - 2)
-	if err != nil || intent.Syscall == nil || intent.Syscall.Name != sys.SyscallAbort {
+	call, _, ok := r.lastCall(processID)
+	if !ok || call.Name != sys.SyscallAbort {
 		return "", false
 	}
 	var args abortArgs
-	_ = json.Unmarshal(intent.Syscall.Args, &args)
+	_ = json.Unmarshal(call.Args, &args)
 	return args.Reason, true
 }
 
@@ -73,10 +65,6 @@ func (r *Runtime) retryAbortedSection(processID, reason string) {
 	}
 	r.mu.Lock()
 	proc := r.processes[processID]
-	if proc == nil || proc.journal == nil {
-		r.mu.Unlock()
-		return
-	}
 	forkOffset, open := proc.journal.outermostOpenBegin()
 	switch {
 	case !open:
@@ -101,9 +89,6 @@ func (r *Runtime) failProcess(processID string, failure error) {
 	if r.redriveAfterFailure(processID) {
 		return
 	}
-	if failure == nil {
-		failure = errors.New("process failed")
-	}
 	r.finish(processID, durable.ProcessFailed, "", failure)
 }
 
@@ -115,32 +100,18 @@ func (r *Runtime) failProcess(processID string, failure error) {
 func (r *Runtime) redriveAfterFailure(processID string) bool {
 	r.mu.Lock()
 	proc := r.processes[processID]
-	if proc == nil || proc.journal == nil || proc.stopRequested || r.closed {
+	_, open := proc.journal.outermostOpenBegin()
+	length := proc.journal.Length()
+	if proc.stopRequested || r.closed || !open || proc.lastFailureLength == length {
 		r.mu.Unlock()
 		return false
 	}
-	if _, open := proc.journal.outermostOpenBegin(); !open {
-		r.mu.Unlock()
-		return false
-	}
-	if length := proc.journal.Length(); proc.lastFailureLength == length {
-		r.mu.Unlock()
-		return false
-	} else {
-		proc.lastFailureLength = length
-	}
+	proc.lastFailureLength = length
 	if _, err := r.relaunchLocked(proc); err != nil {
 		slog.Warn("re-drive after failure", "process_id", processID, "error", err)
 		return false
 	}
 	return true
-}
-
-// stopProcess finishes a stopped process. A stop walks away from the revision
-// where it stands: its journal is the record of what ran, and a later retry
-// resumes or restarts from there.
-func (r *Runtime) stopProcess(processID string, cause error) {
-	r.finish(processID, durable.ProcessStopped, "", cause)
 }
 
 // isTerminal reports whether a process status is a final state (no further execution).

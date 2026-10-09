@@ -36,8 +36,8 @@ type HistoryMessage struct {
 // DispatcherProvider builds the grant table one process runs under, and
 // canonicalizes the grant configs a manifest declares. It lives here rather
 // than beside the manifest because building a table needs a process
-// credential, which the manifest layer knows nothing about; manifest validation
-// asks only for the Normalize half (manifest.Normalizer), which this satisfies.
+// credential, which the manifest layer knows nothing about. Manifest validation
+// asks only for the ValidateConfig half (manifest.ConfigValidator).
 //
 // It returns the index rather than a dispatcher because one index has to answer
 // three questions at once — what routes, what the monitor may admit, and what
@@ -184,9 +184,6 @@ type guestHistoryMessage struct {
 // guestHistory projects session history to its guest-facing shape, dropping the
 // host-only provenance labels.
 func guestHistory(history []HistoryMessage) []guestHistoryMessage {
-	if len(history) == 0 {
-		return nil
-	}
 	out := make([]guestHistoryMessage, len(history))
 	for i, m := range history {
 		out[i] = guestHistoryMessage{Role: m.Role, Content: m.Content}

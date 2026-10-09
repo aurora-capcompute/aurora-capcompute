@@ -44,7 +44,7 @@ type quantum struct {
 func newPool(parent context.Context, size int) *pool {
 	root, stop := context.WithCancel(parent)
 	p := &pool{queue: make(chan quantum), root: root, stop: stop}
-	for range max(size, 1) {
+	for range size {
 		p.workers.Go(p.work)
 	}
 	return p

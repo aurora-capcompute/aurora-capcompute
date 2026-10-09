@@ -15,6 +15,7 @@
 package task
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -35,8 +36,8 @@ type Store interface {
 // Dispatcher sits below the replay layer: by the time a syscall reaches it,
 // the replay dispatcher has already journaled the intent, so the current
 // journal tail is this syscall's intent record. That intent position is the
-// task's identity within the process revision — a resumed process re-reaches the same
-// position and finds the same task.
+// task's identity within the process revision — a resumed process reaches the
+// same position again and finds the same task.
 type Dispatcher struct {
 	Next        sys.Dispatcher[durable.ProcessContext]
 	Store       Store
@@ -47,13 +48,12 @@ type Dispatcher struct {
 }
 
 func (d *Dispatcher) Dispatch(ctx context.Context, cred durable.ProcessContext, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
-	scope := cred
 	// The replay layer appends the intent before delegating, so the syscall's
 	// journal position is the current tail.
-	position := max(d.Journal.Length()-1, 0)
+	position := d.Journal.Length() - 1
 	// Replay refuses a different call at a recorded position, and a fork mints a
 	// new revision, so (process revision, position) names one call.
-	record, found, err := d.Store.Find(ctx, scope, position)
+	record, found, err := d.Store.Find(ctx, cred, position)
 	if err != nil {
 		return sys.SyscallResult{}, err
 	}
@@ -71,7 +71,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, cred durable.ProcessContext, 
 		return sys.SyscallResult{}, err
 	}
 	record = durable.TaskRecord{
-		Scope:           scope,
+		Scope:           cred,
 		ID:              taskID,
 		JournalPosition: position,
 		Syscall:         syscall.Copy(),
@@ -94,20 +94,20 @@ func (d *Dispatcher) Dispatch(ctx context.Context, cred durable.ProcessContext, 
 }
 
 func (d *Dispatcher) resume(ctx context.Context, cred durable.ProcessContext, record durable.TaskRecord) (sys.SyscallResult, error) {
-	if record.ExpiresAt != nil && !d.now().Before(*record.ExpiresAt) && record.State == durable.TaskPending {
-		return sys.FailCode(sys.ErrnoExpired, "external task expired"), nil
-	}
 	switch record.State {
 	case durable.TaskPending:
+		if record.ExpiresAt != nil && !d.now().Before(*record.ExpiresAt) {
+			return sys.FailCode(sys.ErrnoExpired, "external task expired"), nil
+		}
 		return sys.Yield(record.ID), nil
 	case durable.TaskApproved:
 		return d.Next.Dispatch(ctx, cred, record.Syscall, record.Resolution)
 	case durable.TaskCompleted:
 		return sys.Result(record.Resolution.Data), nil
 	case durable.TaskDenied:
-		return sys.FailCode(sys.ErrnoDenied, nonempty(record.Resolution.Reason, "external task denied")), nil
+		return sys.FailCode(sys.ErrnoDenied, cmp.Or(record.Resolution.Reason, "external task denied")), nil
 	case durable.TaskFailed:
-		return sys.FailCode(sys.ErrnoInternal, nonempty(record.Resolution.Reason, "external task failed")), nil
+		return sys.FailCode(sys.ErrnoInternal, cmp.Or(record.Resolution.Reason, "external task failed")), nil
 	case durable.TaskCancelled:
 		return sys.FailCode(sys.ErrnoDenied, "external task cancelled"), nil
 	case durable.TaskExpired:
@@ -125,11 +125,4 @@ func randomID() (string, error) {
 		return "", err
 	}
 	return "task_" + hex.EncodeToString(raw[:]), nil
-}
-
-func nonempty(value, fallback string) string {
-	if value != "" {
-		return value
-	}
-	return fallback
 }
