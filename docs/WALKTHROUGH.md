@@ -182,8 +182,8 @@ A manifest grant names a syscall and carries a configuration that only its
 driver reads. `Manifest.LeafSyscalls()` separates the grants the runtime serves
 itself (`sys.timer`, `sys.declassify`) from the grants a driver serves.
 
-The assembly lists its driver registrations at compile time (aurora-dist's
-`newProvider`). A driver that is not registered does not exist: there is no
+The assembly lists its driver registrations at compile time (in aurora-dist's
+`dist.New`). A driver that is not registered does not exist: there is no
 plugin path and no lookup by name at run time. A registration has two methods:
 
 ```go
