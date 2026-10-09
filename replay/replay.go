@@ -29,7 +29,6 @@ type Tape interface {
 	Begin(syscall sys.Syscall) error
 	// Commit appends the completion record for the open intent.
 	Commit(result sys.SyscallResult) error
-	Reset()
 }
 
 // OpenIntentError reports that replay reached an intent record with no
@@ -83,7 +82,8 @@ func (d *Dispatcher[K]) Dispatch(ctx context.Context, cred K, syscall sys.Syscal
 		return sys.SyscallResult{}, err
 	}
 	if result.Status() == sys.StatusYield {
-		d.tape.Reset()
+		// The intent stays open: the quantum ends here, and the next one meets
+		// the intent at the journal's tail and drives it again.
 		return result, nil
 	}
 	if err := d.tape.Commit(result); err != nil {

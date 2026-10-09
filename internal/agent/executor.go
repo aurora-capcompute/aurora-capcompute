@@ -123,11 +123,11 @@ func (r *Runtime) runQuantum(ctx context.Context, cred durable.ProcessContext, i
 	}
 	// An instance never outlives its quantum.
 	defer process.Close(context.Background())
-	handle, err := capcompute.Resume(ctx, process)
+	results, err := capcompute.Resume(ctx, process)
 	if err != nil {
 		return failed(err)
 	}
-	result := <-handle.Results
+	result := <-results
 	return quantumResult{status: result.Status, err: result.Err}
 }
 

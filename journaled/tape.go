@@ -92,75 +92,42 @@ func NewTape(journal Journal) *Tape {
 	return &Tape{journal: journal}
 }
 
-// loadExecution reads the record at position: it must be the expected kind, or
-// the journal is corrupt.
-func (t *Tape) loadExecution(position int, want Kind, reason string) (Record, error) {
-	record, err := t.journal.Load(position)
-	if err != nil {
-		return Record{}, err
-	}
-	if record.Kind != want {
-		return Record{}, CorruptJournalError{Position: position, Reason: reason}
-	}
-	return record, nil
-}
-
 // Next returns a recorded outcome for syscall, ok=false when syscall is new,
 // or replay.OpenIntentError when the journal ends in this syscall's intent
-// with no completion.
+// with no completion. The journal's structure was checked by Verify before the
+// quantum began, so every record is the kind its position says.
 func (t *Tape) Next(syscall sys.Syscall) (sys.SyscallResult, bool, error) {
-	if t == nil || t.cursor >= t.journal.Length() {
+	if t.cursor >= t.journal.Length() {
 		return sys.SyscallResult{}, false, nil
 	}
-
-	intent, err := t.loadExecution(t.cursor, KindIntent, "expected an intent record")
+	intent, err := t.journal.Load(t.cursor)
 	if err != nil {
 		return sys.SyscallResult{}, false, err
 	}
-	if intent.Syscall == nil {
-		return sys.SyscallResult{}, false, CorruptJournalError{Position: t.cursor, Reason: "expected an intent record"}
-	}
 	if !sameSyscall(*intent.Syscall, syscall) {
-		return sys.SyscallResult{}, false, ReplayDivergedError{
-			Index: t.cursor,
-			Want:  *intent.Syscall,
-			Got:   syscall,
-		}
+		return sys.SyscallResult{}, false, ReplayDivergedError{Index: t.cursor, Want: *intent.Syscall, Got: syscall}
 	}
-
 	if t.cursor+1 >= t.journal.Length() {
 		// Open intent at the tail: dispatched once, outcome unknown.
 		t.cursor++
 		t.pending = true
-		return sys.SyscallResult{}, false, replay.OpenIntentError{
-			Position: intent.Position,
-			Syscall:  syscall,
-		}
+		return sys.SyscallResult{}, false, replay.OpenIntentError{Position: intent.Position, Syscall: syscall}
 	}
-
-	completion, err := t.loadExecution(t.cursor+1, KindCompletion, "expected a completion record")
+	completion, err := t.journal.Load(t.cursor + 1)
 	if err != nil {
 		return sys.SyscallResult{}, false, err
-	}
-	if completion.Result == nil {
-		return sys.SyscallResult{}, false, CorruptJournalError{Position: t.cursor + 1, Reason: "expected a completion record"}
 	}
 	t.cursor += 2
 	return *completion.Result, true, nil
 }
 
-// Begin appends the intent record for a fresh syscall — before it executes.
+// Begin appends the intent record for a fresh syscall — before it executes. It
+// refuses while an intent is open: a guest that keeps calling after a yield
+// would otherwise write a second intent behind the first.
 func (t *Tape) Begin(syscall sys.Syscall) error {
-	if t == nil {
-		return fmt.Errorf("begin on nil tape")
-	}
 	if t.pending {
 		return fmt.Errorf("begin: an intent is already open at position %d", t.journal.Length()-1)
 	}
-	if t.cursor != t.journal.Length() {
-		return fmt.Errorf("begin: cursor %d has not consumed the journal (length %d)", t.cursor, t.journal.Length())
-	}
-
 	recorded := syscall.Copy()
 	if err := appendRecord(t.journal, Record{Kind: KindIntent, Syscall: &recorded}); err != nil {
 		return err
@@ -173,13 +140,6 @@ func (t *Tape) Begin(syscall sys.Syscall) error {
 // Commit appends the completion record for the open intent — after the
 // outcome is known and before the guest observes it.
 func (t *Tape) Commit(result sys.SyscallResult) error {
-	if t == nil || !t.pending {
-		return fmt.Errorf("commit: no open intent")
-	}
-	if result.Status() != sys.StatusResult && result.Status() != sys.StatusFailed {
-		return fmt.Errorf("cannot commit invalid result %q", result.Status())
-	}
-
 	recorded := result.Copy()
 	if err := appendRecord(t.journal, Record{Kind: KindCompletion, Result: &recorded}); err != nil {
 		return err
@@ -187,14 +147,6 @@ func (t *Tape) Commit(result sys.SyscallResult) error {
 	t.cursor++
 	t.pending = false
 	return nil
-}
-
-func (t *Tape) Reset() {
-	if t == nil {
-		return
-	}
-	t.cursor = 0
-	t.pending = false
 }
 
 // Verify walks the whole journal and checks its structure: positions in

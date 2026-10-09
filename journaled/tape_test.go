@@ -65,13 +65,11 @@ func TestBeginCommitAppendsIntentCompletionPair(t *testing.T) {
 	}
 }
 
-func TestResetReplaysRecordedResults(t *testing.T) {
-	tape := newTestTape(t, &fakeJournal{})
-	syscall := sys.Syscall{Name: "step.one"}
-	record(t, tape, syscall, sys.Result([]byte(`{"ok":true}`)))
+func TestNextReplaysRecordedResults(t *testing.T) {
+	journal := &fakeJournal{}
+	record(t, newTestTape(t, journal), sys.Syscall{Name: "step.one"}, sys.Result([]byte(`{"ok":true}`)))
 
-	tape.Reset()
-	result, ok, err := tape.Next(syscall)
+	result, ok, err := newTestTape(t, journal).Next(sys.Syscall{Name: "step.one"})
 	if err != nil {
 		t.Fatalf("next: %v", err)
 	}
@@ -83,13 +81,11 @@ func TestResetReplaysRecordedResults(t *testing.T) {
 	}
 }
 
-func TestResetReplaysRecordedFailures(t *testing.T) {
-	tape := newTestTape(t, &fakeJournal{})
-	syscall := sys.Syscall{Name: "step.one"}
-	record(t, tape, syscall, sys.FailCode(sys.ErrnoDenied, "permission denied"))
+func TestNextReplaysRecordedFailures(t *testing.T) {
+	journal := &fakeJournal{}
+	record(t, newTestTape(t, journal), sys.Syscall{Name: "step.one"}, sys.FailCode(sys.ErrnoDenied, "permission denied"))
 
-	tape.Reset()
-	result, ok, err := tape.Next(syscall)
+	result, ok, err := newTestTape(t, journal).Next(sys.Syscall{Name: "step.one"})
 	if err != nil {
 		t.Fatalf("next: %v", err)
 	}
@@ -105,11 +101,10 @@ func TestResetReplaysRecordedFailures(t *testing.T) {
 }
 
 func TestReplayDivergenceDetected(t *testing.T) {
-	tape := newTestTape(t, &fakeJournal{})
-	record(t, tape, sys.Syscall{Name: "step.one"}, sys.Result(nil))
+	journal := &fakeJournal{}
+	record(t, newTestTape(t, journal), sys.Syscall{Name: "step.one"}, sys.Result(nil))
 
-	tape.Reset()
-	_, _, err := tape.Next(sys.Syscall{Name: "step.other"})
+	_, _, err := newTestTape(t, journal).Next(sys.Syscall{Name: "step.other"})
 	var diverged journaled.ReplayDivergedError
 	if !errors.As(err, &diverged) {
 		t.Fatalf("error = %v, want ReplayDivergedError", err)
@@ -153,17 +148,16 @@ func TestOpenIntentSurfacedAfterCrash(t *testing.T) {
 	}
 }
 
-func TestYieldLeavesIntentOpenAcrossReset(t *testing.T) {
+func TestYieldLeavesIntentOpenForTheNextQuantum(t *testing.T) {
 	journal := &fakeJournal{}
-	tape := newTestTape(t, journal)
 	syscall := sys.Syscall{Name: "task.request"}
 
-	if err := tape.Begin(syscall); err != nil {
+	if err := newTestTape(t, journal).Begin(syscall); err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	// Dispatch yielded: nothing committed, the run is re-driven from zero.
-	tape.Reset()
-
+	// Dispatch yielded: nothing committed. The next quantum's tape meets the
+	// open intent.
+	tape := newTestTape(t, journal)
 	_, replayed, err := tape.Next(syscall)
 	if replayed {
 		t.Fatal("yielded intent served as a completed result")
@@ -184,13 +178,6 @@ func TestBeginRefusedWhileIntentOpen(t *testing.T) {
 	}
 	if err := tape.Begin(sys.Syscall{Name: "step.two"}); err == nil {
 		t.Fatal("second begin with an open intent did not error")
-	}
-}
-
-func TestCommitWithoutIntentRefused(t *testing.T) {
-	tape := newTestTape(t, &fakeJournal{})
-	if err := tape.Commit(sys.Result(nil)); err == nil {
-		t.Fatal("commit without an open intent did not error")
 	}
 }
 

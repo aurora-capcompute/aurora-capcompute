@@ -4,7 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
 	"strings"
 	"sync"
 
@@ -73,25 +74,17 @@ func (t *Taints[K]) intersection(pid K, forbid []string) []string {
 			tainted = append(tainted, label)
 		}
 	}
-	sort.Strings(tainted)
+	slices.Sort(tainted)
 	return tainted
 }
 
 // Snapshot returns the labels a process has accumulated — its current taint — so
 // a caller can carry that provenance elsewhere (e.g. onto session history a later
 // run will observe, keeping the flow policy intact across that boundary).
-func (t *Taints[K]) Snapshot(pid K) []string { return t.snapshot(pid) }
-
-func (t *Taints[K]) snapshot(pid K) []string {
+func (t *Taints[K]) Snapshot(pid K) []string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	taint := t.observed[pid]
-	labels := make([]string, 0, len(taint))
-	for label := range taint {
-		labels = append(labels, label)
-	}
-	sort.Strings(labels)
-	return labels
+	return slices.Sorted(maps.Keys(t.observed[pid]))
 }
 
 // DeclassifyRequest is the args payload of the reserved sys.declassify
@@ -144,9 +137,8 @@ func (d *Declassifier[K]) Dispatch(ctx context.Context, cred K, syscall sys.Sysc
 	if err := json.Unmarshal(syscall.Args, &request); err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode declassify args: %v", err)), nil
 	}
-	if len(request.Labels) == 0 {
-		return sys.FailCode(sys.ErrnoInvalidArgs, "declassify: labels are required"), nil
-	}
+	// The Validator already held the arguments to DeclassifyInputSchema, which
+	// requires at least one label; it cannot see a reason that is only spaces.
 	if strings.TrimSpace(request.Reason) == "" {
 		return sys.FailCode(sys.ErrnoInvalidArgs, "declassify: a reason is required"), nil
 	}
@@ -154,9 +146,7 @@ func (d *Declassifier[K]) Dispatch(ctx context.Context, cred K, syscall sys.Sysc
 		return sys.Yield(fmt.Sprintf("Approve declassifying %v: %s", request.Labels, request.Reason)), nil
 	}
 
-	crossed := append([]string(nil), request.Labels...)
-	sort.Strings(crossed)
-	result, err := json.Marshal(DeclassifyResult{Declassified: crossed})
+	result, err := json.Marshal(DeclassifyResult{Declassified: slices.Sorted(slices.Values(request.Labels))})
 	if err != nil {
 		return sys.SyscallResult{}, err
 	}

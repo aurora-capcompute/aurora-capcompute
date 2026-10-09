@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"strconv"
@@ -160,9 +161,6 @@ func menuSchema(entries []Entry) json.RawMessage {
 			branches = append(branches, entry.Input)
 		}
 	}
-	if len(branches) == 0 {
-		return nil
-	}
 	// Cases told apart by a property their own shape does not pin — an internet
 	// method — share one branch. A oneOf over two copies of it matches every
 	// instance twice, which is exactly one too many: the union would admit
@@ -253,9 +251,6 @@ func (t *Table) Add(family Family) error {
 		return fmt.Errorf("syscall %q is already reserved by a layer above", syscall)
 	}
 	for _, entry := range family.Entries {
-		if entry.Handler == nil {
-			return fmt.Errorf("entry %s has no handler", entry.Key)
-		}
 		if _, taken := t.entries[entry.Key]; taken {
 			return fmt.Errorf("operation %s is granted twice", entry.Key)
 		}
@@ -345,22 +340,15 @@ func (t *Table) Forbidden(call sys.Syscall) (forbid []string, sink string) {
 // strictest is the union of every bar under one syscall: what applies when the
 // table cannot tell which case a call is.
 func (t *Table) strictest(syscall string) []string {
-	seen := make(map[string]struct{})
-	var forbid []string
+	forbid := make(map[string]struct{})
 	for key, entry := range t.entries {
-		if key.Syscall != syscall {
-			continue
-		}
-		for _, label := range entry.Forbid {
-			if _, dup := seen[label]; dup {
-				continue
+		if key.Syscall == syscall {
+			for _, label := range entry.Forbid {
+				forbid[label] = struct{}{}
 			}
-			seen[label] = struct{}{}
-			forbid = append(forbid, label)
 		}
 	}
-	sort.Strings(forbid)
-	return forbid
+	return slices.Sorted(maps.Keys(forbid))
 }
 
 // Labels reports the source classes a call's result carries. Unlike Forbidden
@@ -416,9 +404,6 @@ type Descriptor struct {
 // an entry, so a decorator that forgets to intercept its own syscall fails
 // closed at the leaf rather than reaching a handler that was never there.
 func (t *Table) Reserve(descriptor Descriptor) error {
-	if descriptor.Name == "" {
-		return fmt.Errorf("a reserved syscall must be named")
-	}
 	if _, taken := t.routes[descriptor.Name]; taken {
 		return fmt.Errorf("syscall %q is already served by a handler", descriptor.Name)
 	}

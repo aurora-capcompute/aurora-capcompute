@@ -195,12 +195,13 @@ func TestDeclassifySyscallLifecycle(t *testing.T) {
 		t.Fatalf("yielded declassify lifted taint early: %#v", result)
 	}
 
-	// The approval resolves and the run resumes: the guest re-runs from the
-	// start (the yield reset the tape), replays internet.read from the
-	// journal, and re-issues the declassify — which meets its own open
-	// intent and now carries the resolved Authorization.
-	call(t, chain, "p1", "internet.read")
-	result, err = chain.Dispatch(context.Background(), testCred{id: "p1"}, declassify,
+	// The approval resolves and the run resumes in a new quantum: the guest
+	// re-runs from the start, replays internet.read from the journal, and
+	// re-issues the declassify — which meets its own open intent and now
+	// carries the resolved Authorization.
+	resumed := newChain(t)
+	call(t, resumed, "p1", "internet.read")
+	result, err = resumed.Dispatch(context.Background(), testCred{id: "p1"}, declassify,
 		sys.Authorization{Decision: sys.Approved, Actor: "alice"})
 	if err != nil {
 		t.Fatalf("approved declassify: %v", err)
@@ -208,7 +209,7 @@ func TestDeclassifySyscallLifecycle(t *testing.T) {
 	if result.Status() != sys.StatusResult {
 		t.Fatalf("approved declassify = %#v", result)
 	}
-	if result := call(t, chain, "p1", "k8s.delete"); result.Status() != sys.StatusResult {
+	if result := call(t, resumed, "p1", "k8s.delete"); result.Status() != sys.StatusResult {
 		t.Fatalf("declassified k8s.delete = %#v, want result", result)
 	}
 
@@ -239,7 +240,6 @@ func TestDeclassifyValidatesRequest(t *testing.T) {
 	table := flowTable(t, echo)
 	declassifier := NewDeclassifier(capability.NewDispatcher[testCred](table))
 	for name, args := range map[string]string{
-		"no labels": `{"labels":[],"reason":"r"}`,
 		"no reason": `{"labels":["x"],"reason":"  "}`,
 		"bad json":  `{`,
 	} {

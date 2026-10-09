@@ -16,7 +16,6 @@ type fakeTape struct {
 
 	begun     bool
 	committed bool
-	reset     bool
 }
 
 func (t *fakeTape) Next(sys.Syscall) (sys.SyscallResult, bool, error) {
@@ -33,10 +32,6 @@ func (t *fakeTape) Commit(sys.SyscallResult) error {
 	return nil
 }
 
-func (t *fakeTape) Reset() {
-	t.reset = true
-}
-
 type nextFunc func(context.Context, string, sys.Syscall, sys.Authorization) (sys.SyscallResult, error)
 
 func (f nextFunc) Dispatch(ctx context.Context, cred string, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
@@ -49,7 +44,7 @@ func dispatchWith(t *testing.T, tape *fakeTape, next nextFunc) (sys.SyscallResul
 		context.Background(), "run-1", sys.Syscall{Name: "step.one"}, sys.Authorization{})
 }
 
-func TestDispatcherResetsTapeOnYield(t *testing.T) {
+func TestDispatcherLeavesAYieldOpen(t *testing.T) {
 	tape := &fakeTape{}
 	result, err := dispatchWith(t, tape, func(context.Context, string, sys.Syscall, sys.Authorization) (sys.SyscallResult, error) {
 		return sys.Yield("waiting"), nil
@@ -62,9 +57,6 @@ func TestDispatcherResetsTapeOnYield(t *testing.T) {
 	}
 	if !tape.begun {
 		t.Fatal("yielding syscall must still journal its intent first")
-	}
-	if !tape.reset {
-		t.Fatal("tape was not reset")
 	}
 	if tape.committed {
 		t.Fatal("yield should not be committed")
@@ -87,9 +79,6 @@ func TestDispatcherJournalsIntentThenCompletion(t *testing.T) {
 	}
 	if !tape.committed {
 		t.Fatal("result was not committed")
-	}
-	if tape.reset {
-		t.Fatal("result should not reset tape")
 	}
 }
 
