@@ -305,7 +305,7 @@ func failedEffectsProcess(t *testing.T, program ProgramData) (*Runtime, string) 
 // created from. When the program's content changes under the same name, the
 // process can neither resume nor restart; the new bytes serve new processes.
 func TestProcessImmutablyBoundToProgramBytes(t *testing.T) {
-	runtime, processID := failedEffectsProcess(t, testProgram("program@1", buildEchoProgram(t)))
+	runtime, processID := failedEffectsProcess(t, testProgram("program@1", withCustomSection(buildProgram(t))))
 
 	for _, mode := range []RetryMode{RetryResume, RetryRestart} {
 		_, err := runtime.Retry(processID, mode)
@@ -317,12 +317,13 @@ func TestProcessImmutablyBoundToProgramBytes(t *testing.T) {
 		}
 	}
 
-	// The new bytes run in a new process.
+	// The new bytes run in a new process: it runs the same script to the same
+	// failure, not into the binding.
 	session, err := runtime.CreateSession("", nil)
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	fresh, err := runtime.CreateProcess(session.ID, "hello from the new program", manifest.Manifest{
+	fresh, err := runtime.CreateProcess(session.ID, "place the order again", manifest.Manifest{
 		Version:  manifest.Version,
 		Program:  "program@1",
 		Syscalls: cognitionGrants("billing.charge"),
@@ -330,10 +331,16 @@ func TestProcessImmutablyBoundToProgramBytes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create process: %v", err)
 	}
-	final := waitForStatus(t, runtime, fresh.ID, durable.ProcessCompleted)
-	if final.Answer != "hello from the new program" {
-		t.Fatalf("answer = %q, want the echo program's answer", final.Answer)
+	final := waitForStatus(t, runtime, fresh.ID, durable.ProcessFailed)
+	if strings.Contains(final.Error, "immutable") {
+		t.Fatalf("new process error = %q, want it to run under the new bytes", final.Error)
 	}
+}
+
+// withCustomSection appends a one-byte custom section named "note" to a wasm
+// module: other bytes, the same program.
+func withCustomSection(wasm []byte) []byte {
+	return append(append([]byte(nil), wasm...), 0x00, 0x06, 0x04, 'n', 'o', 't', 'e', 0x00)
 }
 
 // TestProcessStrandedBySchemaChange: the declared schemas are part of a program's
@@ -432,46 +439,6 @@ func buildProgram(t *testing.T) []byte {
 		t.Skipf("agent program unavailable: %v", programError)
 	}
 	return programWasm
-}
-
-var (
-	echoOnce  sync.Once
-	echoWasm  []byte
-	echoError error
-)
-
-// buildEchoProgram compiles the Rust echo program — different bytes for the
-// same registered name, the probe for the process↔program immutability law.
-func buildEchoProgram(t *testing.T) []byte {
-	t.Helper()
-	if _, err := exec.LookPath("cargo"); err != nil {
-		t.Skip("cargo not found")
-	}
-	echoOnce.Do(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancel()
-		cmd := exec.CommandContext(ctx, "cargo", "build",
-			"--release",
-			"--target", "wasm32-wasip1",
-			"-p", "echo",
-		)
-		cmd.Dir = "../../../aurora-brains"
-		if out, err := cmd.CombinedOutput(); err != nil {
-			echoError = fmt.Errorf("build echo program: %v\n%s", err, out)
-			return
-		}
-		wasmPath := filepath.Join(cmd.Dir, "target", "wasm32-wasip1", "release", "echo.wasm")
-		raw, err := os.ReadFile(wasmPath)
-		if err != nil {
-			echoError = fmt.Errorf("read echo program: %v", err)
-			return
-		}
-		echoWasm = raw
-	})
-	if echoError != nil {
-		t.Skipf("echo program unavailable: %v", echoError)
-	}
-	return echoWasm
 }
 
 // firstAndLaterUser returns the first user message (the run's input) and whether
