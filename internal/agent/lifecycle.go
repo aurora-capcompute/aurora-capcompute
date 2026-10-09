@@ -79,7 +79,7 @@ func newLifecycleDispatcher(
 	if _, ok := manifest.FindSyscall(manifestpkg.DeclassifySyscall); ok {
 		err := table.Reserve(capability.Descriptor{
 			Name:        manifestpkg.DeclassifySyscall,
-			Description: "request lifting labels from this run's taint; each crossing requires human approval and is journaled with its reason",
+			Description: "Request to lift labels from this run's taint. Use it when flow policy refuses a call: give the labels that the refusal names, and the reason. A human must approve each request. The journal keeps the reason.",
 			InputSchema: monitor.DeclassifyInputSchema,
 		})
 		if err != nil {
