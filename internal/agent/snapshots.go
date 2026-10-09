@@ -7,6 +7,7 @@ package agent
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"slices"
 	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
@@ -43,6 +44,31 @@ func (r *Runtime) storedSessionLocked(session *sessionState) durable.Session {
 	}
 }
 
+// historyLocked is the conversation of a list of processes: each completed one
+// adds its input and its answer, and the answer carries the run's taint. It is
+// derived, not stored, so a restarted process replaces its turn.
+func (r *Runtime) historyLocked(processIDs []string) []HistoryMessage {
+	var history []HistoryMessage
+	for _, id := range processIDs {
+		proc := r.processes[id]
+		if proc.status != durable.ProcessCompleted {
+			continue
+		}
+		history = append(history,
+			HistoryMessage{Role: "user", Content: proc.input},
+			HistoryMessage{Role: "assistant", Content: proc.answer, Labels: proc.labels},
+		)
+	}
+	return history
+}
+
+// historyBeforeLocked is the conversation a process reads: its session's turns
+// before it.
+func (r *Runtime) historyBeforeLocked(proc *processState) []HistoryMessage {
+	ids := r.sessions[proc.sessionID].processIDs
+	return r.historyLocked(ids[:slices.Index(ids, proc.id)])
+}
+
 func (r *Runtime) sessionSnapshotLocked(session *sessionState) SessionSnapshot {
 	procs := make([]ProcessLog, 0, len(session.processIDs))
 	for _, processID := range session.processIDs {
@@ -63,7 +89,7 @@ func (r *Runtime) sessionSnapshotLocked(session *sessionState) SessionSnapshot {
 	}
 	return SessionSnapshot{
 		SessionSummary: r.sessionSummaryLocked(session),
-		History:        append([]HistoryMessage(nil), session.history...),
+		History:        r.historyLocked(session.processIDs),
 		Processes:      procs,
 	}
 }

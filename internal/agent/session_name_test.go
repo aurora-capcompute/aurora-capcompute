@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 )
 
 func bootSessionRuntime(t *testing.T, store *runtimeStore) *Runtime {
@@ -99,5 +100,54 @@ func TestSessionTitleIsTheFirstInput(t *testing.T) {
 	}
 	if session.Title != "place the order" {
 		t.Fatalf("title after restart = %q, want the first input", session.Title)
+	}
+}
+
+// A restarted process replaces its turn in the session history, so a later
+// process reads one answer for it, not the abandoned one too. The history is
+// the same after a host restart.
+func TestRestartReplacesTheTurnInHistory(t *testing.T) {
+	log := newMemLog()
+	boot := func() *Runtime {
+		runtime, err := NewRuntime(context.Background(), Config{
+			Dispatchers: &runtimeDispatchers{},
+			Programs:    []ProgramData{testProgram("program@1", buildProgram(t))},
+			Log:         log,
+			TaskSecret:  []byte("stable-secret"),
+		})
+		if err != nil {
+			t.Fatalf("boot runtime: %v", err)
+		}
+		return runtime
+	}
+	first := boot()
+	session, err := first.CreateSession("", nil)
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	proc, err := first.CreateProcess(session.ID, "finish", manifest.Manifest{
+		Version: manifest.Version, Program: "program@1", Syscalls: cognitionGrants(),
+	})
+	if err != nil {
+		t.Fatalf("create process: %v", err)
+	}
+	waitForStatus(t, first, proc.ID, durable.ProcessCompleted)
+	if _, err := first.Retry(proc.ID, RetryRestart); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	waitForStatus(t, first, proc.ID, durable.ProcessCompleted)
+	if live, _ := first.GetSession(session.ID); len(live.History) != 2 {
+		t.Fatalf("history after the restart = %d entries, want one turn", len(live.History))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := first.Close(ctx); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	second := boot()
+	t.Cleanup(func() { _ = second.Close(context.Background()) })
+	if restored, _ := second.GetSession(session.ID); len(restored.History) != 2 {
+		t.Fatalf("history after a host restart = %d entries, want one turn", len(restored.History))
 	}
 }

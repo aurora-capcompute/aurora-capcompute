@@ -345,7 +345,6 @@ func (r *Runtime) CreateProcess(sessionID string, input string, spec manifest.Ma
 		id:        processID,
 		sessionID: sessionID,
 		input:     input,
-		history:   append([]HistoryMessage(nil), session.history...),
 		status:    durable.ProcessQueued,
 		attempt:   1,
 		createdAt: now,

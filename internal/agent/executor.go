@@ -170,11 +170,5 @@ func (r *Runtime) finishLocked(proc *processState, status durable.ProcessStatus,
 			session.activeProcessID = ""
 		}
 		session.updatedAt = now
-		if status == durable.ProcessCompleted {
-			session.history = append(session.history,
-				HistoryMessage{Role: "user", Content: proc.input},
-				HistoryMessage{Role: "assistant", Content: answer, Labels: proc.labels},
-			)
-		}
 	}
 }

@@ -38,7 +38,7 @@ func (r *Runtime) newDispatcher(ctx context.Context, cred durable.ProcessContext
 	// A manifest declaring history:false serves no session history on its
 	// sys.input — the process sees only its own input.
 	if spec.SharesHistory() {
-		history = append([]HistoryMessage(nil), proc.history...)
+		history = r.historyBeforeLocked(proc)
 	}
 	attempt := proc.attempt
 	journal := proc.journal

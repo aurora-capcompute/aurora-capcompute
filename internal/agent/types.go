@@ -103,7 +103,6 @@ type sessionState struct {
 	name            string
 	createdAt       time.Time
 	updatedAt       time.Time
-	history         []HistoryMessage
 	processIDs      []string
 	activeProcessID string
 	tags            map[string]string
@@ -113,7 +112,6 @@ type processState struct {
 	id          string
 	sessionID   string
 	input       string
-	history     []HistoryMessage
 	status      durable.ProcessStatus
 	attempt     int
 	createdAt   time.Time

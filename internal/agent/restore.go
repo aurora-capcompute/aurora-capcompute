@@ -98,15 +98,7 @@ func (r *Runtime) restoreSession(proj durable.Projection, histories map[string]*
 		// before it logged a record.
 		proc.journal = r.newJournal(proc, history, history.length(proc.revision, sr.ForkOffset))
 		r.processes[proc.id] = proc
-		proc.history = append([]HistoryMessage(nil), session.history...)
 		session.processIDs = append(session.processIDs, proc.id)
-		// Only a completed ROOT contributes to session history, matching the live
-		if proc.status == durable.ProcessCompleted {
-			session.history = append(session.history,
-				HistoryMessage{Role: "user", Content: proc.input},
-				HistoryMessage{Role: "assistant", Content: proc.answer, Labels: proc.labels},
-			)
-		}
 		if status != sr.Status {
 			if err := r.appendProcess(proc); err != nil {
 				return err

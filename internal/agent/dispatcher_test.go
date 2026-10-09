@@ -20,6 +20,7 @@ func activationRuntime(provider fixedProvider) *Runtime {
 	return &Runtime{
 		dispatchers: provider,
 		log:         log,
+		sessions:    map[string]*sessionState{"s1": {id: "s1", processIDs: []string{"p1"}}},
 		processes: map[string]*processState{
 			"p1": {id: "p1", sessionID: "s1", revision: 1,
 				journal: newLogJournal(log, "s1", "p1", 1, newProcessHistory(), 0, time.Now),
