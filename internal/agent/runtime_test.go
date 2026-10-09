@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -660,9 +661,9 @@ func TestUnansweredApprovalExpires(t *testing.T) {
 	}
 }
 
-// failThenSucceedDispatchers drives a run that does a tool call, then on its
-// second turn requests an unavailable capability (failing the proc) on the first
-// attempt and finishes on the second. The shared counter persists across the
+// failThenSucceedDispatchers drives a run that does a tool call, then fails its
+// second turn's LLM call (failing the proc) on the first attempt and finishes on
+// the second. The shared counter persists across the
 // run's attempts.
 type failThenSucceedDispatchers struct {
 	mu    sync.Mutex
@@ -701,9 +702,9 @@ func (d *failThenSucceedDispatcher) Dispatch(_ context.Context, _ durable.Proces
 		n := d.parent.turn2
 		d.parent.mu.Unlock()
 		if n == 1 {
-			// First attempt: request a capability that was not granted; the program
-			// rejects it and the run fails after several recorded steps.
-			return chatActions(`{"actions":[{"action":"missing.tool","content":{}}]}`), nil
+			// First attempt: the LLM call fails, and the run fails after several
+			// recorded steps.
+			return sys.Fail("the model provider is unavailable"), nil
 		}
 		return chatActions(`{"actions":[{"action":"final","content":{"answer":"recovered"}}]}`), nil
 	default:
@@ -813,9 +814,8 @@ func TestRuntimeHardRetryForksFromBeginning(t *testing.T) {
 	}
 }
 
-// effectsDispatchers drives a guest that takes an effect and then calls a
-// capability it was never granted — failing with the turn's savepoint section
-// still open. That is the shape the program-immutability tests need: a process
+// effectsDispatchers drives a guest that opens a section, takes an effect, and
+// then fails on its next LLM call — failing with the section still open. That is the shape the program-immutability tests need: a process
 // parked in a terminal Failed state with a real journal behind it.
 type effectsDispatchers struct{ d *effectsDispatcher }
 
@@ -839,7 +839,12 @@ func (d *effectsDispatcher) Dispatch(_ context.Context, _ durable.ProcessContext
 		d.mu.Unlock()
 		return sys.Result(json.RawMessage(`{"charge_id":"c1"}`)), nil
 	case "core.openaiApi":
-		return chatActions(`{"actions":[{"action":"billing.charge","content":{"amount":100}},{"action":"kaboom.unavailable","content":{}}]}`), nil
+		// The first turn opens a section and charges. The LLM call after the
+		// charge fails, so the process fails with the section still open.
+		if bytes.Contains(syscall.Args, []byte("charge_id")) {
+			return sys.Fail("the model provider is unavailable"), nil
+		}
+		return chatActions(`{"actions":[{"action":"sys.begin","content":{}},{"action":"billing.charge","content":{"amount":100}}]}`), nil
 	default:
 		return sys.Fail("unsupported call: " + syscall.Name), nil
 	}

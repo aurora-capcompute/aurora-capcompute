@@ -131,10 +131,11 @@ func TestAbortBudgetSurvivesRestore(t *testing.T) {
 	}
 }
 
-// The guest-backed half: a turn that breaks mid-way leaves its savepoint open,
-// and a resume must fork there so the whole turn re-executes live. Without the
-// fork, a deterministic failure replays its broken completion forever and the
-// retry can never make progress — which is what the brackets exist to prevent.
+// The guest-backed half: a failure inside a section the model opened leaves the
+// section open, and a resume must fork there so the whole section re-executes
+// live. Without the fork, a deterministic failure replays its broken completion
+// forever and the retry can never make progress — which is what the brackets
+// exist to prevent.
 func TestResumeForksAtTheOpenBegin(t *testing.T) {
 	disp := &effectsDispatcher{}
 	runtime := newEffectsRuntime(t, disp, newMemLog())
