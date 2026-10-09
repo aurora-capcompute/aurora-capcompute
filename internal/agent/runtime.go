@@ -552,7 +552,6 @@ func (r *Runtime) relaunchLocked(proc *processState) (ProcessSnapshot, error) {
 // section re-running, or an explicit restart — never for a plain resume, which
 // continues the same revision. Must be called with the runtime mutex held.
 func (r *Runtime) forkJournalLocked(proc *processState, forkOffset int) {
-	parent := proc.journal
 	// The outgoing revision can never run again — this fork is its abandonment —
 	// so release its taint. Otherwise the shared taint map accumulates one dead
 	// entry per abort-retry/restart fork for the runtime's lifetime; the new
@@ -561,11 +560,7 @@ func (r *Runtime) forkJournalLocked(proc *processState, forkOffset int) {
 	proc.revision++
 	proc.forkOffset = forkOffset
 	proc.lastFailureLength = 0
-	proc.journal = newLogJournal(
-		parent.log, parent.session, parent.proc, proc.revision,
-		parent.history, forkOffset,
-		parent.now,
-	)
+	proc.journal = r.newJournal(proc, proc.journal.history, forkOffset)
 }
 
 func (r *Runtime) Close(ctx context.Context) error {

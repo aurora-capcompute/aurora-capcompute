@@ -134,8 +134,8 @@ type processState struct {
 	manifest      manifest.Manifest
 	revision      uint64
 	digest        string
-	// forkOffset is the current revision's copy-on-write fork point (positions
-	// [0, forkOffset) are served from the shared history). It is persisted so a
+	// forkOffset is the current revision's fork point (positions [0, forkOffset)
+	// hold an earlier revision's records). It is persisted so a
 	// revision that was forked but crashed before logging any record can be
 	// reconstructed on restore.
 	forkOffset int

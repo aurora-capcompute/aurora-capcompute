@@ -26,11 +26,11 @@ func (r *Runtime) restore(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		journals, histories, err := foldJournals(events, r.log, sessionID, r.journalNow)
+		histories, err := foldJournals(events)
 		if err != nil {
 			return err
 		}
-		if err := r.restoreSession(proj, journals, histories); err != nil {
+		if err := r.restoreSession(proj, histories); err != nil {
 			return err
 		}
 		r.tasks.seed(proj.TaskList())
@@ -40,9 +40,9 @@ func (r *Runtime) restore(ctx context.Context) error {
 
 // restoreSession folds one session's projection back into memory: it rebuilds the
 // session, its processes (in creation order, deriving conversation history from
-// completed processes), and attaches each process's journal revision. Processes left mid-flight
+// completed processes), and opens each process's journal at its current revision. Processes left mid-flight
 // by a crash are marked interrupted and re-recorded.
-func (r *Runtime) restoreSession(proj durable.Projection, journals map[string]map[uint64]*logJournal, histories map[string]*processHistory) error {
+func (r *Runtime) restoreSession(proj durable.Projection, histories map[string]*processHistory) error {
 	stored := proj.Session
 	if stored.ID == "" {
 		return nil
@@ -89,20 +89,14 @@ func (r *Runtime) restoreSession(proj durable.Projection, journals map[string]ma
 			forkOffset:   sr.ForkOffset,
 			abortRetries: sr.AbortRetries,
 		}
-		if j := journals[proc.id][proc.revision]; j != nil {
-			proc.journal = j
-		} else if history := histories[proc.id]; history != nil {
-			// No records logged for this revision yet (process crashed before any
-			// syscall). Share the existing history so replay can serve the shared
-			// prefix; the exact fork point was persisted when the revision forked.
-			proc.journal = r.newJournal(proc, history, sr.ForkOffset)
-		} else {
-			// No journal events survive for this process at all — it never
-			// journaled anything. An empty view at fork 0 keeps
-			// Journal()/snapshots well-defined (length 0, no dangling shared prefix
-			// beneath a stale fork offset); a hard restart forks from 0 anyway.
-			proc.journal = r.newJournal(proc, newProcessHistory(), 0)
+		history := histories[proc.id]
+		if history == nil {
+			// The process never journaled anything.
+			history = newProcessHistory()
 		}
+		// The persisted fork offset places a revision that forked but crashed
+		// before it logged a record.
+		proc.journal = r.newJournal(proc, history, history.length(proc.revision, sr.ForkOffset))
 		r.processes[proc.id] = proc
 		proc.history = append([]HistoryMessage(nil), session.history...)
 		session.processIDs = append(session.processIDs, proc.id)

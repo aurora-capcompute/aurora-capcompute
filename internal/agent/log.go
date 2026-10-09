@@ -45,7 +45,7 @@ func (r *Runtime) appendSession(session *sessionState) error {
 	return err
 }
 
-func (r *Runtime) newJournal(proc *processState, history *processHistory, forkOffset int) *logJournal {
+func (r *Runtime) newJournal(proc *processState, history *processHistory, length int) *logJournal {
 	return newLogJournal(r.log, proc.sessionID, proc.id, proc.revision,
-		history, forkOffset, r.journalNow)
+		history, length, r.journalNow)
 }

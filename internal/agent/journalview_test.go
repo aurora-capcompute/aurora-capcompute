@@ -37,6 +37,19 @@ func loadEntries(t *testing.T, j *logJournal) []string {
 	return out
 }
 
+// rebuild folds the stream and opens one revision of proc1 over it, the way
+// restore does.
+func rebuild(t *testing.T, log *memLog, scope string, rev uint64, forkOffset int) *logJournal {
+	t.Helper()
+	events, _ := log.Read(context.Background(), scope, 0)
+	histories, err := foldJournals(events)
+	if err != nil {
+		t.Fatalf("fold journals: %v", err)
+	}
+	history := histories["proc1"]
+	return newLogJournal(log, scope, "proc1", rev, history, history.length(rev, forkOffset), time.Now)
+}
+
 func TestLogJournalLinearRoundTrip(t *testing.T) {
 	log := newMemLog()
 	scope := "th"
@@ -56,12 +69,7 @@ func TestLogJournalLinearRoundTrip(t *testing.T) {
 	}
 
 	// Rebuild purely from the event stream and confirm identical records.
-	events, _ := log.Read(context.Background(), scope, 0)
-	journals, _, err := foldJournals(events, log, scope, now)
-	if err != nil {
-		t.Fatalf("fold journals: %v", err)
-	}
-	rebuilt := journals["proc1"][1]
+	rebuilt := rebuild(t, log, scope, 1, 0)
 	if got := loadEntries(t, rebuilt); len(got) != 3 || got[0] != `a="a"` || got[2] != `c="c"` {
 		t.Fatalf("rebuilt journal = %v", got)
 	}
@@ -86,12 +94,7 @@ func TestLogJournalRoundTripsHTMLCharactersVerbatim(t *testing.T) {
 	result := sys.Result([]byte(`{"text":"<done> & gone"}`))
 	appendPair(t, j, syscall, result)
 
-	events, _ := log.Read(context.Background(), scope, 0)
-	journals, _, err := foldJournals(events, log, scope, now)
-	if err != nil {
-		t.Fatalf("fold journals: %v", err)
-	}
-	rebuilt := journals["proc1"][1]
+	rebuilt := rebuild(t, log, scope, 1, 0)
 	intent, err := rebuilt.Load(0)
 	if err != nil || intent.Syscall == nil {
 		t.Fatalf("load intent: %+v, %v", intent, err)
@@ -128,6 +131,11 @@ func TestLogJournalForkSharesPrefixThenDiverges(t *testing.T) {
 	if child.Length() != 4 {
 		t.Fatalf("forked length = %d, want 4 (shared prefix records)", child.Length())
 	}
+	// A revision that forked and then crashed before its first record rebuilds
+	// at its persisted fork offset.
+	if got := rebuild(t, log, scope, 2, 4).Length(); got != 4 {
+		t.Fatalf("rebuilt empty fork length = %d, want 4", got)
+	}
 	syscall, result := pair("c2", "c2")
 	appendPair(t, child, syscall, result)
 	if got := loadEntries(t, child); len(got) != 3 || got[0] != `a="a"` || got[1] != `b="b"` || got[2] != `c2="c2"` {
@@ -143,15 +151,10 @@ func TestLogJournalForkSharesPrefixThenDiverges(t *testing.T) {
 	}
 
 	// Rebuild both revisions from the stream.
-	events, _ := log.Read(context.Background(), scope, 0)
-	journals, _, err := foldJournals(events, log, scope, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := loadEntries(t, journals["proc1"][1]); got[2] != `c="c"` {
+	if got := loadEntries(t, rebuild(t, log, scope, 1, 0)); got[2] != `c="c"` {
 		t.Fatalf("rebuilt rev1 = %v", got)
 	}
-	if got := loadEntries(t, journals["proc1"][2]); len(got) != 3 || got[2] != `c2="c2"` {
+	if got := loadEntries(t, rebuild(t, log, scope, 2, 4)); len(got) != 3 || got[2] != `c2="c2"` {
 		t.Fatalf("rebuilt rev2 = %v", got)
 	}
 }

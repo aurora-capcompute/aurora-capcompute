@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -29,9 +28,13 @@ type syscallRecordData struct {
 }
 
 // processHistory accumulates every (position, revision, record) triple written
-// for a process. All logJournal instances for the same process share one
-// processHistory so a forked revision can serve its shared prefix without a
-// parent-pointer chain.
+// for a process. It is the only copy of the records: every revision of the
+// process reads from it, with no parent-pointer chain.
+//
+// That works because revisions form a line. Each fork starts from the current
+// revision, and a revision writes only from its fork offset on. So the record a
+// revision sees at a position is the one the highest revision not above it
+// wrote there.
 type processHistory struct {
 	mu    sync.Mutex
 	byPos map[int][]histEntry
@@ -67,6 +70,22 @@ func (h *processHistory) getAt(position int, maxRev uint64) (journaled.Record, b
 		return journaled.Record{}, false
 	}
 	return copyRecord(best.record), true
+}
+
+// length is one past the last record a revision wrote, or its fork offset when
+// it wrote nothing yet.
+func (h *processHistory) length(revision uint64, forkOffset int) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	length := forkOffset
+	for position, written := range h.byPos {
+		for _, e := range written {
+			if e.revision == revision && position >= length {
+				length = position + 1
+			}
+		}
+	}
+	return length
 }
 
 // entries pairs every intent the process ever journaled, in every revision,
@@ -119,23 +138,19 @@ func copyRecord(rec journaled.Record) journaled.Record {
 	return out
 }
 
-// logJournal implements journaled.Journal over an event stream. Positions
-// [0, forkOffset) are served from the shared processHistory (written by prior
-// revisions); positions [forkOffset, ...) are from this revision's own records.
-// A record appended at forkOffset continues the shared prefix, whose tail Load
-// serves verbatim.
+// logJournal implements journaled.Journal over an event stream: one revision's
+// view of its process's history. Positions before the revision's fork offset
+// hold an earlier revision's records, and the rest hold its own.
 type logJournal struct {
 	log     eventlog.Log
 	session string
 	proc    string
 	rev     uint64
 	now     func() time.Time
+	history *processHistory
 
-	history    *processHistory
-	forkOffset int // positions [0, forkOffset) come from history
-
-	mu      sync.Mutex
-	records []journaled.Record // records appended during this revision
+	mu     sync.Mutex
+	length int
 }
 
 func newLogJournal(
@@ -144,12 +159,12 @@ func newLogJournal(
 	proc string,
 	rev uint64,
 	history *processHistory,
-	forkOffset int,
+	length int,
 	now func() time.Time,
 ) *logJournal {
 	return &logJournal{
 		log: log, session: session, proc: proc, rev: rev,
-		history: history, forkOffset: forkOffset,
+		history: history, length: length,
 		now: now,
 	}
 }
@@ -157,33 +172,25 @@ func newLogJournal(
 func (j *logJournal) Length() int {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	return j.forkOffset + len(j.records)
+	return j.length
 }
 
 func (j *logJournal) Load(index int) (journaled.Record, error) {
-	if index < j.forkOffset {
-		// Shared prefix: served from history. By contract this revision never
-		// writes to positions < forkOffset, so j.rev is a safe upper bound.
-		rec, ok := j.history.getAt(index, j.rev)
-		if !ok {
-			return journaled.Record{}, fmt.Errorf("journal record not found at index %d", index)
-		}
-		return rec, nil
+	if index >= j.Length() {
+		return journaled.Record{}, fmt.Errorf("journal record not found at index %d", index)
 	}
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	local := index - j.forkOffset
-	if local < 0 || local >= len(j.records) {
-		return journaled.Record{}, errors.New("journal record not found")
+	rec, ok := j.history.getAt(index, j.rev)
+	if !ok {
+		return journaled.Record{}, fmt.Errorf("journal record not found at index %d", index)
 	}
-	return copyRecord(j.records[local]), nil
+	return rec, nil
 }
 
 func (j *logJournal) Append(rec journaled.Record) error {
 	j.mu.Lock()
-	if rec.Position != j.forkOffset+len(j.records) {
-		j.mu.Unlock()
-		return fmt.Errorf("invalid journal position %d (want %d)", rec.Position, j.forkOffset+len(j.records))
+	defer j.mu.Unlock()
+	if rec.Position != j.length {
+		return fmt.Errorf("invalid journal position %d (want %d)", rec.Position, j.length)
 	}
 	stored := copyRecord(rec)
 	// Stamp the attempt: this revision wrote the record. Records served from
@@ -194,16 +201,15 @@ func (j *logJournal) Append(rec journaled.Record) error {
 		Record:   stored,
 	})
 	if err != nil {
-		j.mu.Unlock()
 		return err
 	}
 	if _, err := j.log.Append(context.Background(), j.session, ev); err != nil {
-		j.mu.Unlock()
 		return err
 	}
-	j.records = append(j.records, stored)
-	j.history.add(rec.Position, j.rev, stored) // update shared history while still holding j.mu
-	j.mu.Unlock()
+	// The record is in the history before the length admits it, so a Load
+	// below Length always finds it.
+	j.history.add(rec.Position, j.rev, stored)
+	j.length++
 	return nil
 }
 
@@ -266,56 +272,23 @@ func encodeOutcome(result sys.SyscallResult) JournalOutcome {
 	}
 }
 
-// foldJournals rebuilds every revision's journal for a session stream from its
-// syscall.recorded events. Revisions are linked to a shared processHistory so
-// forked journals can serve the shared prefix without parent-pointer chains. It
-// returns both the journals and the per-process histories (so callers that need
-// to create new revisions for an existing process can share the same history).
-// Every other event kind is skipped: only journal events carry journal records.
-func foldJournals(
-	events []eventlog.Event,
-	log eventlog.Log,
-	session string,
-	now func() time.Time,
-) (map[string]map[uint64]*logJournal, map[string]*processHistory, error) {
+// foldJournals rebuilds each process's history for a session stream from its
+// syscall.recorded events. Every other event kind is skipped: only journal
+// events carry journal records.
+func foldJournals(events []eventlog.Event) (map[string]*processHistory, error) {
 	histories := map[string]*processHistory{}
-	revData := map[string]map[uint64][]journaled.Record{} // process → rev → records (in log order)
-
 	for _, ev := range events {
 		if ev.Kind != evSyscall {
 			continue
 		}
 		var sd syscallRecordData
 		if err := json.Unmarshal(ev.Data, &sd); err != nil {
-			return nil, nil, fmt.Errorf("decode syscall.recorded: %w", err)
+			return nil, fmt.Errorf("decode syscall.recorded: %w", err)
 		}
-		rev := ev.Rev // authoritative; sd.Revision is the same on new events
 		if histories[ev.Proc] == nil {
 			histories[ev.Proc] = newProcessHistory()
 		}
-		histories[ev.Proc].add(sd.Record.Position, rev, sd.Record)
-		if revData[ev.Proc] == nil {
-			revData[ev.Proc] = map[uint64][]journaled.Record{}
-		}
-		revData[ev.Proc][rev] = append(revData[ev.Proc][rev], sd.Record)
+		histories[ev.Proc].add(sd.Record.Position, ev.Rev, sd.Record)
 	}
-
-	result := map[string]map[uint64]*logJournal{}
-	for proc, history := range histories {
-		result[proc] = map[uint64]*logJournal{}
-		for rev, records := range revData[proc] {
-			// Sort by position so forkOffset = records[0].Position is reliable.
-			sort.Slice(records, func(i, k int) bool { return records[i].Position < records[k].Position })
-			forkOffset := 0
-			if len(records) > 0 {
-				forkOffset = records[0].Position
-			}
-			j := newLogJournal(log, session, proc, rev, history, forkOffset, now)
-			j.records = append(j.records, records...)
-			result[proc][rev] = j
-		}
-		// A revision that forked but crashed before its first record still
-		// needs a journal view; restore synthesizes it from process state.
-	}
-	return result, histories, nil
+	return histories, nil
 }
