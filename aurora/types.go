@@ -13,6 +13,7 @@ import (
 // DTOs
 
 type Manifest = manifest.Manifest
+type Skill = manifest.Skill
 type Syscall = manifest.Syscall
 type SessionSummary = agent.SessionSummary
 type SessionSnapshot = agent.SessionSnapshot

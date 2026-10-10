@@ -29,9 +29,21 @@ func TestSysInputOmitsHistoryLabelsFromGuestPayload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
-	for _, needle := range []string{"labels", "untrusted_web", "credential:ONYX@abc"} {
+	for _, needle := range []string{"untrusted_web", "credential:ONYX@abc"} {
 		if bytes.Contains(result.Result(), []byte(needle)) {
 			t.Fatalf("SECURITY: %q reached the guest sys.input payload: %s", needle, result.Result())
+		}
+	}
+	// sys.declassify's schema names a "labels" argument, so look at the history only.
+	var payload struct {
+		History []map[string]json.RawMessage `json:"history"`
+	}
+	if err := json.Unmarshal(result.Result(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	for _, message := range payload.History {
+		if _, leaked := message["labels"]; leaked {
+			t.Fatalf("SECURITY: a history message carries labels: %s", result.Result())
 		}
 	}
 	// The taint still seeds the run host-side: the result carries the labels for
@@ -53,8 +65,8 @@ func TestCloneManifestDeepCopiesPointers(t *testing.T) {
 	}
 }
 
-// Declassify is grantable, opt-in per program: a bare grant validates; one that
-// carries settings or programs is refused.
+// An old manifest may still name sys.declassify: a bare grant validates; one
+// that carries settings is refused.
 func TestValidateManifestDeclassifyGrant(t *testing.T) {
 	if _, err := manifest.Validate(manifest.Manifest{
 		Version:  manifest.Version,
@@ -71,27 +83,17 @@ func TestValidateManifestDeclassifyGrant(t *testing.T) {
 	}
 }
 
-// The lifecycle admits sys.declassify to the grant set ONLY when the manifest
-// grants it — so the Validator accepts the call opt-in — and advertises it
-// (not hidden) so the model can discover and request it. The processor Declassifier
-// still gates every crossing on human approval, so this only makes the governed
-// path reachable; it does not let the guest self-lift.
-func TestLifecyclePublishesDeclassifyWhenGranted(t *testing.T) {
-	_, grantedTable := mustLifecycle(t, nopNext{}, "msg", nil,
-		manifest.Manifest{Syscalls: []manifest.Syscall{{Syscall: manifest.DeclassifySyscall}}}, 1, acceptAnswer)
-	cap, ok := grantedTable.Descriptor(manifest.DeclassifySyscall)
+func TestLifecyclePublishesDeclassifyByDefault(t *testing.T) {
+	_, table := mustLifecycle(t, nopNext{}, "msg", nil, manifest.Manifest{}, 1, acceptAnswer)
+	cap, ok := table.Descriptor(manifest.DeclassifySyscall)
 	if !ok {
-		t.Fatal("a manifest granting sys.declassify must advertise it in the grant set")
+		t.Fatal("sys.declassify must be in every process's grant set")
 	}
 	if cap.Hidden {
 		t.Fatal("sys.declassify should be visible so the model can request it")
 	}
 	if len(cap.InputSchema) == 0 {
 		t.Fatal("sys.declassify must carry an input schema for the Validator")
-	}
-	_, ungrantedTable := mustLifecycle(t, nopNext{}, "msg", nil, manifest.Manifest{}, 1, acceptAnswer)
-	if _, ok := ungrantedTable.Descriptor(manifest.DeclassifySyscall); ok {
-		t.Fatal("sys.declassify must not appear unless the manifest grants it (opt-in)")
 	}
 }
 

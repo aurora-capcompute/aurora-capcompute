@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/errs"
@@ -23,8 +24,7 @@ const Version = 4
 // name of a protocol call.
 const reservedSyscallPrefix = "sys."
 
-// The runtime-served syscalls a manifest may grant. A grant of sys.declassify
-// lets a program ask a human to lift labels from its taint.
+// The runtime serves these to every process. A grant only tunes sys.timer.
 const (
 	TimerSyscall      = sys.SyscallTimer
 	DeclassifySyscall = sys.SyscallDeclassify
@@ -46,6 +46,15 @@ type Manifest struct {
 	// runs. Unset shares the history.
 	History  *bool     `json:"history,omitempty"`
 	Syscalls []Syscall `json:"syscalls,omitempty"`
+	// Skills reach the program through sys.input. They grant nothing.
+	Skills []Skill `json:"skills,omitempty"`
+}
+
+// Skill tells the program how to use its grants for one kind of work.
+type Skill struct {
+	Name         string `json:"name"`
+	Description  string `json:"description,omitempty"`
+	Instructions string `json:"instructions,omitempty"`
 }
 
 // SharesHistory reports whether the process reads the session history.
@@ -151,6 +160,9 @@ func Validate(spec Manifest, validator ConfigValidator) (Manifest, error) {
 	if err := validateSyscalls(spec.Syscalls, validator); err != nil {
 		return Manifest{}, err
 	}
+	if err := validateSkills(spec.Skills); err != nil {
+		return Manifest{}, err
+	}
 	if spec.Program == "" {
 		return Manifest{}, fmt.Errorf("%w: a program is required", errs.Invalid)
 	}
@@ -199,6 +211,22 @@ func validateSyscalls(syscalls []Syscall, validator ConfigValidator) error {
 	return nil
 }
 
+func validateSkills(skills []Skill) error {
+	seen := make(map[string]struct{}, len(skills))
+	for i := range skills {
+		skill := &skills[i]
+		skill.Name = strings.TrimSpace(skill.Name)
+		if skill.Name == "" {
+			return fmt.Errorf("%w: skill %d: a name is required", errs.Invalid, i)
+		}
+		if _, exists := seen[skill.Name]; exists {
+			return fmt.Errorf("%w: duplicate skill %q", errs.Invalid, skill.Name)
+		}
+		seen[skill.Name] = struct{}{}
+	}
+	return nil
+}
+
 func normalizeTimerSettings(raw json.RawMessage) (json.RawMessage, error) {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return nil, nil
@@ -225,6 +253,7 @@ func (m Manifest) Clone() Manifest {
 		out.History = &history
 	}
 	out.Syscalls = cloneSyscalls(m.Syscalls)
+	out.Skills = slices.Clone(m.Skills)
 	return out
 }
 

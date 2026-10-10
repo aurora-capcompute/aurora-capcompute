@@ -57,7 +57,12 @@ read, _ := runtime.GetSession(sess.ID)                     // journals and tasks
   changed code. The runtime checks the input at `CreateProcess` and the answer
   at `sys.output`.
 - A **manifest** grants syscalls. The runtime reads only `syscall` and `hidden`
-  of each grant. Every other key is the driver's configuration.
+  of each grant. Every other key is the driver's configuration. The runtime
+  serves the `sys.*` family (`sys.timer` and `sys.declassify` included) to
+  every process with no grant.
+- A manifest's **skills** (`name`, `description`, `instructions`) tell the
+  program how to use its grants. The runtime passes them to the guest in
+  `sys.input`, beside the tool menu. They grant nothing.
 - A **dispatcher provider** builds the grant table for each process. The runtime
   refuses a table that offers more than the manifest granted.
 

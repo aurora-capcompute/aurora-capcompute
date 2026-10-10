@@ -65,7 +65,7 @@ lifecycle            sys.input / sys.output / sys.abort
 task                 a yield from below → a durable task
 Declassifier         sys.declassify (yields for approval)
 progress             sys.log
-timer                sys.timer (only when granted)
+timer                sys.timer
 capability.Dispatcher  routes (syscall, operation) to an entry; approval
 drivers              the application's capabilities
 ```
@@ -180,7 +180,9 @@ into a dispatch is the runtime's job.
 
 A manifest grant names a syscall and carries a configuration that only its
 driver reads. `Manifest.LeafSyscalls()` separates the grants the runtime serves
-itself (`sys.timer`, `sys.declassify`) from the grants a driver serves.
+itself (`sys.timer`, `sys.declassify`) from the grants a driver serves. The
+runtime serves the whole `sys.*` family to every process, so a manifest names
+`sys.timer` only to tune it (its maximum duration, or `hidden`).
 
 The assembly lists its driver registrations at compile time (in aurora-dist's
 `dist.New`). A driver that is not registered does not exist: there is no

@@ -16,8 +16,15 @@ import (
 	"context"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
 )
 
 func NewRuntime(ctx context.Context, config Config) (Runtime, error) {
 	return agent.NewRuntime(ctx, config)
+}
+
+// ValidateManifest checks a manifest as CreateProcess does and returns its
+// canonical form, so an assembly can refuse a bad manifest at boot.
+func ValidateManifest(spec Manifest, dispatchers DispatcherProvider) (Manifest, error) {
+	return manifest.Validate(spec, dispatchers)
 }

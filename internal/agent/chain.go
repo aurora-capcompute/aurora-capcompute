@@ -61,10 +61,13 @@ func (r *Runtime) newDispatcher(ctx context.Context, cred durable.ProcessContext
 		return nil, err
 	}
 	var chain sys.Dispatcher[durable.ProcessContext] = capability.NewDispatcher[durable.ProcessContext](table)
-	if grant, ok := spec.FindSyscall(manifest.TimerSyscall); ok {
-		if chain, err = newTimerDispatcher(chain, grant, table); err != nil {
-			return nil, err
-		}
+	// Every process gets sys.timer. A grant only tunes it.
+	timerGrant, ok := spec.FindSyscall(manifest.TimerSyscall)
+	if !ok {
+		timerGrant = manifest.Syscall{Syscall: manifest.TimerSyscall}
+	}
+	if chain, err = newTimerDispatcher(chain, timerGrant, table); err != nil {
+		return nil, err
 	}
 	if chain, err = newProgressDispatcher(chain, table); err != nil {
 		return nil, err

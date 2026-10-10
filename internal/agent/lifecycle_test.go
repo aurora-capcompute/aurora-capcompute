@@ -92,3 +92,22 @@ func mustLifecycle(t *testing.T, next sys.Dispatcher[durable.ProcessContext], in
 func (stubNext) Dispatch(context.Context, durable.ProcessContext, sys.Syscall, sys.Authorization) (sys.SyscallResult, error) {
 	return sys.Fail("unexpected"), nil
 }
+
+func TestSysInputCarriesSkills(t *testing.T) {
+	spec := manifest.Manifest{Skills: []manifest.Skill{
+		{Name: "status", Description: "check service status", Instructions: "Read the status page first."},
+	}}
+	l, _ := mustLifecycle(t, nopNext{}, "task", nil, spec, 1, acceptAnswer)
+	result, err := l.Dispatch(context.Background(), durable.ProcessContext{},
+		sys.Syscall{Abi: sys.ABIVersion, Name: sys.SyscallInput}, sys.Authorization{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload agentInput
+	if err := json.Unmarshal(result.Result(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Skills) != 1 || payload.Skills[0] != spec.Skills[0] {
+		t.Fatalf("skills = %+v, want the manifest's skills", payload.Skills)
+	}
+}

@@ -124,3 +124,31 @@ func TestValidateManifestValidatesTimerGrant(t *testing.T) {
 		t.Fatal("negative max_duration_ms accepted")
 	}
 }
+
+func TestValidateManifestChecksSkills(t *testing.T) {
+	spec, err := Validate(Manifest{
+		Version: Version,
+		Program: "program",
+		Skills:  []Skill{{Name: " status ", Instructions: "check the status page first"}},
+	}, &testNormalizer{})
+	if err != nil || spec.Skills[0].Name != "status" {
+		t.Fatalf("spec = %+v, err = %v", spec, err)
+	}
+	for name, skills := range map[string][]Skill{
+		"no name":   {{Instructions: "x"}},
+		"duplicate": {{Name: "a"}, {Name: "a"}},
+	} {
+		if _, err := Validate(Manifest{Version: Version, Program: "program", Skills: skills}, &testNormalizer{}); err == nil {
+			t.Fatalf("%s: skills %+v accepted", name, skills)
+		}
+	}
+}
+
+func TestCloneCopiesSkills(t *testing.T) {
+	original := Manifest{Skills: []Skill{{Name: "a"}}}
+	clone := original.Clone()
+	original.Skills[0].Name = "b"
+	if clone.Skills[0].Name != "a" {
+		t.Fatal("changing the original's skills changed the clone")
+	}
+}

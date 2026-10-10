@@ -69,10 +69,11 @@ func TestTimerFiresFromTheSweep(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
+	// No timer grant: every process gets sys.timer.
 	proc, err := runtime.CreateProcess(session.ID, "take a nap", manifest.Manifest{
 		Version:  manifest.Version,
 		Program:  "program@1",
-		Syscalls: cognitionGrants(manifest.TimerSyscall),
+		Syscalls: cognitionGrants(),
 	})
 	if err != nil {
 		t.Fatalf("create process: %v", err)

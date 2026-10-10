@@ -26,6 +26,7 @@ type lifecycleDispatcher struct {
 	table          *capability.Table
 	input          string
 	history        []HistoryMessage
+	skills         []manifest.Skill
 	attempt        int
 	validateAnswer func(string) error
 }
@@ -38,6 +39,7 @@ type agentInput struct {
 	// historyLabels), and a guest must never read them.
 	History      []guestHistoryMessage   `json:"history,omitempty"`
 	Capabilities []capability.Descriptor `json:"capabilities,omitempty"`
+	Skills       []manifest.Skill        `json:"skills,omitempty"`
 	// Attempt is which run of this process this is (1 = first). A retried
 	// process sees a higher attempt, so a program can change its approach.
 	Attempt int `json:"attempt,omitempty"`
@@ -78,25 +80,21 @@ func newLifecycleDispatcher(
 			return nil, err
 		}
 	}
-	// sys.declassify is opt-in per manifest. The Declassifier below serves it,
-	// but the grant must be in the table for the Validator to admit the call.
-	// It is on the menu, so the model can ask for it. A human approves every
-	// request, so the guest can only propose a lift.
-	if _, ok := spec.FindSyscall(manifest.DeclassifySyscall); ok {
-		err := table.Reserve(capability.Descriptor{
-			Name:        manifest.DeclassifySyscall,
-			Description: "Request to lift labels from this run's taint. Use it when flow policy refuses a call: give the labels that the refusal names, and the reason. A human must approve each request. The journal keeps the reason.",
-			InputSchema: monitor.DeclassifyInputSchema,
-		})
-		if err != nil {
-			return nil, err
-		}
+	// Every process may ask for a lift. A human approves each request.
+	err := table.Reserve(capability.Descriptor{
+		Name:        manifest.DeclassifySyscall,
+		Description: "Request to lift labels from this run's taint. Use it when flow policy refuses a call: give the labels that the refusal names, and the reason. A human must approve each request. The journal keeps the reason.",
+		InputSchema: monitor.DeclassifyInputSchema,
+	})
+	if err != nil {
+		return nil, err
 	}
 	return &lifecycleDispatcher{
 		next:           next,
 		table:          table,
 		input:          input,
 		history:        history,
+		skills:         spec.Skills,
 		attempt:        attempt,
 		validateAnswer: validateAnswer,
 	}, nil
@@ -109,6 +107,7 @@ func (l *lifecycleDispatcher) Dispatch(ctx context.Context, cred durable.Process
 			Input:        l.input,
 			History:      guestHistory(l.history),
 			Capabilities: visibleCapabilities(l.table.Descriptors()),
+			Skills:       l.skills,
 			Attempt:      l.attempt,
 		})
 		// The history carries what earlier runs observed. Stamping its labels on
