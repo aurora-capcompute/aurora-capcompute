@@ -1,11 +1,9 @@
 package agent
 
-// The sys.timer syscall, served by the runtime below the task layer: a valid
-// call yields, and the task layer above turns the yield into a durable task
-// the runtime's task sweep fires once the duration elapses — resuming the
-// process from the same point. The dispatcher is only ever invoked for the
-// initial yield; on resume the resolved task data is served by the task
-// layer without re-dispatching here.
+// sys.timer parks a process for a duration. The timer layer only yields: the
+// task layer above turns the yield into a durable task, and the task sweep
+// settles the task once the duration passes and wakes the process. On the next
+// run the task layer serves the fired timer, so this layer runs once per timer.
 
 import (
 	"context"

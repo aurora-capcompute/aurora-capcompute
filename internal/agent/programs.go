@@ -16,6 +16,10 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
+// processMemoryPages caps a guest's linear memory at 256 MiB, so no single
+// guest can walk the runtime toward the 4 GiB wasm ceiling.
+const processMemoryPages = 4096
+
 type ProgramID string
 
 func (p ProgramID) String() string { return string(p) }
@@ -205,4 +209,8 @@ func (r programRegistry) close(ctx context.Context) []error {
 		}
 	}
 	return failures
+}
+
+func (r *Runtime) Programs() []Program {
+	return r.programs.list()
 }

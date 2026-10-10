@@ -1,16 +1,12 @@
 package agent
 
-// Read projections: the *Locked helpers that fold in-memory session and process state
-// into the immutable snapshots the public API returns, plus the small pure
-// helpers (titles, visible capabilities, defensive copies) they lean on.
+// The read projections: in-memory state turned into the snapshots the API
+// returns (api.go). A snapshot is a copy: a caller cannot change runtime state
+// through it.
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"slices"
 	"time"
-
-	"github.com/aurora-capcompute/aurora-capcompute/capability"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 )
@@ -30,17 +26,6 @@ func (r *Runtime) sessionSummaryLocked(session *sessionState) SessionSummary {
 		ProcessCount:    len(session.processIDs),
 		ActiveProcessID: session.activeProcessID,
 		Tags:            durable.CloneTags(session.tags),
-	}
-}
-
-// storedSessionLocked builds the durable identity a session.state event carries.
-func (r *Runtime) storedSessionLocked(session *sessionState) durable.Session {
-	return durable.Session{
-		ID:        session.id,
-		Name:      session.name,
-		CreatedAt: session.createdAt,
-		UpdatedAt: session.updatedAt,
-		Tags:      durable.CloneTags(session.tags),
 	}
 }
 
@@ -129,63 +114,10 @@ func (r *Runtime) taskSnapshot(record durable.TaskRecord) TaskSnapshot {
 	}
 }
 
-func hasPendingTask(records []durable.TaskRecord) bool {
-	for _, record := range records {
-		if record.State == durable.TaskPending {
-			return true
-		}
-	}
-	return false
-}
-
 func copyTime(value *time.Time) *time.Time {
 	if value == nil {
 		return nil
 	}
 	dup := *value
 	return &dup
-}
-
-// visibleCapabilities drops capabilities marked Hidden (e.g. the LLM cognition
-// syscall and the runtime's protocol calls) from the program's discoverable
-// menu. Hidden is set at build time on each published capability, so it works
-// even when a driver's published operation names differ from its local name.
-func visibleCapabilities(caps []capability.Descriptor) []capability.Descriptor {
-	visible := make([]capability.Descriptor, 0, len(caps))
-	for _, c := range caps {
-		if !c.Hidden {
-			visible = append(visible, c)
-		}
-	}
-	return visible
-}
-
-func (r *Runtime) storedProcessLocked(proc *processState) durable.Process {
-	return durable.Process{
-		ID:            proc.id,
-		SessionID:     proc.sessionID,
-		Revision:      proc.revision,
-		Input:         proc.input,
-		Status:        proc.status,
-		Attempt:       proc.attempt,
-		CreatedAt:     proc.createdAt,
-		UpdatedAt:     proc.updatedAt,
-		StartedAt:     copyTime(proc.startedAt),
-		CompletedAt:   copyTime(proc.completedAt),
-		Answer:        proc.answer,
-		Error:         proc.err,
-		Manifest:      proc.manifest.Clone(),
-		ProgramDigest: proc.digest,
-		Labels:        append([]string(nil), proc.labels...),
-		ForkOffset:    proc.forkOffset,
-		AbortRetries:  proc.abortRetries,
-	}
-}
-
-func randomID(prefix string) (string, error) {
-	var raw [16]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		return "", err
-	}
-	return prefix + hex.EncodeToString(raw[:]), nil
 }

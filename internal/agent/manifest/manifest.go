@@ -1,8 +1,8 @@
 // Package manifest is the grant set: what a process may do, declared as data.
 //
-// The package interprets only the fields the runtime owns; a leaf grant's Config
-// is opaque here and checked by whoever serves that syscall, reached through the
-// one-method ConfigValidator.
+// It reads only the fields the runtime owns. A grant's driver configuration is
+// opaque here: the driver that serves the syscall checks it, through
+// ConfigValidator.
 package manifest
 
 import (
@@ -15,19 +15,16 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
+// Version is the manifest format this runtime reads.
 const Version = 4
 
-// reservedSyscallPrefix namespaces the processor/runtime syscalls. A manifest may
-// grant only the runtime-served members in it (sys.timer, sys.declassify); any
-// other sys.* leaf grant is refused so a driver cannot shadow a protocol call.
+// reservedSyscallPrefix is the runtime's own namespace. A manifest may grant
+// only TimerSyscall and DeclassifySyscall in it, so a driver cannot take the
+// name of a protocol call.
 const reservedSyscallPrefix = "sys."
 
-// The runtime-served syscalls a manifest may grant. Both live in the sys
-// namespace because they are the runtime's own, not leaf I/O drivers:
-// TimerSyscall yields the durable timer tasks, and DeclassifySyscall lets a
-// program request a taint lift (the only governed way out of a flow label):
-// granting it is opt-in per program, and every crossing still requires human
-// approval and is journaled — the guest can request, never self-lift.
+// The runtime-served syscalls a manifest may grant. A grant of sys.declassify
+// lets a program ask a human to lift labels from its taint.
 const (
 	TimerSyscall      = sys.SyscallTimer
 	DeclassifySyscall = sys.SyscallDeclassify
@@ -39,27 +36,32 @@ type TimerSettings struct {
 	MaxDurationMS int64 `json:"max_duration_ms,omitempty"`
 }
 
+// Manifest is one process's grant: the program it runs and the syscalls it may
+// call.
 type Manifest struct {
 	Version int    `json:"version,omitempty"`
 	Program string `json:"program,omitempty"`
-	// History, when false, isolates this program's process from session history:
-	// its sys.input omits the history, so it sees only its own input and inherits
-	// no taint from a prior run. Unset (the default) shares history — the
-	// runtime's standing behavior.
+	// History false keeps the session history out of this process: its
+	// sys.input carries no history, and it inherits no taint from earlier
+	// runs. Unset shares the history.
 	History  *bool     `json:"history,omitempty"`
 	Syscalls []Syscall `json:"syscalls,omitempty"`
 }
 
+// SharesHistory reports whether the process reads the session history.
 func (m Manifest) SharesHistory() bool { return m.History == nil || *m.History }
 
+// Syscall is one grant. In JSON it is a flat object: "syscall" names the
+// syscall, "hidden" keeps it off the guest's tool menu, and every other key is
+// the driver's configuration, kept in Config.
 type Syscall struct {
 	Syscall string
 	Hidden  bool
 	Config  json.RawMessage
 }
 
-// runtimeKeys are the grant fields the runtime owns; every other key of a grant
-// object is the family's Config.
+// runtimeKeys are the grant keys the runtime owns. Every other key belongs to
+// Config.
 var runtimeKeys = map[string]struct{}{"syscall": {}, "hidden": {}}
 
 func (s *Syscall) UnmarshalJSON(data []byte) error {
@@ -83,14 +85,9 @@ func (s *Syscall) UnmarshalJSON(data []byte) error {
 			rest[key] = value
 		}
 	}
+	s.Config = nil
 	if len(rest) > 0 {
-		config, err := json.Marshal(rest)
-		if err != nil {
-			return err
-		}
-		s.Config = config
-	} else {
-		s.Config = nil
+		s.Config, _ = json.Marshal(rest)
 	}
 	return nil
 }
@@ -109,10 +106,13 @@ func (s Syscall) MarshalJSON() ([]byte, error) {
 	return json.Marshal(out)
 }
 
+// runtimeServed reports whether the runtime serves this grant itself.
 func (s Syscall) runtimeServed() bool {
 	return s.Syscall == TimerSyscall || s.Syscall == DeclassifySyscall
 }
 
+// LeafSyscalls are the grants a driver serves: every grant the runtime does not
+// serve itself.
 func (m Manifest) LeafSyscalls() []Syscall {
 	out := make([]Syscall, 0, len(m.Syscalls))
 	for _, s := range m.Syscalls {
@@ -123,6 +123,7 @@ func (m Manifest) LeafSyscalls() []Syscall {
 	return out
 }
 
+// FindSyscall returns the grant of one syscall, if the manifest has it.
 func (m Manifest) FindSyscall(syscall string) (Syscall, bool) {
 	for _, s := range m.Syscalls {
 		if s.Syscall == syscall {
@@ -132,6 +133,8 @@ func (m Manifest) FindSyscall(syscall string) (Syscall, bool) {
 	return Syscall{}, false
 }
 
+// ConfigValidator checks a grant's driver configuration. The dispatcher
+// provider is one.
 type ConfigValidator interface {
 	ValidateConfig(syscall string, config json.RawMessage) error
 }

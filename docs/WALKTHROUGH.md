@@ -48,7 +48,7 @@ A failure is an errno that the guest can act on, not a crash.
 
 ## The chain
 
-Every layer is a `Dispatcher` that wraps another. `internal/agent/dispatcher.go`
+Every layer is a `Dispatcher` that wraps another. `internal/agent/chain.go`
 builds the chain for each quantum, and `monitor.Wrap` (`monitor/stack.go`) owns
 the part around the replay boundary. Outermost first:
 
@@ -267,9 +267,9 @@ What this does **not** guarantee:
 `internal/agent/eventlog` is an append-only log with one ordered stream per
 session and opaque payloads. All durable state is a fold of those streams:
 
-- sessions and processes (`restore.go`, `snapshots.go`).
-- tasks (`tasks.go`).
-- the journal views (`journalview.go`).
+- sessions and processes (`state.go`, `restore.go`, `snapshots.go`).
+- tasks (`taskstore.go`).
+- the journals (`journal.go`).
 
 No row store can drift, and a projection that changes shape needs no
 migration. `restore.go` folds every stream at boot. `durable/events.go` defines
@@ -317,15 +317,15 @@ them.
 | Question | File |
 |---|---|
 | the grants | `internal/agent/manifest/manifest.go` |
-| the table and routing | `capability/capability.go` |
+| the table and routing | `capability/table.go`, `capability/dispatcher.go` |
 | which drivers exist | aurora-dist `internal/dist/dist.go`, `provider.go` |
 | how a driver is built | aurora-dispatchers `internet/registration.go` |
-| the chain order | `internal/agent/dispatcher.go`, `monitor/stack.go` |
+| the chain order | `internal/agent/chain.go`, `monitor/stack.go` |
 | complete mediation | `monitor/validate.go` |
-| flow policy | `monitor/flow.go`, `monitor/provenance.go` |
+| flow policy | `monitor/flow.go`, `monitor/taints.go`, `monitor/declassify.go` |
 | replay | `replay/replay.go` |
 | the record format | `journaled/tape.go` |
-| abort and re-run | `internal/agent/abort.go` |
+| abort and re-run | `internal/agent/recovery.go` |
 | one quantum | `internal/agent/executor.go` |
 | restore after restart | `internal/agent/restore.go` |
 | scheduling | `internal/agent/pool.go` |

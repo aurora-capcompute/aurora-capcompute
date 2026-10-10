@@ -94,14 +94,20 @@ monitor/           Validator, flow labels, Declassifier, Wrap (the chain order)
 replay/            serve from the tape, or journal intent → run → completion
 journaled/         the tape over a journal; Verify
 sim/               crash-at-every-append simulation tests
-internal/agent/    the runtime
-  dispatcher.go    builds one process's chain
+internal/agent/    the runtime (runtime.go has the full file map)
+  runtime.go       Config, the Runtime, start and shutdown
+  sessions.go      the session API
+  processes.go     the process API: create, stop, retry
+  tasks.go         the task API and the sweep
   executor.go      one quantum
+  recovery.go      what follows an abort or a failure
+  chain.go         builds one process's chain
+  lifecycle.go     sys.input, sys.output, sys.abort
+  journal.go       the per-process journal over the event log
+  state.go         in-memory state and how it is logged
+  restore.go       rebuild state from the event streams
   pool.go          the worker pool
   programs.go      program compile, schemas, identity
-  lifecycle.go     sys.input, sys.output, sys.abort
-  abort.go         section re-run
-  restore.go       rebuild state from the event streams
   task/            the durable approval layer
   manifest/        the grant model
   eventlog/        the Log interface

@@ -1,5 +1,10 @@
 package agent
 
+// A process's journal lives in its session's event stream: each record is a
+// syscall.recorded event. processHistory holds every record of every revision
+// in memory. logJournal is one revision's view of it: the journaled.Journal the
+// replay tape reads and writes.
+
 import (
 	"cmp"
 	"context"
@@ -15,11 +20,9 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-// Capability-journal events. Each journal record (an intent or a completion)
-// is a syscall.recorded event carrying the record verbatim, stamped with the
-// revision that wrote it. The fork structure (which revision shared which
-// prefix) is fully derivable from the flat set of (position, revision) pairs —
-// no separate fork event is needed.
+// evSyscall is the event kind of a journal record. The record carries its
+// position and the revision that wrote it, so the fork structure follows from
+// the records alone: there is no fork event.
 const evSyscall = "syscall.recorded"
 
 type syscallRecordData struct {
@@ -133,12 +136,12 @@ func copyRecord(rec journaled.Record) journaled.Record {
 // view of its process's history. Positions before the revision's fork offset
 // hold an earlier revision's records, and the rest hold its own.
 type logJournal struct {
-	log     eventlog.Log
-	session string
-	proc    string
-	rev     uint64
-	now     func() time.Time
-	history *processHistory
+	log       eventlog.Log
+	sessionID string
+	processID string
+	revision  uint64
+	now       func() time.Time
+	history   *processHistory
 
 	mu     sync.Mutex
 	length int
@@ -146,15 +149,15 @@ type logJournal struct {
 
 func newLogJournal(
 	log eventlog.Log,
-	session string,
-	proc string,
-	rev uint64,
+	sessionID string,
+	processID string,
+	revision uint64,
 	history *processHistory,
 	length int,
 	now func() time.Time,
 ) *logJournal {
 	return &logJournal{
-		log: log, session: session, proc: proc, rev: rev,
+		log: log, sessionID: sessionID, processID: processID, revision: revision,
 		history: history, length: length,
 		now: now,
 	}
@@ -168,7 +171,7 @@ func (j *logJournal) Length() int {
 
 func (j *logJournal) Load(index int) (journaled.Record, error) {
 	if index < j.Length() {
-		if rec, ok := j.history.getAt(index, j.rev); ok {
+		if rec, ok := j.history.getAt(index, j.revision); ok {
 			return rec, nil
 		}
 	}
@@ -184,12 +187,12 @@ func (j *logJournal) Append(rec journaled.Record) error {
 	stored := copyRecord(rec)
 	// Stamp the attempt: this revision wrote the record. Records served from
 	// the shared prefix keep the revision that first wrote them.
-	stored.Revision = j.rev
-	ev, err := durable.EncodeEvent(evSyscall, j.proc, j.rev, j.now(), syscallRecordData{Record: stored})
+	stored.Revision = j.revision
+	ev, err := durable.EncodeEvent(evSyscall, j.processID, j.revision, j.now(), syscallRecordData{Record: stored})
 	if err != nil {
 		return err
 	}
-	if _, err := j.log.Append(context.Background(), j.session, ev); err != nil {
+	if _, err := j.log.Append(context.Background(), j.sessionID, ev); err != nil {
 		return err
 	}
 	// The record is in the history before the length admits it, so a Load

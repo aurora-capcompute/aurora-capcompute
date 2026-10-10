@@ -9,25 +9,18 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-// Flow is the information-flow cross-cut (the CaMeL reference monitor as a
-// runtime primitive). It owns exactly two pieces of state, neither durable:
-//
-//   - which labels each process has observed — the taint, rebuilt by replaying
-//     the journal on resume, never persisted in its own right;
-//   - what each operation permits — read from the process's grant table, which
-//     is rebuilt from the manifest at wiring time.
+// Flow is the information-flow monitor. It reads two things, neither of them
+// durable: the labels each process has observed (its taint, rebuilt by replay
+// on resume) and what each operation permits (the grant table).
 //
 // The guest is opaque, so flow is judged conservatively: every label a process
-// observes taints everything it later emits.
+// observes taints everything it emits later.
 //
-// One concern, two decorators, and the split is the replay boundary rather than
-// a design choice. Guard must sit above the tape: a denial is a decision that
-// has to re-derive identically on every pass, so it is never journaled. Stamp
-// must sit below it: labels are partly produced by the handlers themselves — an
-// internet fetch labels by which credential matched, a session's input by what
-// its predecessors read — so they cannot be re-derived from the index and must
-// be journaled with the completion record. Getting either on the wrong side
-// silently breaks a law, which is why Wrap assembles them and callers do not.
+// It has two decorators, on the two sides of the replay layer. Guard sits above:
+// a denial is derived again on every pass and never journaled. Stamp sits
+// below: some labels come from the handlers themselves (which credential an
+// internet fetch used, what a session's earlier runs read), so they cannot be
+// derived again and are journaled with the result.
 type Flow[K comparable] struct {
 	taints *Taints[K]
 	table  *capability.Table
@@ -55,6 +48,8 @@ type flowGuard[K comparable] struct {
 	next sys.Dispatcher[K]
 }
 
+// Dispatch refuses a call whose operation forbids a label the run holds, then
+// folds the result's labels into the run's taint.
 func (g *flowGuard[K]) Dispatch(ctx context.Context, cred K, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	switch syscall.Name {
 	case sys.SyscallBegin, sys.SyscallCommit:
@@ -93,6 +88,8 @@ type flowStamp[K comparable] struct {
 	next sys.Dispatcher[K]
 }
 
+// Dispatch stamps a result with its provenance: the syscall that produced it,
+// and the source classes its operation declares.
 func (s *flowStamp[K]) Dispatch(ctx context.Context, cred K, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	result, err := s.next.Dispatch(ctx, cred, syscall, auth)
 	if err != nil {
@@ -102,9 +99,6 @@ func (s *flowStamp[K]) Dispatch(ctx context.Context, cred K, syscall sys.Syscall
 	case sys.SyscallBegin, sys.SyscallCommit, sys.SyscallDeclassify:
 		return result, nil // control syscalls carry no data provenance
 	}
-	// The deriving syscall, plus the source classes the resolved operation
-	// declares: one HTTP template operation can label its results differently
-	// from another of the same grant.
 	labels := append([]string{capability.SyscallLabelPrefix + syscall.Name}, s.flow.table.Labels(syscall)...)
 	return result.WithLabels(labels...), nil
 }

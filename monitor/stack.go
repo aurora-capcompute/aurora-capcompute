@@ -1,3 +1,7 @@
+// Package monitor is the reference monitor around one process's dispatcher
+// chain: the Validator (is the call granted, are its arguments well formed),
+// the flow monitor (may this data flow there), and the Declassifier (the one
+// governed way to lift a label).
 package monitor
 
 import (
@@ -6,27 +10,18 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-// Wrap puts the processor's canonical monitor chain around one process's
-// layers, its tape and its grant table. The order is the load-bearing part, so
-// it lives in code instead of prose:
+// Wrap builds the monitor chain around one process's layers:
 //
 //	Validator → Flow.Guard → [replay] → Flow.Stamp → beneath
 //
-// Above the replay layer sit the pieces whose decisions must re-derive
-// deterministically on every pass and never enter the journal: validation and
-// flow denials replay identically from the same grant set and taint. Below
-// the replay layer sit the pieces whose outcomes must be journaled exactly
-// once and served from the tape thereafter: stamped labels, and everything
-// beneath — which is where the Declassifier belongs, under the layer that turns
-// its approval yield into a durable task. Assembling this by hand and getting
-// one layer on the wrong side silently breaks a law; Wrap cannot. That the flow
-// cross-cut appears twice is why it is one object with two decorators rather
-// than two types: the state they share is the same state, and only the journal
-// separates them.
+// The order is the point. Above the replay layer are the decisions that are
+// derived again on every pass and never journaled: validation and flow
+// denials. Below it are the outcomes that are journaled once and replayed after
+// that: the stamped labels and everything beneath. The Declassifier belongs
+// beneath, under the layer that turns its approval yield into a durable task.
 //
-// taints is shared across processes; the table is the one the layers beneath
-// were built from, so the monitor's view of an operation and the handler's are
-// identical.
+// taints is shared by every process. table is the one the layers beneath were
+// built from, so the monitor and the handlers see the same operations.
 func Wrap[K comparable](
 	taints *Taints[K],
 	tape replay.Tape,

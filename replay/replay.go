@@ -1,10 +1,7 @@
-// Package replay decorates a dispatcher so a re-run guest sees the same
-// results it saw the first time: each syscall is served from a Tape if already
-// recorded, otherwise journaled as an intent, delegated to the underlying
-// dispatcher, and journaled as a completion. It owns the replay-cursor
-// protocol (the Tape interface) and the divergence checks; it does not own
-// where the tape is stored — a concrete Tape such as the journaled package
-// supplies that.
+// Package replay makes a guest that runs again see the results it saw the first
+// time. A recorded syscall is served from a Tape. A new one is journaled as an
+// intent, run, and journaled as a completion. The journaled package supplies
+// the Tape that stores the records.
 package replay
 
 import (
@@ -54,6 +51,9 @@ func NewDispatcher[K any](tape Tape, next sys.Dispatcher[K]) *Dispatcher[K] {
 	return &Dispatcher[K]{tape: tape, next: next}
 }
 
+// Dispatch serves a recorded outcome, or journals the intent, runs the call,
+// and journals its completion. A yield leaves the intent open: the next quantum
+// meets it at the journal's tail and runs it again.
 func (d *Dispatcher[K]) Dispatch(ctx context.Context, cred K, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	result, replayed, err := d.tape.Next(syscall)
 	if replayed {
@@ -82,8 +82,6 @@ func (d *Dispatcher[K]) Dispatch(ctx context.Context, cred K, syscall sys.Syscal
 		return sys.SyscallResult{}, err
 	}
 	if result.Status() == sys.StatusYield {
-		// The intent stays open: the quantum ends here, and the next one meets
-		// the intent at the journal's tail and drives it again.
 		return result, nil
 	}
 	if err := d.tape.Commit(result); err != nil {

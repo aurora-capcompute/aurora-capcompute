@@ -10,11 +10,9 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-// progressDispatcher serves the sys.log syscall: a side-effect-free progress
-// report. It sits below the replay layer, so the report is journalled like any
-// other syscall — and that is the whole of its delivery: a watcher reads it off
-// the durable stream, there is nothing to push. It publishes its capability —
-// hidden — so the Validator's grant set covers it.
+// progressDispatcher serves sys.log, a progress report with no effect. It sits
+// below the replay layer, so the report is journaled, and that is how it is
+// delivered: a watcher reads it off the journal.
 type progressDispatcher struct {
 	next sys.Dispatcher[durable.ProcessContext]
 }
@@ -24,8 +22,6 @@ type progressArgs struct {
 }
 
 func newProgressDispatcher(next sys.Dispatcher[durable.ProcessContext], table *capability.Table) (*progressDispatcher, error) {
-	// Declared where it is built: the layer that serves sys.log is the layer that
-	// puts it in the grant set, so the two cannot come apart.
 	err := table.Reserve(capability.Descriptor{
 		Name:        sys.SyscallLog,
 		Description: "report a short progress message to the user while working",

@@ -99,11 +99,13 @@ func Table(effects *Effects) *capability.Table {
 	handler := driver{effects: effects}
 	add := func(name string, labels []string, hidden bool) {
 		family := capability.Family{
-			Hidden:  hidden,
 			Entries: []capability.Entry{{Key: capability.Key{Syscall: name}, Labels: labels, Handler: handler}},
 		}
 		if err := table.Add(family); err != nil {
 			panic(err)
+		}
+		if hidden {
+			table.Hide(name)
 		}
 	}
 	add("clock.now", nil, false)

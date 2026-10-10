@@ -183,18 +183,14 @@ func waitForTerminal(t *testing.T, runtime *Runtime, processID string) ProcessSn
 	return ProcessSnapshot{}
 }
 
-// tableOf indexes a test double's capabilities as single-operation families all
-// served by the double itself — the shape registry.Build produces for a real
-// assembly, without needing a registry. It exists because a provider now hands
-// back the grant table rather than a dispatcher: the routing, the grant set and
-// the flow policy all read from one index, so a test that wants a fake driver
-// has to say what that index contains.
+// tableOf indexes a test double's capabilities as single-operation families,
+// all served by the double itself — the shape registry.Build produces for a real
+// assembly.
 func tableOf(d sys.Dispatcher[durable.ProcessContext], publish ...capability.Descriptor) *capability.Table {
 	table := capability.NewTable()
 	for _, published := range publish {
 		family := capability.Family{
 			Description: published.Description,
-			Hidden:      published.Hidden,
 			Entries: []capability.Entry{{
 				Key:     capability.Key{Syscall: published.Name},
 				Input:   published.InputSchema,
@@ -203,6 +199,9 @@ func tableOf(d sys.Dispatcher[durable.ProcessContext], publish ...capability.Des
 		}
 		if err := table.Add(family); err != nil {
 			panic(err)
+		}
+		if published.Hidden {
+			table.Hide(published.Name)
 		}
 	}
 	return table

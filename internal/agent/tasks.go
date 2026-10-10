@@ -1,175 +1,117 @@
 package agent
 
+// The task API. A process that yields parks on a durable task: an approval a
+// human resolves, or a timer. The sweep settles tasks whose deadline passed,
+// and wakes every process whose task is settled.
+
 import (
-	"bytes"
 	"context"
-	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+	"log/slog"
 	"slices"
-	"sync"
 	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
-	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/eventlog"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/errs"
 )
 
-// eventTaskStore is the task layer's store (task.Store) over the append-only
-// event log. It keeps an in-memory projection, seeded from the log on restore,
-// and appends a task.created or task.resolved event for every mutation, so
-// durable task state lives only in the log.
-type eventTaskStore struct {
-	log eventlog.Log
-	now func() time.Time
-
-	mu      sync.Mutex
-	records map[string]durable.TaskRecord // keyed by task id
-}
-
-func newEventTaskStore(log eventlog.Log, now func() time.Time) *eventTaskStore {
-	return &eventTaskStore{log: log, now: now, records: make(map[string]durable.TaskRecord)}
-}
-
-// seed installs records folded from the log during restore.
-func (s *eventTaskStore) seed(records []durable.TaskRecord) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, record := range records {
-		s.records[record.ID] = cloneTaskRecord(record)
+// ResolveTask records a human's decision on a pending task, authenticated by
+// the task's token, and wakes the process parked on it.
+func (r *Runtime) ResolveTask(taskID, token string, resolution durable.TaskResolution) (TaskSnapshot, error) {
+	switch resolution.Decision {
+	case durable.TaskApproved, durable.TaskCompleted, durable.TaskFailed, durable.TaskDenied, durable.TaskCancelled:
+	default:
+		return TaskSnapshot{}, fmt.Errorf("%w: unsupported task decision %q", errs.Invalid, resolution.Decision)
 	}
+	if resolution.Decision == durable.TaskCompleted && !json.Valid(resolution.Data) {
+		return TaskSnapshot{}, fmt.Errorf("%w: completed task data must be valid JSON", errs.Invalid)
+	}
+	tokenHash := sha256.Sum256([]byte(token))
+	record, err := r.tasks.Resolve(context.Background(), taskID, tokenHash[:], resolution, r.now().UTC())
+	if err != nil {
+		return TaskSnapshot{}, err
+	}
+
+	// The resolution stands whether or not the wake works: a process that
+	// cannot run now (its program is not loaded) is woken by a later sweep.
+	if err := r.wake(record.Scope.ProcessID); err != nil {
+		slog.Warn("wake process after task resolution", "process_id", record.Scope.ProcessID, "task_id", record.ID, "error", err)
+	}
+	return r.taskSnapshot(record), nil
 }
 
-func (s *eventTaskStore) Find(_ context.Context, scope durable.ProcessContext, position int) (durable.TaskRecord, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, record := range s.records {
-		if record.Scope == scope && record.JournalPosition == position {
-			return cloneTaskRecord(record), true, nil
+// taskSweepInterval is how often the runtime settles due tasks and wakes the
+// processes parked on settled ones. A timer fires within this of its time.
+const taskSweepInterval = time.Second
+
+// sweepLoop sweeps once at start — deadlines can pass while the host is down —
+// and then on every interval, until the runtime closes.
+func (r *Runtime) sweepLoop() {
+	ticker := time.NewTicker(taskSweepInterval)
+	defer ticker.Stop()
+	for {
+		r.sweepTasks()
+		select {
+		case <-r.baseCtx.Done():
+			return
+		case <-ticker.C:
 		}
 	}
-	return durable.TaskRecord{}, false, nil
 }
 
-func (s *eventTaskStore) Create(ctx context.Context, record durable.TaskRecord) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, exists := s.records[record.ID]; exists {
-		return durable.ErrTaskConflict
-	}
-	if err := s.appendLocked(ctx, durable.TaskCreatedEvent, record); err != nil {
-		return err
-	}
-	s.records[record.ID] = cloneTaskRecord(record)
-	return nil
-}
-
-// List returns a process's tasks, oldest first.
-func (s *eventTaskStore) List(processID string) []durable.TaskRecord {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var out []durable.TaskRecord
-	for _, record := range s.records {
-		if record.Scope.ProcessID == processID {
-			out = append(out, cloneTaskRecord(record))
+// sweepTasks settles every pending task whose deadline passed (a timer fires,
+// an unanswered approval expires), then wakes every process parked on a task
+// that is no longer pending. Wakes are read from state, so one that fails is
+// tried again on the next sweep. The task store settles each task under its
+// lock, so a human and the sweep cannot both resolve it.
+func (r *Runtime) sweepTasks() {
+	now := r.now().UTC()
+	for _, taskID := range r.tasks.Due(now) {
+		if err := r.tasks.Settle(context.Background(), taskID, now); err != nil {
+			slog.Warn("settle task", "task_id", taskID, "error", err)
 		}
 	}
-	slices.SortFunc(out, func(a, b durable.TaskRecord) int { return a.CreatedAt.Compare(b.CreatedAt) })
-	return out
-}
-
-func (s *eventTaskStore) Resolve(ctx context.Context, taskID string, tokenHash []byte, resolution durable.TaskResolution, now time.Time) (durable.TaskRecord, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	record, ok := s.records[taskID]
-	switch {
-	case !ok:
-		return durable.TaskRecord{}, durable.ErrTaskNotFound
-	case !hmac.Equal(record.TokenHash, tokenHash):
-		return durable.TaskRecord{}, durable.ErrTaskUnauthorized
-	case record.State != durable.TaskPending:
-		// The same decision again returns the existing record. A different
-		// decision is a conflict.
-		if record.Resolution.Decision == resolution.Decision &&
-			bytes.Equal(record.Resolution.Data, resolution.Data) &&
-			record.Resolution.Reason == resolution.Reason {
-			return cloneTaskRecord(record), nil
-		}
-		return durable.TaskRecord{}, durable.ErrTaskConflict
-	case record.ExpiresAt != nil && !now.Before(*record.ExpiresAt):
-		return durable.TaskRecord{}, durable.ErrTaskGone
-	}
-	record.State = resolution.Decision
-	record.Resolution = resolution
-	record.ResolvedAt = &now
-	if err := s.appendLocked(ctx, durable.TaskResolvedEvent, record); err != nil {
-		return durable.TaskRecord{}, err
-	}
-	s.records[taskID] = cloneTaskRecord(record)
-	return cloneTaskRecord(record), nil
-}
-
-// Due lists the ids of the pending tasks whose deadline is at or before now.
-func (s *eventTaskStore) Due(now time.Time) []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var out []string
-	for _, record := range s.records {
-		if due(record, now) {
-			out = append(out, record.ID)
+	for _, processID := range r.parkedOnSettledTasks() {
+		if err := r.wake(processID); err != nil {
+			slog.Debug("wake process", "process_id", processID, "error", err)
 		}
 	}
-	return out
 }
 
-// Settle resolves one due task the way its deadline decides: a timer fires, and
-// anything else expires. A task that is no longer pending — a resolution got
-// there first — is left alone.
-func (s *eventTaskStore) Settle(ctx context.Context, taskID string, now time.Time) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	record := s.records[taskID]
-	if !due(record, now) {
+// parkedOnSettledTasks lists the processes waiting on a task that no longer
+// waits on anyone.
+func (r *Runtime) parkedOnSettledTasks() []string {
+	r.mu.Lock()
+	var waiting []string
+	for id, proc := range r.processes {
+		if proc.status == durable.ProcessWaitingTask {
+			waiting = append(waiting, id)
+		}
+	}
+	r.mu.Unlock()
+	var settled []string
+	for _, id := range waiting {
+		pending := slices.ContainsFunc(r.tasks.List(id), func(task durable.TaskRecord) bool {
+			return task.State == durable.TaskPending
+		})
+		if !pending {
+			settled = append(settled, id)
+		}
+	}
+	return settled
+}
+
+// wake resumes a process parked on a task. It leaves a process in any other
+// state alone, so the resolver and the sweep may both call it.
+func (r *Runtime) wake(processID string) error {
+	r.mu.Lock()
+	waiting := r.processes[processID].status == durable.ProcessWaitingTask
+	r.mu.Unlock()
+	if !waiting {
 		return nil
 	}
-	record.Resolution = durable.TaskResolution{Decision: durable.TaskExpired, Actor: "aurora", Reason: "no resolution before the task's deadline"}
-	if fired, ok := timerFired(record); ok {
-		record.Resolution = durable.TaskResolution{Decision: durable.TaskCompleted, Actor: "timer", Data: fired}
-	}
-	record.State = record.Resolution.Decision
-	record.ResolvedAt = &now
-	if err := s.appendLocked(ctx, durable.TaskResolvedEvent, record); err != nil {
-		return err
-	}
-	s.records[taskID] = cloneTaskRecord(record)
-	return nil
-}
-
-// appendLocked records one task event on the task's session stream.
-func (s *eventTaskStore) appendLocked(ctx context.Context, event func(time.Time, durable.TaskRecord) (eventlog.Event, error), record durable.TaskRecord) error {
-	ev, err := event(s.now().UTC(), record)
-	if err != nil {
-		return err
-	}
-	_, err = s.log.Append(ctx, record.Scope.SessionID, ev)
+	_, err := r.Retry(processID, RetryResume)
 	return err
-}
-
-// due reports whether a pending task's deadline has passed: a timer's fire
-// time, or an approval's expiry.
-func due(record durable.TaskRecord, now time.Time) bool {
-	if record.State != durable.TaskPending {
-		return false
-	}
-	if fireAt, ok := timerFireAt(record); ok {
-		return !now.Before(fireAt)
-	}
-	return record.ExpiresAt != nil && !now.Before(*record.ExpiresAt)
-}
-
-func cloneTaskRecord(record durable.TaskRecord) durable.TaskRecord {
-	clone := record
-	clone.Syscall = record.Syscall.Copy()
-	clone.TokenHash = append([]byte(nil), record.TokenHash...)
-	clone.Resolution.Data = append([]byte(nil), record.Resolution.Data...)
-	clone.ExpiresAt = copyTime(record.ExpiresAt)
-	clone.ResolvedAt = copyTime(record.ResolvedAt)
-	return clone
 }

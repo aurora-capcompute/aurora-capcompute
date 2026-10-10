@@ -1,15 +1,14 @@
-// Package journaled is a replay Tape backed by an append-only Journal of
-// intent/completion records: an intent is appended before a syscall executes
-// (journal-before-execute), a completion after its outcome is known and
-// before the guest observes it (journal-before-observe). It serves recorded
-// pairs in order, raises ReplayDivergedError when a re-run guest issues a
-// syscall that does not match the recorded sequence, and surfaces an intent
-// without completion as replay.OpenIntentError. It owns the on-tape record
-// format — a fixed envelope (position, kind, revision) plus an opaque
-// syscall/result payload; the Journal itself — where records durably live — is
-// supplied by the caller. Verify checks a journal's structure, not its
-// authenticity: the records are not chained, so a store that rewrites one is
-// not detected.
+// Package journaled is a replay Tape over an append-only Journal of
+// intent/completion records. An intent is appended before a syscall runs, and
+// its completion after the outcome is known but before the guest sees it.
+//
+// The Tape serves the recorded pairs in order. A guest that asks for a
+// different syscall than the record gets ReplayDivergedError. An intent with no
+// completion surfaces as replay.OpenIntentError.
+//
+// The caller supplies the Journal, the store the records live in. Verify checks
+// a journal's structure, not its authenticity: records are not chained, so a
+// store that rewrites one is not detected.
 package journaled
 
 import (
@@ -30,10 +29,8 @@ const (
 	KindCompletion Kind = "completion"
 )
 
-// Record is one journal entry: a fixed envelope — the store's index keys —
-// plus an opaque payload. A datum lives in the envelope or in the payload,
-// never both. Scope columns above the process (the session) belong to the
-// store that owns the Journal.
+// Record is one journal entry: an envelope (position, kind, revision) and a
+// payload, which is the syscall of an intent or the result of a completion.
 type Record struct {
 	// Envelope.
 	Position int  `json:"position"`
@@ -56,7 +53,8 @@ type Journal interface {
 	Length() int
 }
 
-// ReplayDivergedError means the guest requested a different syscall than history recorded.
+// ReplayDivergedError means the guest asked for a different syscall than the
+// journal recorded.
 type ReplayDivergedError struct {
 	Index int
 	Want  sys.Syscall
@@ -150,12 +148,10 @@ func (t *Tape) Commit(result sys.SyscallResult) error {
 }
 
 // Verify walks the whole journal and checks its structure: positions in
-// order, and alternating intent/completion with at most one open intent at the
-// tail. It returns CorruptJournalError at the first damage found.
+// order, and intent/completion pairs with at most one open intent at the tail.
+// An abandoned revision may leave its last intent open for good, and that is
+// legal history. Verify returns CorruptJournalError at the first damage.
 func Verify(journal Journal) error {
-	// Structure: intent/completion pairs, with at most one trailing open
-	// intent — an abandoned revision may leave its last intent open forever
-	// (the failing dispatch never completed), and that is legal history.
 	const (
 		wantIntent = iota
 		wantCompletion
@@ -193,6 +189,8 @@ func appendRecord(journal Journal, record Record) error {
 	return journal.Append(record)
 }
 
+// sameSyscall reports whether two syscalls have the same name and args, byte
+// for byte.
 func sameSyscall(left sys.Syscall, right sys.Syscall) bool {
 	return left.Name == right.Name && bytes.Equal(left.Args, right.Args)
 }

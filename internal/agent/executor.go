@@ -1,19 +1,28 @@
 package agent
 
+// One quantum of one process: run the guest on the pool, then record how the
+// run ended.
+
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/capcompute"
+	"github.com/aurora-capcompute/capcompute/sys"
 )
 
+// execute runs one quantum of a process and records how it ended. CreateProcess
+// and Retry start it in its own goroutine, counted in wg.
 func (r *Runtime) execute(processID string) {
 	defer r.wg.Done()
 
 	r.mu.Lock()
 	proc := r.processes[processID]
 	if proc.stopRequested {
+		// Stopped before the quantum started.
 		r.mu.Unlock()
 		r.finish(processID, durable.ProcessStopped, "", context.Canceled)
 		return
@@ -31,6 +40,8 @@ func (r *Runtime) execute(processID string) {
 		return
 	}
 
+	// The process runs. A Stop that arrived while the quantum queued stops it
+	// now. Later Stops find proc.stop.
 	r.mu.Lock()
 	now := r.now().UTC()
 	proc.stop = stop
@@ -48,11 +59,14 @@ func (r *Runtime) execute(processID string) {
 	r.mu.Lock()
 	proc.stop = nil
 	r.mu.Unlock()
+	r.recordOutcome(processID, result)
+}
+
+// recordOutcome turns how a quantum ended into the process's next state.
+func (r *Runtime) recordOutcome(processID string, result quantumResult) {
 	switch result.status {
 	case capcompute.ResumeCompleted:
 		if reason, aborted := r.guestAbort(processID); aborted {
-			// The guest ended with sys.abort: re-drive its open savepoint
-			// section instead of reading an answer.
 			r.retryAbortedSection(processID, reason)
 			return
 		}
@@ -63,8 +77,9 @@ func (r *Runtime) execute(processID string) {
 		}
 		r.finish(processID, durable.ProcessCompleted, answer, nil)
 	case capcompute.ResumeYielded:
-		// Only the task layer yields, so the process waits on a task. If the
-		// task was settled before this point, the sweep wakes the process.
+		// Only the task layer yields, so the process waits on a task. A task
+		// settled before this point is found by the next sweep, which wakes the
+		// process.
 		r.finish(processID, durable.ProcessWaitingTask, "", nil)
 	case capcompute.ResumeStopped:
 		r.mu.Lock()
@@ -72,19 +87,17 @@ func (r *Runtime) execute(processID string) {
 		r.mu.Unlock()
 		switch {
 		case closing:
-			// A closing host interrupts, never aborts: the restart resumes the
-			// open section mid-flight — a host restart must not touch effects.
+			// A shutdown interrupts: the next boot resumes the process where it
+			// stood.
 			r.finish(processID, durable.ProcessInterrupted, "", result.err)
 		case errors.Is(result.err, context.DeadlineExceeded):
-			// The quantum ran out of wall-clock. That is a bound on execution,
-			// not a verdict on the work: the guest may have been waiting on a
-			// third party that hung. So the process is interrupted — its journal
-			// stands, and a retry resumes from the last open savepoint.
+			// The quantum ran out of time. That bounds execution and says
+			// nothing about the work (the guest may have waited on a third party
+			// that hung), so the process is interrupted and a retry resumes it.
 			r.finish(processID, durable.ProcessInterrupted, "", result.err)
 		default:
-			// A stop walks away from the revision where it stands: its journal
-			// is the record of what ran, and a later retry resumes or restarts
-			// from there.
+			// A Stop. The journal records what ran, and a later retry resumes or
+			// restarts from there.
 			r.finish(processID, durable.ProcessStopped, "", result.err)
 		}
 	default:
@@ -130,14 +143,65 @@ func (r *Runtime) runQuantum(ctx context.Context, cred durable.ProcessContext, i
 	return quantumResult{status: result.Status, err: result.Err}
 }
 
+// A guest that completes says how it ended in its last journaled call:
+// sys.output with its answer, or sys.abort.
+
+// lastCall is the journal's last completed call: its syscall and its result.
+// The journal is intent/completion pairs, so an odd length ends in an open
+// intent and there is no last completed call.
+func (r *Runtime) lastCall(processID string) (sys.Syscall, sys.SyscallResult, bool) {
+	r.mu.Lock()
+	journal := r.processes[processID].journal
+	r.mu.Unlock()
+	length := journal.Length()
+	if length == 0 || length%2 != 0 {
+		return sys.Syscall{}, sys.SyscallResult{}, false
+	}
+	// Both positions are below the length, so both loads succeed.
+	intent, _ := journal.Load(length - 2)
+	completion, _ := journal.Load(length - 1)
+	return *intent.Syscall, *completion.Result, true
+}
+
+// guestAbort reports whether the guest ended with its own sys.abort, and the
+// reason it gave.
+func (r *Runtime) guestAbort(processID string) (string, bool) {
+	call, _, ok := r.lastCall(processID)
+	if !ok || call.Name != sys.SyscallAbort {
+		return "", false
+	}
+	var args abortArgs
+	_ = json.Unmarshal(call.Args, &args)
+	return args.Reason, true
+}
+
+// answerFromJournal reads a completed process's answer from its last call,
+// which must be a sys.output the output schema accepted: a guest that reports
+// completion without an accepted answer did not finish.
+func (r *Runtime) answerFromJournal(processID string) (string, error) {
+	call, result, ok := r.lastCall(processID)
+	switch {
+	case !ok || call.Name != sys.SyscallOutput:
+		return "", errors.New("agent did not finish: its last call was not sys.output")
+	case result.Status() != sys.StatusResult:
+		return "", errors.New("agent did not finish: the output schema rejected its final answer")
+	}
+	var args finishArgs
+	if err := json.Unmarshal(call.Args, &args); err != nil {
+		return "", fmt.Errorf("decode the final answer: %w", err)
+	}
+	return args.Answer, nil
+}
+
+// finish records how a process's run ended.
 func (r *Runtime) finish(processID string, status durable.ProcessStatus, answer string, err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	proc := r.processes[processID]
-	r.finishLocked(proc, status, answer, err)
-	_ = r.appendProcess(proc)
+	r.finishLocked(r.processes[processID], status, answer, err)
 }
 
+// finishLocked records how a process's run ended, and frees its session for the
+// next process unless the process only parked on a task. Call with r.mu held.
 func (r *Runtime) finishLocked(proc *processState, status durable.ProcessStatus, answer string, err error) {
 	now := r.now().UTC()
 	proc.status = status
@@ -145,19 +209,15 @@ func (r *Runtime) finishLocked(proc *processState, status durable.ProcessStatus,
 	proc.updatedAt = now
 	proc.completedAt = &now
 	proc.stop = nil
+	proc.err = ""
 	if err != nil {
 		proc.err = err.Error()
-	} else {
-		proc.err = ""
 	}
 	if isTerminal(status) {
-		// Snapshot the run's taint before releasing it, so the answer this process
-		// contributes to session history carries the run's provenance into any
-		// later run that reads it (closing the run-to-run laundering loophole).
+		// Keep the run's taint with the process before releasing it: its answer
+		// joins the session history, and a later run that reads the answer
+		// inherits the taint. A retry rebuilds the live taint by replay.
 		proc.labels = r.taints.Snapshot(proc.context())
-		// The process's taint state is scoped to its revision identity; release
-		// it when no further quantum can observe it. A parked process keeps its
-		// taint (resume must re-enforce flow policy over the same history).
 		r.taints.ForgetProcess(proc.context())
 	}
 	session := r.sessions[proc.sessionID]
@@ -165,4 +225,17 @@ func (r *Runtime) finishLocked(proc *processState, status durable.ProcessStatus,
 		session.activeProcessID = ""
 	}
 	session.updatedAt = now
+	_ = r.appendProcess(proc)
+}
+
+// isTerminal reports whether a status ends the process's activity: only a
+// retry runs it again. A process parked on a task is not terminal: the sweep
+// wakes it.
+func isTerminal(status durable.ProcessStatus) bool {
+	switch status {
+	case durable.ProcessCompleted, durable.ProcessFailed, durable.ProcessStopped, durable.ProcessInterrupted:
+		return true
+	default:
+		return false
+	}
 }
