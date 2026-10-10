@@ -25,6 +25,6 @@ func NewRuntime(ctx context.Context, config Config) (Runtime, error) {
 
 // ValidateManifest checks a manifest as CreateProcess does and returns its
 // canonical form, so an assembly can refuse a bad manifest at boot.
-func ValidateManifest(spec Manifest, dispatchers DispatcherProvider) (Manifest, error) {
-	return manifest.Validate(spec, dispatchers)
+func ValidateManifest(spec Manifest, validator ConfigValidator) (Manifest, error) {
+	return manifest.Validate(spec, validator)
 }
