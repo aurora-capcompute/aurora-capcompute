@@ -5,9 +5,9 @@
 // means: its cases, how a call names its case, which labels its results carry,
 // which labels may not flow into it, and what performs it.
 //
-// One Table answers all of those questions. The routing dispatcher below the
-// journal and the flow monitor above it resolve a call through the same Table,
-// so a call cannot be one case to the monitor and another case to the handler.
+// One Table answers all of those questions. The routing dispatcher and the
+// flow monitor resolve a call through the same Table, so a call cannot be one
+// case to the monitor and another case to the handler.
 //
 // The files: capability.go is the vocabulary (Key, Entry, Family, Descriptor),
 // table.go the index and its queries, dispatcher.go the routing dispatcher and
@@ -65,8 +65,10 @@ type Entry struct {
 	// Input is the JSON Schema of this operation's arguments.
 	Input json.RawMessage
 	// Labels are the source classes this operation's results carry. Forbid are
-	// the labels that may not flow into its arguments. The flow monitor enforces
-	// both. A bar that covers a whole syscall is written on each of its entries.
+	// the labels that may not flow into its arguments without a human's
+	// approval: the flow monitor stamps the labels, and the routing dispatcher
+	// asks for the approval. A bar that covers a whole syscall is written on
+	// each of its entries.
 	Labels []string
 	Forbid []string
 	// RequireApproval parks the call until a human resolves it.

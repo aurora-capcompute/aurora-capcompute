@@ -11,44 +11,32 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-// stackDriver is the leaf: it counts its calls so the test can prove replay
+// stackDriver is the handler: it counts its calls so the test can prove replay
 // serves recorded results without reaching it.
 type stackDriver struct {
 	calls int
 }
 
-func (d *stackDriver) Dispatch(_ context.Context, _ testCred, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
+func (d *stackDriver) DispatchCall(_ context.Context, call sys.Syscall) (sys.SyscallResult, error) {
 	d.calls++
-	return sys.Result(json.RawMessage(`{"from":"` + syscall.Name + `"}`)), nil
+	return sys.Result(json.RawMessage(`{"from":"` + call.Name + `"}`)), nil
 }
-
-// stackTable is the grant index this chain is assembled around: the same one the
-// flow layer reads its policy from and the Validator admits against.
-var stackTable = func() *capability.Table {
-	table := capability.NewTable()
-	for _, family := range []capability.Family{
-		single("internet.read", []string{"untrusted_web"}, nil, echo),
-		single("k8s.delete", nil, []string{"untrusted_web"}, echo),
-		single("mail.send", nil, nil, echo),
-	} {
-		if err := table.Add(family); err != nil {
-			panic(err)
-		}
-	}
-	return table
-}()
 
 // Wrap's reason to exist: each layer on its correct side of the replay
 // boundary. One test per load-bearing ordering property.
 func TestWrapEnforcesCanonicalOrder(t *testing.T) {
 	journal := newMemJournal()
 	driver := &stackDriver{}
+	// The grant index the chain is assembled around: the one the flow layer
+	// reads its policy from, the Validator admits against, and the routing
+	// dispatcher beneath resolves through.
+	table := flowTable(t, driver)
 
 	boot := func(t *testing.T) sys.Dispatcher[testCred] {
 		t.Helper()
 		tape := journaled.NewTape(journal)
 		// Fresh Taints per boot: a crash loses host memory.
-		return Wrap(NewTaints[testCred](), tape, stackTable, driver)
+		return Wrap(NewTaints[testCred](), tape, table, capability.NewDispatcher[testCred](table))
 	}
 
 	chain := boot(t)
@@ -69,20 +57,21 @@ func TestWrapEnforcesCanonicalOrder(t *testing.T) {
 		t.Fatalf("journaled completion = %+v (err %v), want untrusted_web label", completion, err)
 	}
 
-	// Flow.Guard above replay: the taint denies the protected capability…
-	if result := call(t, chain, "p1", "k8s.delete"); result.Errno() != sys.ErrnoDenied {
-		t.Fatalf("tainted k8s.delete = %#v, want denied", result)
+	// Flow.Track above replay: the taint parks the protected capability on a
+	// human's approval…
+	if result := call(t, chain, "p1", "k8s.delete"); result.Status() != sys.StatusYield {
+		t.Fatalf("tainted k8s.delete = %#v, want a yield for approval", result)
 	}
 	recordsBeforeCrash := journal.Length()
 
 	// …and a crash-rebooted host (fresh Taints, fresh tape, same journal)
-	// re-derives the same denial from replayed results alone, replaying
+	// re-derives the same taint from replayed results alone, replaying
 	// without re-executing anything.
 	driverCalls := driver.calls
 	rebooted := boot(t)
 	call(t, rebooted, "p1", "internet.read")
-	if result := call(t, rebooted, "p1", "k8s.delete"); result.Errno() != sys.ErrnoDenied {
-		t.Fatalf("post-crash k8s.delete = %#v, want denied (taint not rebuilt)", result)
+	if result := call(t, rebooted, "p1", "k8s.delete"); result.Status() != sys.StatusYield {
+		t.Fatalf("post-crash k8s.delete = %#v, want a yield (taint not rebuilt)", result)
 	}
 	if driver.calls != driverCalls {
 		t.Fatal("replay re-executed a driver call")

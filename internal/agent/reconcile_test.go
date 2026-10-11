@@ -86,27 +86,23 @@ func TestReconcileGrants(t *testing.T) {
 }
 
 // The reserved sys.* namespace belongs to the processor and runtime. A manifest may
-// grant only its runtime-served members (sys.timer, sys.declassify);
-// every other sys.* leaf grant is refused at validation, so a driver can never be
-// built for a name that would shadow a protocol call.
+// grant only its runtime-served member, sys.timer. Every other sys.* leaf grant
+// is refused at validation, so a driver can never be built for a name that would
+// shadow a protocol call. That includes sys.declassify, which the runtime no
+// longer serves: labels are never lifted.
 func TestManifestRejectsReservedSyscallNamespace(t *testing.T) {
 	provider := fixedProvider{}
-	for _, name := range []string{"sys.log", "sys.now", "sys.input", "sys.output", "sys.begin"} {
+	for _, name := range []string{"sys.log", "sys.now", "sys.input", "sys.output", "sys.begin", "sys.declassify"} {
 		_, err := manifest.Validate(manifest.Manifest{Version: manifest.Version, Syscalls: []manifest.Syscall{{Syscall: name}}}, provider)
 		if err == nil || !strings.Contains(err.Error(), "reserved") {
 			t.Fatalf("granting %q: err = %v, want a reserved-namespace rejection", name, err)
 		}
 	}
 
-	// The two runtime-served members remain grantable.
+	// The runtime-served member remains grantable.
 	if _, err := manifest.Validate(manifest.Manifest{Version: manifest.Version, Program: "parent", Syscalls: []manifest.Syscall{
 		{Syscall: manifest.TimerSyscall},
 	}}, provider); err != nil {
 		t.Fatalf("sys.timer grant rejected: %v", err)
-	}
-	if _, err := manifest.Validate(manifest.Manifest{Version: manifest.Version, Program: "parent", Syscalls: []manifest.Syscall{
-		{Syscall: manifest.DeclassifySyscall},
-	}}, provider); err != nil {
-		t.Fatalf("sys.declassify grant rejected: %v", err)
 	}
 }

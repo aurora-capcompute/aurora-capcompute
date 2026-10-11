@@ -14,47 +14,59 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-// declassifyDispatchers serve one labelled source and an LLM that reads it,
-// asks to lift its label, and then finishes.
-type declassifyDispatchers struct{}
+// flowDispatchers serve a labeled source, a sink that forbids its label, and an
+// LLM that reads the source, sends what it read, and then finishes.
+type flowDispatchers struct{}
 
-func (declassifyDispatchers) ValidateConfig(string, json.RawMessage) error { return nil }
+func (flowDispatchers) ValidateConfig(string, json.RawMessage) error { return nil }
 
-func (declassifyDispatchers) NewDispatcher(context.Context, durable.ProcessContext, manifest.Manifest) (*capability.Table, error) {
-	table := tableOf(declassifyLLM{}, llmCapability())
+func (flowDispatchers) NewDispatcher(context.Context, durable.ProcessContext, manifest.Manifest) (*capability.Table, error) {
+	table := tableOf(flowLLM{}, llmCapability())
 	err := table.Add(capability.Family{Entries: []capability.Entry{{
 		Key:     capability.Key{Syscall: "tool.read"},
 		Input:   json.RawMessage(`{"type":"object"}`),
 		Labels:  []string{"secret"},
-		Handler: dispatchAsHandler{declassifyLLM{}},
+		Handler: dispatchAsHandler{flowLLM{}},
+	}}})
+	if err != nil {
+		return nil, err
+	}
+	err = table.Add(capability.Family{Entries: []capability.Entry{{
+		Key:     capability.Key{Syscall: "tool.send"},
+		Input:   json.RawMessage(`{"type":"object"}`),
+		Forbid:  []string{"secret"},
+		Handler: dispatchAsHandler{flowLLM{}},
 	}}})
 	return table, err
 }
 
-type declassifyLLM struct{}
+type flowLLM struct{}
 
-func (declassifyLLM) Dispatch(_ context.Context, _ durable.ProcessContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
-	if syscall.Name == "tool.read" {
+func (flowLLM) Dispatch(_ context.Context, _ durable.ProcessContext, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
+	switch syscall.Name {
+	case "tool.read":
 		return sys.Result(json.RawMessage(`{"page":"the launch date"}`)), nil
+	case "tool.send":
+		return sys.Result(json.RawMessage(`{"receipt":"delivered-42"}`)), nil
 	}
 	conversation := string(syscall.Args)
 	switch {
-	case strings.Contains(conversation, "declassified"):
+	case strings.Contains(conversation, "delivered-42"):
 		return chatActions(`{"actions":[{"action":"final","content":{"answer":"published"}}]}`), nil
 	case strings.Contains(conversation, "the launch date"):
-		return chatActions(`{"actions":[{"action":"sys.declassify","content":{"labels":["secret"],"reason":"the date is public now"}}]}`), nil
+		return chatActions(`{"actions":[{"action":"tool.send","content":{"text":"the launch date"}}]}`), nil
 	default:
 		return chatActions(`{"actions":[{"action":"tool.read","content":{}}]}`), nil
 	}
 }
 
-// A declassification is a human decision like any approval: the guest's
-// request parks the process on a durable task, approving the task lifts the
-// label from the run's taint, and the process carries on.
-func TestDeclassifyParksOnATaskAndLiftsTheLabel(t *testing.T) {
+// A call that could carry labeled data out of the run parks the process on a
+// durable task, like any approval. The task names the data and the call that
+// produced it. Approving it runs that one call, and the run keeps its label.
+func TestTaintedCallParksOnATaskAndKeepsTheLabel(t *testing.T) {
 	runtime, err := NewRuntime(context.Background(), Config{
 		Programs:    []ProgramData{testProgram("program@1", buildProgram(t))},
-		Dispatchers: declassifyDispatchers{},
+		Dispatchers: flowDispatchers{},
 		Log:         newMemLog(),
 		TaskSecret:  []byte("stable-secret"),
 	})
@@ -73,7 +85,7 @@ func TestDeclassifyParksOnATaskAndLiftsTheLabel(t *testing.T) {
 	proc, err := runtime.CreateProcess(session.ID, "publish the date", manifest.Manifest{
 		Version:  manifest.Version,
 		Program:  "program@1",
-		Syscalls: cognitionGrants("tool.read", manifest.DeclassifySyscall),
+		Syscalls: cognitionGrants("tool.read", "tool.send"),
 	})
 	if err != nil {
 		t.Fatalf("create process: %v", err)
@@ -81,8 +93,13 @@ func TestDeclassifyParksOnATaskAndLiftsTheLabel(t *testing.T) {
 
 	waitForStatus(t, runtime, proc.ID, durable.ProcessWaitingTask)
 	tasks := processLog(t, runtime, proc.ID).Tasks
-	if len(tasks) != 1 || tasks[0].Syscall.Name != manifest.DeclassifySyscall {
-		t.Fatalf("tasks = %+v, want one sys.declassify task", tasks)
+	if len(tasks) != 1 || tasks[0].Syscall.Name != "tool.send" {
+		t.Fatalf("tasks = %+v, want one tool.send task", tasks)
+	}
+	for _, want := range []string{"labeled secret", "secret came from:\n- tool.read"} {
+		if !strings.Contains(tasks[0].Summary, want) {
+			t.Fatalf("task summary %q does not show %q", tasks[0].Summary, want)
+		}
 	}
 	if _, err := runtime.ResolveTask(tasks[0].ID, tasks[0].ResolutionToken, durable.TaskResolution{
 		Decision: durable.TaskApproved,
@@ -95,7 +112,7 @@ func TestDeclassifyParksOnATaskAndLiftsTheLabel(t *testing.T) {
 	if done.Answer != "published" {
 		t.Fatalf("answer = %q", done.Answer)
 	}
-	if slices.Contains(done.Labels, "secret") {
-		t.Fatalf("labels = %v: the approved declassification did not lift secret", done.Labels)
+	if !slices.Contains(done.Labels, "secret") {
+		t.Fatalf("labels = %v: the approval lifted secret from the run", done.Labels)
 	}
 }

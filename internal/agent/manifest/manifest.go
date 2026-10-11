@@ -20,15 +20,11 @@ import (
 const Version = 4
 
 // reservedSyscallPrefix is the runtime's own namespace. A manifest may grant
-// only TimerSyscall and DeclassifySyscall in it, so a driver cannot take the
-// name of a protocol call.
+// only TimerSyscall in it, so a driver cannot take the name of a protocol call.
 const reservedSyscallPrefix = "sys."
 
-// The runtime serves these to every process. A grant only tunes sys.timer.
-const (
-	TimerSyscall      = sys.SyscallTimer
-	DeclassifySyscall = sys.SyscallDeclassify
-)
+// TimerSyscall is served by the runtime to every process. A grant only tunes it.
+const TimerSyscall = sys.SyscallTimer
 
 // TimerSettings is the Config shape of a sys.timer grant.
 type TimerSettings struct {
@@ -117,7 +113,7 @@ func (s Syscall) MarshalJSON() ([]byte, error) {
 
 // runtimeServed reports whether the runtime serves this grant itself.
 func (s Syscall) runtimeServed() bool {
-	return s.Syscall == TimerSyscall || s.Syscall == DeclassifySyscall
+	return s.Syscall == TimerSyscall
 }
 
 // LeafSyscalls are the grants a driver serves: every grant the runtime does not
@@ -194,11 +190,6 @@ func validateSyscalls(syscalls []Syscall, validator ConfigValidator) error {
 				return fmt.Errorf("%w: sys.timer settings: %v", errs.Invalid, err)
 			}
 			syscall.Config = normalized
-		case DeclassifySyscall:
-			if len(bytes.TrimSpace(syscall.Config)) > 0 {
-				return fmt.Errorf("%w: %s takes no settings", errs.Invalid, DeclassifySyscall)
-			}
-			syscall.Config = nil
 		default:
 			if err := validator.ValidateConfig(syscall.Syscall, syscall.Config); err != nil {
 				return fmt.Errorf("%w: syscall %q config: %v", errs.Invalid, syscall.Syscall, err)

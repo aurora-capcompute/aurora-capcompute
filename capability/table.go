@@ -72,7 +72,7 @@ func (t *Table) Add(family Family) error {
 }
 
 // Reserve admits a syscall that a layer above the routing dispatcher serves
-// (sys.now, sys.log, sys.declassify: the runtime's own protocol). A reserved
+// (sys.now, sys.log, sys.timer: the runtime's own protocol). A reserved
 // name never resolves to an entry, so a layer that forgets to intercept its
 // syscall fails closed at the bottom of the chain.
 func (t *Table) Reserve(descriptor Descriptor) error {
@@ -213,34 +213,6 @@ type ArgsError struct {
 
 func (e *ArgsError) Error() string { return fmt.Sprintf("%s: %v", e.Syscall, e.Err) }
 func (e *ArgsError) Unwrap() error { return e.Err }
-
-// Forbidden returns the labels that may not flow into a call, and the name to
-// blame in a refusal. When the table cannot tell which operation a call is, it
-// returns the union of every operation's bar: an unreadable discriminator must
-// not be a way past the guard. An unserved syscall has no bar: it is about to be
-// denied.
-func (t *Table) Forbidden(call sys.Syscall) (forbid []string, sink string) {
-	if _, served := t.routes[call.Name]; !served {
-		return nil, call.Name
-	}
-	if entry, err := t.resolve(call); err == nil {
-		return entry.Forbid, entry.Key.String()
-	}
-	return t.strictest(call.Name), call.Name
-}
-
-// strictest is the union of every bar under one syscall.
-func (t *Table) strictest(syscall string) []string {
-	forbid := make(map[string]struct{})
-	for key, entry := range t.entries {
-		if key.Syscall == syscall {
-			for _, label := range entry.Forbid {
-				forbid[label] = struct{}{}
-			}
-		}
-	}
-	return slices.Sorted(maps.Keys(forbid))
-}
 
 // Labels returns the source classes a call's result carries. A call that
 // resolves to no operation gets none: it is about to fail, and no operation

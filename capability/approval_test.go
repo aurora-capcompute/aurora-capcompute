@@ -64,3 +64,41 @@ func TestApprovalPromptUsesTheEntrysRendering(t *testing.T) {
 		t.Fatalf("prompt = %q, want the entry's rendering in place of the arguments", prompt)
 	}
 }
+
+// A call whose operation forbids a label the run holds waits for a human, who
+// sees which labeled data the call could carry out and which calls produced it.
+// The approved call runs. A label the operation does not forbid asks nothing.
+func TestTaintedCallAsksForApproval(t *testing.T) {
+	egress := entry("core.internet", "method", "GET")
+	egress.Forbid = []string{"k8s_data"}
+	table := NewTable()
+	if err := table.Add(Family{Entries: []Entry{egress}}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	dispatcher := NewDispatcher[string](table)
+	call := sys.Syscall{Name: "core.internet", Args: json.RawMessage(`{"method":"GET","url":"https://example.com/?q=db-password"}`)}
+	logs := `core.command {"operation":"k8s-logs","params":{"pod":"api-0"}}`
+
+	tainted := WithTaint(context.Background(), Taint{"k8s_data": {logs}, "untrusted_web": {"core.internet"}})
+	result, err := dispatcher.Dispatch(tainted, "p1", call, sys.Authorization{})
+	if err != nil || result.Status() != sys.StatusYield {
+		t.Fatalf("dispatch = %#v, %v; want a yield for approval", result, err)
+	}
+	prompt := result.Message()
+	for _, want := range []string{"labeled k8s_data", "k8s_data came from:\n- " + logs, "https://example.com/?q=db-password"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt %q does not show %q", prompt, want)
+		}
+	}
+	if strings.Contains(prompt, "untrusted_web") {
+		t.Fatalf("prompt %q names a label the operation does not forbid", prompt)
+	}
+
+	if result, _ := dispatcher.Dispatch(tainted, "p1", call, sys.Authorization{Decision: sys.Approved}); result.Status() != sys.StatusResult {
+		t.Fatalf("approved call = %#v, want it to run", result)
+	}
+	webOnly := WithTaint(context.Background(), Taint{"untrusted_web": {"core.internet"}})
+	if result, _ := dispatcher.Dispatch(webOnly, "p1", call, sys.Authorization{}); result.Status() != sys.StatusResult {
+		t.Fatalf("call with an unforbidden label = %#v, want it to run", result)
+	}
+}

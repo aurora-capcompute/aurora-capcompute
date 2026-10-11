@@ -1,7 +1,6 @@
 // Package monitor is the reference monitor around one process's dispatcher
-// chain: the Validator (is the call granted, are its arguments well formed),
-// the flow monitor (may this data flow there), and the Declassifier (the one
-// governed way to lift a label).
+// chain: the Validator (is the call granted, are its arguments well formed) and
+// the flow monitor (which labels the run has observed, and from which calls).
 package monitor
 
 import (
@@ -12,13 +11,13 @@ import (
 
 // Wrap builds the monitor chain around one process's layers:
 //
-//	Validator → Flow.Guard → [replay] → Flow.Stamp → beneath
+//	Validator → Flow.Track → [replay] → Flow.Stamp → beneath
 //
-// The order is the point. Above the replay layer are the decisions that are
-// derived again on every pass and never journaled: validation and flow
-// denials. Below it are the outcomes that are journaled once and replayed after
-// that: the stamped labels and everything beneath. The Declassifier belongs
-// beneath, under the layer that turns its approval yield into a durable task.
+// The order is the point. Above the replay layer is what is derived again on
+// every pass and never journaled: validation, and the taint that results fold
+// into. Below it are the outcomes that are journaled once and replayed after
+// that: the stamped labels and everything beneath, including the approval a
+// tainted call waits for.
 //
 // taints is shared by every process. table is the one the layers beneath were
 // built from, so the monitor and the handlers see the same operations.
@@ -32,5 +31,5 @@ func Wrap[K comparable](
 	// Below the replay layer: journaled once, replayed thereafter.
 	journaled := replay.NewDispatcher(tape, flow.Stamp(beneath))
 	// Above the replay layer: re-derived on every pass, never journaled.
-	return NewValidator(table, flow.Guard(journaled))
+	return NewValidator(table, flow.Track(journaled))
 }

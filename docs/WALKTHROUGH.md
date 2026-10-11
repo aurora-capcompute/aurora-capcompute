@@ -53,8 +53,8 @@ builds the chain for each quantum, and `monitor.Wrap` (`monitor/stack.go`) owns
 the part around the replay boundary. Outermost first:
 
 ```
-Validator            grants + argument schemas       ┐ above replay: decided again
-Flow.Guard           taint vs. the entry's forbid set ┘ on every pass, never journaled
+Validator            grants + argument schemas       ┐ above replay: derived again
+Flow.Track           the taint, and where it came from ┘ on every pass, never journaled
 ──────────────────────────────────────────────────────── the replay boundary
 replay.Dispatcher    serve from the tape, or journal intent → run → completion
 ────────────────────────────────────────────────────────
@@ -63,18 +63,18 @@ savepoints           sys.begin / sys.commit          │ served from the tape af
 world                sys.now / sys.random            │
 lifecycle            sys.input / sys.output / sys.abort
 task                 a yield from below → a durable task
-Declassifier         sys.declassify (yields for approval)
 progress             sys.log
 timer                sys.timer
-capability.Dispatcher  routes (syscall, operation) to an entry; approval
+capability.Dispatcher  routes (syscall, operation) to an entry; approval,
+                     also for a call the taint would cross
 drivers              the application's capabilities
 ```
 
 ### Why the replay boundary is there
 
 Layers **above** replay must reach the same decision on every pass, and they
-never enter the journal. Validation and flow denials follow from the grant set
-and the current taint, so replay reaches the same verdict without a record.
+never enter the journal. Validation follows from the grant set, and the taint
+folds from the results, so replay reaches the same state without a record.
 Layers **below** replay produce facts: stamped labels, approvals, times. Those
 are journaled once and served from the tape after. A layer on the wrong side
 breaks a law without a visible error. `monitor.Wrap` exists so that nobody
@@ -85,10 +85,10 @@ builds this order by hand.
 - **`monitor.Validator`**: the name must be in the grant table (else `denied`),
   and the arguments must pass the entry's schema (else `invalid_args`). A
   refusal is a result. The guest sees an errno and continues.
-- **`monitor.Flow`**: one object with two decorators. `Flow.Guard` (above
-  replay) refuses a call whose entry forbids a label the process carries, and
-  adds every result's labels to the process's taint. The guest is opaque, so
-  the taint never shrinks, except by an approved `sys.declassify`.
+- **`monitor.Flow`**: one object with two decorators. `Flow.Track` (above
+  replay) hands the process's taint down with each call, and adds every
+  result's labels to it, with the call that produced them. The guest is
+  opaque, so the taint never shrinks.
 - **`replay.Dispatcher`**: if the tape has this syscall, it serves the recorded
   result and calls no driver. Else it appends an **intent**, dispatches, and
   appends a **completion** before it returns. That order is the two write-ahead
@@ -108,14 +108,13 @@ builds this order by hand.
   `sys.abort`.
 - **`task.Dispatcher`**: turns a yield from any layer below it into a durable
   task (see Trace 3).
-- **`monitor.Declassifier`**: serves `sys.declassify`. It yields for approval,
-  so the task layer parks it. The approved crossing is journaled, and
-  `Flow.Guard` lifts the labels when it sees it.
 - **progress, timer**: `sys.log` journals a progress line. `sys.timer` yields,
   and its task fires at its time.
 - **`capability.Dispatcher`**: reads the operation from the arguments and
   routes to the entry. An entry that requires approval yields here, with a
-  prompt that shows the call.
+  prompt that shows the call. So does a call whose entry forbids a label the
+  process carries: its prompt also names the labels and the calls that
+  produced them. The approval lets that one call through. The taint stays.
 
 The runtime's own syscalls (`sys.input`, `sys.output`, `sys.log`, `sys.abort`)
 pass the Validator like any other. They are hidden from the program's menu.
@@ -129,13 +128,12 @@ The guest calls `core.scratch` with operation `get`.
    decodes a `sys.Syscall` and calls this process's chain.
 2. **Validator**: is `core.scratch` granted, and do the arguments match the
    schema? If not, a `denied` or `invalid_args` result goes back. No driver runs.
-3. **Flow.Guard**: does the entry forbid a label that the process carries? If
-   yes, the call is refused here.
+3. **Flow.Track** attaches the process's taint to the call.
 4. **replay**: the tape has no record at this position, so it appends an intent.
 5. The call goes down through the protocol layers to the driver.
 6. **Flow.Stamp** labels the result.
 7. **replay** appends the completion, with the labels, and only then returns.
-8. **Flow.Guard** adds the labels to the process's taint.
+8. **Flow.Track** adds the labels to the process's taint.
 9. The guest receives the result.
 
 The guest never sees an outcome that is not durable: step 7 comes before step 9.
@@ -180,7 +178,7 @@ into a dispatch is the runtime's job.
 
 A manifest grant names a syscall and carries a configuration that only its
 driver reads. `Manifest.LeafSyscalls()` separates the grants the runtime serves
-itself (`sys.timer`, `sys.declassify`) from the grants a driver serves. The
+itself (`sys.timer`) from the grants a driver serves. The
 runtime serves the whole `sys.*` family to every process, so a manifest names
 `sys.timer` only to tune it (its maximum duration, or `hidden`).
 
@@ -324,7 +322,7 @@ them.
 | how a driver is built | aurora-dispatchers `internet/registration.go` |
 | the chain order | `internal/agent/chain.go`, `monitor/stack.go` |
 | complete mediation | `monitor/validate.go` |
-| flow policy | `monitor/flow.go`, `monitor/taints.go`, `monitor/declassify.go` |
+| flow policy | `monitor/flow.go`, `monitor/taints.go`, `capability/dispatcher.go` |
 | replay | `replay/replay.go` |
 | the record format | `journaled/tape.go` |
 | abort and re-run | `internal/agent/recovery.go` |

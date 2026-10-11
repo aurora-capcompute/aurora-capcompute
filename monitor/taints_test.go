@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
@@ -74,51 +75,42 @@ func TestStampRecordsDerivingCapabilityAndClasses(t *testing.T) {
 	}
 }
 
-func TestFlowGuardBlocksTaintedFlow(t *testing.T) {
+func TestTaintedCallWaitsForApproval(t *testing.T) {
 	flow, below := stamped(t, flowTable(t, echo), NewTaints[testCred]())
-	guarded := flow.Guard(below)
+	tracked := flow.Track(below)
 
-	// Before any taint the protected capability is callable.
-	if result := call(t, guarded, "p1", "k8s.delete"); result.Status() != sys.StatusResult {
+	// Before any taint the protected capability runs.
+	if result := call(t, tracked, "p1", "k8s.delete"); result.Status() != sys.StatusResult {
 		t.Fatalf("untainted k8s.delete = %#v, want result", result)
 	}
 
 	// Observing untrusted data taints the run…
-	call(t, guarded, "p1", "internet.read")
+	call(t, tracked, "p1", "internet.read")
 
-	// …so the protected capability is now refused…
-	result := call(t, guarded, "p1", "k8s.delete")
-	if result.Status() != sys.StatusFailed || result.Errno() != sys.ErrnoDenied {
-		t.Fatalf("tainted k8s.delete = %#v, want failed/denied", result)
+	// …so the protected capability now waits for a human, and the prompt says
+	// which data it could carry and where that data came from…
+	result := call(t, tracked, "p1", "k8s.delete")
+	if result.Status() != sys.StatusYield {
+		t.Fatalf("tainted k8s.delete = %#v, want a yield for approval", result)
+	}
+	for _, want := range []string{"untrusted_web", "internet.read"} {
+		if !strings.Contains(result.Message(), want) {
+			t.Fatalf("prompt %q does not name %q", result.Message(), want)
+		}
 	}
 
-	// …while unprotected capabilities still work…
-	if result := call(t, guarded, "p1", "mail.send"); result.Status() != sys.StatusResult {
+	// …while unprotected capabilities still run…
+	if result := call(t, tracked, "p1", "mail.send"); result.Status() != sys.StatusResult {
 		t.Fatalf("mail.send = %#v, want result", result)
 	}
 
 	// …and other runs are unaffected.
-	if result := call(t, guarded, "p2", "k8s.delete"); result.Status() != sys.StatusResult {
+	if result := call(t, tracked, "p2", "k8s.delete"); result.Status() != sys.StatusResult {
 		t.Fatalf("other run's k8s.delete = %#v, want result", result)
 	}
 }
 
-func TestFlowGuardDeclassify(t *testing.T) {
-	taints := NewTaints[testCred]()
-	flow, below := stamped(t, flowTable(t, echo), taints)
-	guarded := flow.Guard(below)
-	call(t, guarded, "p1", "internet.read")
-
-	if result := call(t, guarded, "p1", "k8s.delete"); result.Errno() != sys.ErrnoDenied {
-		t.Fatalf("expected denial before declassification, got %#v", result)
-	}
-	taints.Declassify(testCred{id: "p1"}, "untrusted_web")
-	if result := call(t, guarded, "p1", "k8s.delete"); result.Status() != sys.StatusResult {
-		t.Fatalf("declassified k8s.delete = %#v, want result", result)
-	}
-}
-
-// The full chain: Guard → replay → Stamp → drivers. Labels must land in the
+// The full chain: Track → replay → Stamp → drivers. Labels must land in the
 // journal, and a crash-restarted host must rebuild the run's taint from
 // replayed results alone.
 func TestFlowTaintSurvivesCrashReplay(t *testing.T) {
@@ -129,7 +121,7 @@ func TestFlowTaintSurvivesCrashReplay(t *testing.T) {
 		t.Helper()
 		tape := journaled.NewTape(journal)
 		flow, below := stamped(t, table, NewTaints[testCred]())
-		return flow.Guard(replay.NewDispatcher(tape, below))
+		return flow.Track(replay.NewDispatcher(tape, below))
 	}
 
 	first := newChain(t)
@@ -152,126 +144,76 @@ func TestFlowTaintSurvivesCrashReplay(t *testing.T) {
 		t.Fatalf("replayed labels = %v, want untrusted_web", replayed.Labels())
 	}
 	// …so the flow policy still holds after the crash.
-	result := call(t, crashed, "p1", "k8s.delete")
-	if result.Status() != sys.StatusFailed || result.Errno() != sys.ErrnoDenied {
-		t.Fatalf("post-crash k8s.delete = %#v, want failed/denied", result)
+	if result := call(t, crashed, "p1", "k8s.delete"); result.Status() != sys.StatusYield {
+		t.Fatalf("post-crash k8s.delete = %#v, want a yield for approval", result)
 	}
 }
 
-// The full declassification protocol: taint blocks a protected call; an
-// unapproved sys.declassify yields for a human; the approved crossing is
-// journaled; a crash-replay re-applies it without asking again.
-func TestDeclassifySyscallLifecycle(t *testing.T) {
+// An approval lets one tainted call through and lifts nothing: the run keeps its
+// labels, so the next such call asks again, and a crash-replay serves the
+// approved call from the journal without asking.
+func TestApprovedCallKeepsTheTaint(t *testing.T) {
 	journal := newMemJournal()
 	table := flowTable(t, echo)
-	newChain := func(t *testing.T) sys.Dispatcher[testCred] {
+	newChain := func(t *testing.T) (sys.Dispatcher[testCred], *Taints[testCred]) {
 		t.Helper()
-		tape := journaled.NewTape(journal)
-		flow := NewFlow(NewTaints[testCred](), table)
-		below := flow.Stamp(NewDeclassifier(capability.NewDispatcher[testCred](table)))
-		return flow.Guard(replay.NewDispatcher(tape, below))
+		taints := NewTaints[testCred]()
+		flow, below := stamped(t, table, taints)
+		return flow.Track(replay.NewDispatcher(journaled.NewTape(journal), below)), taints
 	}
-	declassify := sys.Syscall{
-		Abi:  sys.ABIVersion,
-		Name: sys.SyscallDeclassify,
-		Args: json.RawMessage(`{"labels":["untrusted_web"],"reason":"reviewed the fetched page"}`),
-	}
+	approved := sys.Authorization{Decision: sys.Approved, Actor: "alice"}
+	p1 := testCred{id: "p1"}
+	deleteCall := sys.Syscall{Abi: sys.ABIVersion, Name: "k8s.delete"}
 
-	chain := newChain(t)
+	chain, _ := newChain(t)
 	call(t, chain, "p1", "internet.read")
-	if result := call(t, chain, "p1", "k8s.delete"); result.Errno() != sys.ErrnoDenied {
-		t.Fatalf("expected taint denial, got %#v", result)
+	if result := call(t, chain, "p1", "k8s.delete"); result.Status() != sys.StatusYield {
+		t.Fatalf("tainted k8s.delete = %#v, want a yield for approval", result)
 	}
 
-	// Unapproved: a human task is created (yield); nothing is lifted.
-	result, err := chain.Dispatch(context.Background(), testCred{id: "p1"}, declassify, sys.Authorization{})
-	if err != nil {
-		t.Fatalf("declassify: %v", err)
-	}
-	if result.Status() != sys.StatusYield {
-		t.Fatalf("unapproved declassify = %#v, want yield", result)
-	}
-	if result := call(t, chain, "p1", "k8s.delete"); result.Errno() != sys.ErrnoDenied {
-		t.Fatalf("yielded declassify lifted taint early: %#v", result)
-	}
-
-	// The approval resolves and the run resumes in a new quantum: the guest
-	// re-runs from the start, replays internet.read from the journal, and
-	// re-issues the declassify — which meets its own open intent and now
-	// carries the resolved Authorization.
-	resumed := newChain(t)
+	// The human approves and the run resumes in a new quantum: the guest runs
+	// from the start, internet.read replays, and the parked call comes back
+	// with the approval.
+	resumed, taints := newChain(t)
 	call(t, resumed, "p1", "internet.read")
-	result, err = resumed.Dispatch(context.Background(), testCred{id: "p1"}, declassify,
-		sys.Authorization{Decision: sys.Approved, Actor: "alice"})
-	if err != nil {
-		t.Fatalf("approved declassify: %v", err)
+	result, err := resumed.Dispatch(context.Background(), p1, deleteCall, approved)
+	if err != nil || result.Status() != sys.StatusResult {
+		t.Fatalf("approved k8s.delete = %#v, %v; want result", result, err)
 	}
-	if result.Status() != sys.StatusResult {
-		t.Fatalf("approved declassify = %#v", result)
+	if !slices.Contains(taints.Snapshot(p1), "untrusted_web") {
+		t.Fatalf("taint after approval = %v: the approval lifted untrusted_web", taints.Snapshot(p1))
 	}
-	if result := call(t, resumed, "p1", "k8s.delete"); result.Status() != sys.StatusResult {
-		t.Fatalf("declassified k8s.delete = %#v, want result", result)
+	if result := call(t, resumed, "p1", "k8s.delete"); result.Status() != sys.StatusYield {
+		t.Fatalf("second k8s.delete = %#v, want a new yield: one approval covers one call", result)
 	}
 
-	// Crash-replay: a fresh host replays the journal. The declassification is
-	// served from the tape — zero Authorization, no new approval — and the
-	// taint removal re-applies in order.
-	crashed := newChain(t)
+	// Crash-replay: a fresh host serves the approved call from the journal, with
+	// no authorization and no new approval.
+	crashed, _ := newChain(t)
 	call(t, crashed, "p1", "internet.read")
-	if result := call(t, crashed, "p1", "k8s.delete"); result.Errno() != sys.ErrnoDenied {
-		t.Fatalf("replayed pre-crossing call escaped denial: %#v", result)
-	}
-	result, err = crashed.Dispatch(context.Background(), testCred{id: "p1"}, declassify, sys.Authorization{})
-	if err != nil {
-		t.Fatalf("replayed declassify: %v", err)
-	}
-	if result.Status() != sys.StatusResult {
-		t.Fatalf("replayed declassify = %#v, want the journaled result", result)
-	}
 	if result := call(t, crashed, "p1", "k8s.delete"); result.Status() != sys.StatusResult {
-		t.Fatalf("post-replay k8s.delete = %#v, want result", result)
+		t.Fatalf("replayed k8s.delete = %#v, want the journaled result", result)
 	}
 	if err := journaled.Verify(journal); err != nil {
 		t.Fatalf("verify: %v", err)
 	}
 }
 
-func TestDeclassifyValidatesRequest(t *testing.T) {
-	table := flowTable(t, echo)
-	declassifier := NewDeclassifier(capability.NewDispatcher[testCred](table))
-	for name, args := range map[string]string{
-		"no reason": `{"labels":["x"],"reason":"  "}`,
-		"bad json":  `{`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			result, err := declassifier.Dispatch(context.Background(), testCred{id: "p1"},
-				sys.Syscall{Abi: sys.ABIVersion, Name: sys.SyscallDeclassify, Args: json.RawMessage(args)},
-				sys.Authorization{Decision: sys.Approved})
-			if err != nil {
-				t.Fatalf("dispatch: %v", err)
-			}
-			if result.Status() != sys.StatusFailed || result.Errno() != sys.ErrnoInvalidArgs {
-				t.Fatalf("result = %#v, want failed/invalid_args", result)
-			}
-		})
-	}
-}
-
-func TestFlowGuardHandsTaintDownstream(t *testing.T) {
-	var seen []string
+func TestFlowTrackHandsTaintDownstream(t *testing.T) {
+	var seen capability.Taint
 	probe := capability.HandlerFunc(func(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error) {
 		if call.Name == "mail.send" {
-			seen = capability.Taint(ctx)
+			seen = capability.TaintFrom(ctx)
 		}
 		return sys.Result(nil), nil
 	})
 	flow, below := stamped(t, flowTable(t, probe), NewTaints[testCred]())
-	guarded := flow.Guard(below)
+	tracked := flow.Track(below)
 
-	call(t, guarded, "p1", "internet.read")
-	call(t, guarded, "p1", "mail.send")
-	if !slices.Contains(seen, "untrusted_web") {
-		t.Fatalf("downstream taint = %v, want untrusted_web", seen)
+	call(t, tracked, "p1", "internet.read")
+	call(t, tracked, "p1", "mail.send")
+	if sources := seen["untrusted_web"]; !slices.Equal(sources, []string{"internet.read"}) {
+		t.Fatalf("downstream taint = %v, want untrusted_web from internet.read", seen)
 	}
 }
 
@@ -315,7 +257,7 @@ func adtTable(t *testing.T) *capability.Table {
 func TestPerOperationFlowPolicy(t *testing.T) {
 	table := adtTable(t)
 	flow, below := stamped(t, table, NewTaints[testCred]())
-	chain := flow.Guard(below)
+	chain := flow.Track(below)
 
 	// A read stamps its own source class and taints the run.
 	result := adtCall(t, chain, "read")
@@ -323,24 +265,22 @@ func TestPerOperationFlowPolicy(t *testing.T) {
 		t.Fatalf("labels = %v, want the read's own source class", result.Labels())
 	}
 
-	// The write forbids what the read produced, so it is refused — while the
-	// read, which forbids nothing, still is not.
-	if blocked := adtCall(t, chain, "write"); blocked.Errno() != sys.ErrnoDenied {
-		t.Fatalf("errno = %v, want denied by the write's sink guard", blocked.Errno())
+	// The write forbids what the read produced, so it waits for a human —
+	// while the read, which forbids nothing, still runs.
+	if parked := adtCall(t, chain, "write"); parked.Status() != sys.StatusYield {
+		t.Fatalf("write = %#v, want a yield for approval", parked)
 	}
 	if again := adtCall(t, chain, "read"); again.Status() != sys.StatusResult {
 		t.Fatalf("read after taint = %v, want it still permitted", again.Status())
 	}
 }
 
-// An unresolvable case must not be a way past the sink guard. No single entry's
-// bar is the right one — the table cannot tell which case the call is — so it
-// answers with every case's, unioned. Here the write's bar applies to a call
-// that named no readable operation, even though the read declares none.
-func TestUnresolvableCaseTakesTheStrictestBar(t *testing.T) {
+// An unresolvable case must not be a way past the approval: the routing
+// dispatcher cannot tell which case the call is, so it runs none of them.
+func TestUnresolvableCaseNeverRuns(t *testing.T) {
 	table := adtTable(t)
 	flow, below := stamped(t, table, NewTaints[testCred]())
-	chain := flow.Guard(below)
+	chain := flow.Track(below)
 
 	adtCall(t, chain, "read") // taints the run with untrusted_file
 
@@ -348,12 +288,12 @@ func TestUnresolvableCaseTakesTheStrictestBar(t *testing.T) {
 		Abi:  sys.ABIVersion,
 		Name: "core.filesystem",
 		Args: json.RawMessage(`{"operation":42}`),
-	}, sys.Authorization{})
+	}, sys.Authorization{Decision: sys.Approved})
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
-	if result.Errno() != sys.ErrnoDenied {
-		t.Fatalf("errno = %v, want the strictest case's bar to deny a call whose case cannot be read", result.Errno())
+	if result.Errno() != sys.ErrnoInvalidArgs {
+		t.Fatalf("result = %#v, want invalid args: a call whose case cannot be read runs nothing", result)
 	}
 }
 

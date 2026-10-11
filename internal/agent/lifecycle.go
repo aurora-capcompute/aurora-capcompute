@@ -17,7 +17,6 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/durable"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent/manifest"
-	"github.com/aurora-capcompute/aurora-capcompute/monitor"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
@@ -79,15 +78,6 @@ func newLifecycleDispatcher(
 		if err := table.Reserve(descriptor); err != nil {
 			return nil, err
 		}
-	}
-	// Every process may ask for a lift. A human approves each request.
-	err := table.Reserve(capability.Descriptor{
-		Name:        manifest.DeclassifySyscall,
-		Description: "Request to lift labels from this run's taint. Use it when flow policy refuses a call: give the labels that the refusal names, and the reason. A human must approve each request. The journal keeps the reason.",
-		InputSchema: monitor.DeclassifyInputSchema,
-	})
-	if err != nil {
-		return nil, err
 	}
 	return &lifecycleDispatcher{
 		next:           next,

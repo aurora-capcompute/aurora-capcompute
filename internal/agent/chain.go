@@ -21,17 +21,17 @@ import (
 // passes the layers outermost first:
 //
 //	Validator     is the call granted, do its arguments match the schema
-//	Flow.Guard    may the run's taint flow into this call
+//	Flow.Track    hand the run's taint down, fold the result's labels into it
 //	replay        serve a recorded result, or journal the call and run it
 //	Flow.Stamp    label the result with its provenance
 //	savepoint     sys.begin, sys.commit                 (savepoint.go)
 //	world         sys.now, sys.random                   (world.go)
 //	lifecycle     sys.input, sys.output, sys.abort      (lifecycle.go)
 //	task          turn a yield from below into a durable task
-//	Declassifier  sys.declassify
 //	progress      sys.log                               (progress.go)
 //	timer         sys.timer                             (timer.go)
-//	drivers       the manifest's capabilities
+//	drivers       the manifest's capabilities; a call that needs a human's
+//	              approval yields here
 //
 // Everything below replay is journaled. The task layer sits below the protocol
 // layers, so the intent at the journal's tail is the call that yielded.
@@ -72,8 +72,6 @@ func (r *Runtime) newDispatcher(ctx context.Context, cred durable.ProcessContext
 	if chain, err = newProgressDispatcher(chain, table); err != nil {
 		return nil, err
 	}
-	// Beneath the task layer, so its approval yield becomes a durable task.
-	chain = monitor.NewDeclassifier(chain)
 	chain = &task.Dispatcher{
 		Next:        chain,
 		Store:       r.tasks,

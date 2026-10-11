@@ -96,7 +96,6 @@ var (
 // Constants
 
 const (
-	ManifestVersion   = manifest.Version
-	TimerSyscall      = manifest.TimerSyscall
-	DeclassifySyscall = manifest.DeclassifySyscall
+	ManifestVersion = manifest.Version
+	TimerSyscall    = manifest.TimerSyscall
 )

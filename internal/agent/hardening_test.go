@@ -34,7 +34,7 @@ func TestSysInputOmitsHistoryLabelsFromGuestPayload(t *testing.T) {
 			t.Fatalf("SECURITY: %q reached the guest sys.input payload: %s", needle, result.Result())
 		}
 	}
-	// sys.declassify's schema names a "labels" argument, so look at the history only.
+	// A capability's schema may name a "labels" argument, so look at the history only.
 	var payload struct {
 		History []map[string]json.RawMessage `json:"history"`
 	}
@@ -62,38 +62,6 @@ func TestCloneManifestDeepCopiesPointers(t *testing.T) {
 	*original.History = false
 	if !clone.SharesHistory() {
 		t.Fatal("mutating the original manifest's pointer changed the clone's setting")
-	}
-}
-
-// An old manifest may still name sys.declassify: a bare grant validates; one
-// that carries settings is refused.
-func TestValidateManifestDeclassifyGrant(t *testing.T) {
-	if _, err := manifest.Validate(manifest.Manifest{
-		Version:  manifest.Version,
-		Program:  "root",
-		Syscalls: []manifest.Syscall{{Syscall: manifest.DeclassifySyscall}},
-	}, &testDispatchers{}); err != nil {
-		t.Fatalf("a bare sys.declassify grant should validate: %v", err)
-	}
-	if _, err := manifest.Validate(manifest.Manifest{
-		Version:  manifest.Version,
-		Syscalls: []manifest.Syscall{{Syscall: manifest.DeclassifySyscall, Config: json.RawMessage(`{"x":1}`)}},
-	}, &testDispatchers{}); err == nil {
-		t.Fatal("sys.declassify with settings should be rejected")
-	}
-}
-
-func TestLifecyclePublishesDeclassifyByDefault(t *testing.T) {
-	_, table := mustLifecycle(t, nopNext{}, "msg", nil, manifest.Manifest{}, 1, acceptAnswer)
-	cap, ok := table.Descriptor(manifest.DeclassifySyscall)
-	if !ok {
-		t.Fatal("sys.declassify must be in every process's grant set")
-	}
-	if cap.Hidden {
-		t.Fatal("sys.declassify should be visible so the model can request it")
-	}
-	if len(cap.InputSchema) == 0 {
-		t.Fatal("sys.declassify must carry an input schema for the Validator")
 	}
 }
 

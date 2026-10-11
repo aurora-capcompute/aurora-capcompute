@@ -19,8 +19,9 @@ This repo is the library that the server is built from.
   `sys.abort`, or a failure inside an open section, runs the section again.
 - **Tasks:** an approval or a timer becomes a durable task. A sweep fires timers,
   expires old approvals, and wakes parked processes.
-- **The reference monitor:** grants, argument schemas, flow labels,
-  declassification.
+- **The reference monitor:** grants, argument schemas, and flow labels. Labels
+  are never lifted. A call that could carry labeled data out waits for a
+  human's approval.
 - **Scheduling:** a fixed worker pool with a deadline per quantum.
 
 There is no table of mutable rows. All durable state is a fold of one
@@ -58,8 +59,8 @@ read, _ := runtime.GetSession(sess.ID)                     // journals and tasks
   at `sys.output`.
 - A **manifest** grants syscalls. The runtime reads only `syscall` and `hidden`
   of each grant. Every other key is the driver's configuration. The runtime
-  serves the `sys.*` family (`sys.timer` and `sys.declassify` included) to
-  every process with no grant.
+  serves the `sys.*` family (`sys.timer` included) to every process with no
+  grant.
 - A manifest's **skills** (`name`, `description`, `instructions`) tell the
   program how to use its grants. The runtime passes them to the guest in
   `sys.input`, beside the tool menu. They grant nothing.
@@ -95,7 +96,7 @@ manifest version is 4.
 ```
 aurora/            the public API: NewRuntime, Runtime, re-exported types
 capability/        the grant table, routing, approval prompts
-monitor/           Validator, flow labels, Declassifier, Wrap (the chain order)
+monitor/           Validator, flow labels, Wrap (the chain order)
 replay/            serve from the tape, or journal intent → run → completion
 journaled/         the tape over a journal; Verify
 sim/               crash-at-every-append simulation tests
